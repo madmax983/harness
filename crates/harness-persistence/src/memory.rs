@@ -91,7 +91,7 @@ impl Repository for InMemoryRepository {
                 a.session_id == session_id
                     && matches!(
                         a.status,
-                        AgentStatus::Pending | AgentStatus::Starting | AgentStatus::Active
+                        AgentStatus::Starting | AgentStatus::Active
                     )
             })
             .cloned()
