@@ -1,3 +1,5 @@
 //! Persistence layer for Harness using GallifreyDB.
 
-pub fn placeholder() {}
+mod types;
+
+pub use types::{AgentId, ChannelId, MessageId, SessionId, TypeError};
