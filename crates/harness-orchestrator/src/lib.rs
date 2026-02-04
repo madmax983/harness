@@ -1,3 +1,5 @@
 //! Orchestrator for managing Claude processes.
 
-pub fn placeholder() {}
+mod config;
+
+pub use config::{McpServerConfig, OrchestratorConfig};
