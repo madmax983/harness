@@ -115,6 +115,12 @@ impl Default for SessionId {
     }
 }
 
+impl std::fmt::Display for SessionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Error type for type validation.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum TypeError {
