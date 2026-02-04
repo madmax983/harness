@@ -236,8 +236,16 @@ mod tests {
         let agent_id = agent.id;
         repo.create_agent(&agent).await.unwrap();
 
+        // Initially pending, not counted as active
+        assert_eq!(repo.count_active_agents(session.id).await.unwrap(), 0);
+
+        // Transition to Starting - now active
+        repo.update_agent_status(agent_id, AgentStatus::Starting)
+            .await
+            .unwrap();
         assert_eq!(repo.count_active_agents(session.id).await.unwrap(), 1);
 
+        // Kill the agent - no longer active
         repo.update_agent_status(agent_id, AgentStatus::Killed)
             .await
             .unwrap();
