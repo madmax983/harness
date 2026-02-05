@@ -12,3 +12,4 @@ thiserror.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 tracing.workspace = true
+parking_lot = "0.12.5"

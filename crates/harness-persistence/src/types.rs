@@ -13,6 +13,11 @@ impl AgentId {
         Self(Uuid::new_v4())
     }
 
+    /// Create an AgentId from an existing UUID.
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
+
     /// Get the inner UUID.
     pub fn as_uuid(&self) -> Uuid {
         self.0
@@ -81,6 +86,11 @@ impl MessageId {
         Self(Uuid::new_v4())
     }
 
+    /// Create a MessageId from an existing UUID.
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
+
     /// Get the inner UUID.
     pub fn as_uuid(&self) -> Uuid {
         self.0
@@ -101,6 +111,11 @@ impl SessionId {
     /// Create a new random session ID.
     pub fn new() -> Self {
         Self(Uuid::new_v4())
+    }
+
+    /// Create a SessionId from an existing UUID.
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        Self(uuid)
     }
 
     /// Get the inner UUID.
