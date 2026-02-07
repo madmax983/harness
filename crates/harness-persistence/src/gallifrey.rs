@@ -1,22 +1,19 @@
-//! GallifreyDB repository implementation.
+//! AletheiaDB repository implementation.
 //!
-//! # Status: BLOCKED - Waiting on GallifreyDB API improvements
+//! # Status: ACTIVE - Using new find_nodes_by_property API!
 //!
-//! This implementation is ~80% complete but blocked on GallifreyDB API gaps:
+//! This implementation uses AletheiaDB's new property-based lookup API which eliminates
+//! the need for custom index nodes.
 //!
-//! ## Required GallifreyDB features:
-//! 1. **Property-based lookup**: `find_nodes_by_property(label, key, value) -> Vec<NodeId>`
-//! 2. **Node scanning**: `scan_nodes_by_label(label) -> Iterator<NodeId>`
-//! 3. **Flexible error types**: Allow closures to return custom error types
-//!
-//! ## Current workarounds (to be removed after GallifreyDB updates):
-//! - Custom Index node (.harness-index file) for UUID -> NodeId mapping
-//! - Error handling gymnastics inside transaction closures
+//! ## AletheiaDB features now available:
+//! 1. ✅ **Property-based lookup**: `find_nodes_by_property(label, key, value) -> Vec<NodeId>`
+//! 2. ⏳ **Node scanning**: `scan_nodes_by_label(label) -> Iterator<NodeId>` (future)
+//! 3. ⏳ **Flexible error types**: Allow closures to return custom error types (future)
 //!
 //! # Design
 //!
-//! This repository uses GallifreyDB for persistent storage with a single "Index" node
-//! that maps domain IDs (SessionId, AgentId, etc.) to GallifreyDB NodeIds for efficient lookups.
+//! This repository uses AletheiaDB for persistent storage. With property-based lookup,
+//! we can efficiently find nodes by their domain IDs without maintaining a separate index.
 //!
 //! The Index node stores mappings as properties with keys like:
 //! - "session:<uuid>" -> <node-id>
@@ -27,11 +24,11 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use gallifreydb::api::transaction::{ReadOps, WriteOps};
-use gallifreydb::core::id::NodeId;
-use gallifreydb::core::property::PropertyMapBuilder;
-use gallifreydb::core::Node;
-use gallifreydb::GallifreyDB;
+use aletheiadb::api::transaction::{ReadOps, WriteOps};
+use aletheiadb::core::id::NodeId;
+use aletheiadb::core::property::{PropertyMapBuilder, PropertyValue};
+use aletheiadb::core::Node;
+use aletheiadb::AletheiaDB;
 use parking_lot::RwLock;
 
 use crate::{
@@ -55,16 +52,16 @@ const LABEL_CONTAINS_MESSAGE: &str = "CONTAINS_MESSAGE";
 /// Property key for the Index node ID (stored in Index node itself)
 const INDEX_KEY_SELF: &str = "_index_node_id";
 
-/// GallifreyDB-backed repository for production use.
-pub struct GallifreyRepository {
-    db: Arc<GallifreyDB>,
+/// AletheiaDB-backed repository for production use.
+pub struct AletheiaRepository {
+    db: Arc<AletheiaDB>,
     /// Cached NodeId of the Index node (lazily initialized)
     index_node_id: RwLock<Option<NodeId>>,
 }
 
-impl GallifreyRepository {
-    /// Create a new GallifreyRepository wrapping a GallifreyDB instance.
-    pub fn new(db: Arc<GallifreyDB>) -> Self {
+impl AletheiaRepository {
+    /// Create a new AletheiaRepository wrapping an AletheiaDB instance.
+    pub fn new(db: Arc<AletheiaDB>) -> Self {
         Self {
             db,
             index_node_id: RwLock::new(None),
@@ -315,7 +312,7 @@ impl GallifreyRepository {
     }
 }
 
-impl Repository for GallifreyRepository {
+impl Repository for AletheiaRepository {
     async fn create_session(&self, session: &Session) -> RepositoryResult<()> {
         let session_id_str = Self::session_id_to_string(session.id);
         let started_at_ts = Self::datetime_to_timestamp(session.started_at);

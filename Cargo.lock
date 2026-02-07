@@ -25,6 +25,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "aletheiadb"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "base64",
+ "bitcode",
+ "chrono",
+ "comfy-table",
+ "crc32fast",
+ "crossbeam-channel",
+ "crossterm 0.29.0",
+ "dashmap",
+ "memmap2",
+ "parking_lot",
+ "quick_cache",
+ "rayon",
+ "redb",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "thiserror",
+ "tokio",
+ "toml",
+ "usearch",
+ "zstd",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -828,36 +858,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gallifreydb"
-version = "0.1.0"
-dependencies = [
- "arc-swap",
- "async-trait",
- "base64",
- "bitcode",
- "chrono",
- "comfy-table",
- "crc32fast",
- "crossbeam-channel",
- "crossterm 0.29.0",
- "dashmap",
- "memmap2",
- "parking_lot",
- "quick_cache",
- "rayon",
- "redb",
- "rmcp",
- "serde",
- "serde_json",
- "smallvec",
- "thiserror",
- "tokio",
- "toml",
- "usearch",
- "zstd",
-]
-
-[[package]]
 name = "getrandom"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -955,8 +955,8 @@ dependencies = [
 name = "harness-persistence"
 version = "0.1.0"
 dependencies = [
+ "aletheiadb",
  "chrono",
- "gallifreydb",
  "parking_lot",
  "serde",
  "serde_json",
