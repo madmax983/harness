@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use harness_mcp::{start_mcp_server, HiveState};
 use harness_orchestrator::{McpServerConfig, OrchestratorConfig, ProcessManager};
 use harness_persistence::{AgentRole, InMemoryRepository, Repository, Session};
 use harness_tui::TuiRunner;
@@ -21,6 +22,10 @@ struct Args {
     prompt: Option<String>,
     /// MCP server port.
     port: u16,
+    /// Embedding model for semantic search (e.g., "nomic-embed-text").
+    embedding_model: Option<String>,
+    /// Ollama base URL (default: http://localhost:11434).
+    ollama_url: Option<String>,
 }
 
 impl Args {
@@ -31,6 +36,8 @@ impl Args {
             no_tui: false,
             prompt: None,
             port: 3000,
+            embedding_model: None,
+            ollama_url: None,
         };
 
         while let Some(arg) = args.next() {
@@ -49,12 +56,53 @@ impl Args {
                         result.port = p;
                     }
                 }
+                "--embedding-model" | "-e" => {
+                    result.embedding_model = args.next();
+                }
+                "--ollama-url" => {
+                    result.ollama_url = args.next();
+                }
                 _ => {}
             }
         }
 
         result
     }
+}
+
+/// Get the embedding dimensions for common Ollama models.
+fn ollama_model_dimensions(model: &str) -> usize {
+    match model {
+        "nomic-embed-text" => 768,
+        "mxbai-embed-large" => 1024,
+        "all-minilm" => 384,
+        "snowflake-arctic-embed" => 1024,
+        _ => {
+            tracing::warn!(
+                model = %model,
+                "Unknown model, defaulting to 768 dimensions. Use --embedding-dims to override."
+            );
+            768
+        }
+    }
+}
+
+/// Create an Ollama embedding service with the specified model.
+fn create_ollama_embedding_service(
+    model: &str,
+    base_url: Option<&str>,
+) -> Result<aletheiadb::embeddings::EmbeddingService> {
+    use aletheiadb::embeddings::providers::ollama::{OllamaConfig, OllamaProvider};
+    use aletheiadb::embeddings::EmbeddingService;
+
+    let dimensions = ollama_model_dimensions(model);
+    let mut config = OllamaConfig::new(model.to_string(), dimensions);
+    if let Some(url) = base_url {
+        config = config.with_base_url(url.to_string());
+    }
+
+    let provider = Arc::new(OllamaProvider::new(config)?);
+    Ok(EmbeddingService::new(provider))
 }
 
 #[tokio::main]
@@ -99,22 +147,47 @@ async fn main() -> Result<()> {
 
     let process_manager = Arc::new(ProcessManager::new(config, repository.clone()));
 
-    // 5. TODO: Start MCP server (background task)
-    // The MCP server is started when harness-mcp HiveHandler is integrated.
-    // For now, log that it should be started.
-    tracing::info!(
-        port = args.port,
-        "MCP server should start on port {}",
-        args.port
-    );
+    // 5. Create HiveState with optional embedding service
+    let mut hive_state = HiveState::new(session.clone(), repository.clone());
 
-    // 6. Spawn Strategoi
+    if let Some(model) = &args.embedding_model {
+        tracing::info!(model = %model, "Configuring Ollama embeddings");
+
+        match create_ollama_embedding_service(model, args.ollama_url.as_deref()) {
+            Ok(service) => {
+                hive_state = hive_state.with_embedding_service(Arc::new(service));
+                tracing::info!("Embedding service enabled for semantic knowledge search");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to create embedding service, continuing without embeddings");
+            }
+        }
+    } else {
+        tracing::info!("No embedding model specified, semantic search disabled");
+    }
+
+    let hive_state = Arc::new(hive_state);
+
+    // 6. Start MCP server (background task)
+    let mcp_state = hive_state.clone();
+    let mcp_port = args.port;
+    tokio::spawn(async move {
+        tracing::info!(port = mcp_port, "Starting MCP server");
+        if let Err(e) = start_mcp_server(mcp_state, "127.0.0.1", mcp_port).await {
+            tracing::error!(error = %e, "MCP server failed");
+        }
+    });
+
+    // Give MCP server time to start
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    // 7. Spawn Strategoi
     let strategoi_id = process_manager
         .spawn_strategoi(session_id, &session_context)
         .await?;
     tracing::info!(agent_id = %strategoi_id, "Strategoi spawned");
 
-    // 7. Spawn worker agents
+    // 8. Spawn worker agents
     let worker_roles = default_worker_roles(args.workers);
     for role in worker_roles {
         let worker_id = process_manager
@@ -123,7 +196,7 @@ async fn main() -> Result<()> {
         tracing::info!(agent_id = %worker_id, role = %role, "Worker spawned");
     }
 
-    // 8. Start TUI or wait
+    // 9. Start TUI or wait
     if args.no_tui {
         tracing::info!("Running in headless mode (no TUI). Press Ctrl+C to stop.");
         tokio::signal::ctrl_c().await?;
@@ -132,7 +205,7 @@ async fn main() -> Result<()> {
         tui.run().await?;
     }
 
-    // 9. Graceful shutdown
+    // 10. Graceful shutdown
     tracing::info!("Shutting down...");
 
     Ok(())

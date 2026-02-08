@@ -985,6 +985,7 @@ dependencies = [
 name = "harness"
 version = "0.1.0"
 dependencies = [
+ "aletheiadb",
  "anyhow",
  "futures",
  "harness-mcp",
