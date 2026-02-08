@@ -2,7 +2,7 @@
 
 ## Overview
 
-Harness is a general-purpose agent swarm infrastructure where multiple Claude instances communicate through an MCP-powered chat server. Built on GallifreyDB for bi-temporal conversation persistence with semantic pathfinding.
+Harness is a general-purpose agent swarm infrastructure where multiple Claude instances communicate through an MCP-powered chat server. Built on AletheiaDB for bi-temporal conversation persistence with semantic pathfinding.
 
 ## Architecture
 
@@ -24,8 +24,8 @@ Harness is a general-purpose agent swarm infrastructure where multiple Claude in
          │                    │                       │
          ▼                    ▼                       ▼
 ┌─────────────────┐  ┌─────────────────┐    ┌─────────────────────┐
-│   GallifreyDB   │  │   Orchestrator  │    │   Ollama Embeddings │
-│  (persistence)  │  │ (process mgmt)  │    │   (via Gallifrey)   │
+│   AletheiaDB    │  │   Orchestrator  │    │   Ollama Embeddings │
+│  (persistence)  │  │ (process mgmt)  │    │   (via Aletheia)    │
 └─────────────────┘  └─────────────────┘    └─────────────────────┘
                               │
               ┌───────────────┼───────────────┐
@@ -46,7 +46,7 @@ Harness is a general-purpose agent swarm infrastructure where multiple Claude in
 | Agent spawning | Dynamic | Agents can request spawns, max flexibility |
 | Guardrails | Population cap only | YAGNI - add complexity when needed |
 | Interface | TUI (Ratatui) | Real-time visibility, terminal-native |
-| Persistence | GallifreyDB | Bi-temporal graph, semantic pathfinding, embeddings |
+| Persistence | AletheiaDB | Bi-temporal graph, semantic pathfinding, embeddings |
 | Claude connection | `--mcp-config` flag | Clean, per-agent configuration |
 
 ## MCP Chat Server Tools
@@ -73,7 +73,7 @@ Harness is a general-purpose agent swarm infrastructure where multiple Claude in
 | `broadcast` | `content` | Send to all channels simultaneously. |
 | `clear_channel` | `channel` | Wipe a channel's messages (keeps history in Gallifrey). |
 
-## GallifreyDB Schema
+## AletheiaDB Schema
 
 ### Nodes
 
@@ -185,13 +185,13 @@ claude -p "You are {role}. {system_prompt}" \
 ### Resource Exhaustion
 
 - **Population cap reached** → `request_spawn` returns `queued` with position
-- **Gallifrey connection fails** → Buffer messages in memory, retry, surface error in TUI
+- **Aletheia connection fails** → Buffer messages in memory, retry, surface error in TUI
 - **Ollama unavailable** → Graceful degradation, embeddings skipped
 
 ### Recovery
 
-- **Session resume** → Load session from Gallifrey, spawn fresh agents (they read history to catch up)
-- **Channel reconstruction** → Messages exist in Gallifrey, queryable immediately
+- **Session resume** → Load session from Aletheia, spawn fresh agents (they read history to catch up)
+- **Channel reconstruction** → Messages exist in Aletheia, queryable immediately
 
 ## Crate Structure
 
@@ -213,7 +213,7 @@ harness/
 │   │       ├── lifecycle.rs # Health checks, termination
 │   │       └── config.rs   # Agent templates, population cap
 │   │
-│   ├── harness-persistence/   # GallifreyDB integration
+│   ├── harness-persistence/   # AletheiaDB integration
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       ├── schema.rs   # Node/edge types
@@ -234,20 +234,20 @@ harness/
 ## Dependencies
 
 - `rust-mcp-sdk` - MCP server
-- `gallifreydb` - Persistence + embeddings
+- `aletheiadb` - Persistence + embeddings
 - `ratatui` + `crossterm` - TUI
 - `tokio` - Async runtime
 
 ## Testing Strategy
 
 ### Unit Tests
-- Tool handlers in isolation (mock Gallifrey, mock orchestrator)
+- Tool handlers in isolation (mock Aletheia, mock orchestrator)
 - Message routing logic
 - Spawn command construction
 - TUI state transitions
 
 ### Integration Tests
-- MCP server with real Gallifrey
+- MCP server with real Aletheia
 - Full message flow: send → persist → read → verify graph structure
 - Semantic search with actual embeddings
 
