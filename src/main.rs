@@ -6,9 +6,9 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use harness_mcp::{start_mcp_server, HiveState};
+use harness_mcp::{HiveState, start_mcp_server};
 use harness_orchestrator::{McpServerConfig, OrchestratorConfig, ProcessManager};
-use harness_persistence::{AgentRole, InMemoryRepository, Repository, Session};
+use harness_persistence::{AgentRole, AletheiaRepository, Repository, Session};
 use harness_tui::TuiRunner;
 use tracing_subscriber::EnvFilter;
 
@@ -92,8 +92,8 @@ fn create_ollama_embedding_service(
     model: &str,
     base_url: Option<&str>,
 ) -> Result<aletheiadb::embeddings::EmbeddingService> {
-    use aletheiadb::embeddings::providers::ollama::{OllamaConfig, OllamaProvider};
     use aletheiadb::embeddings::EmbeddingService;
+    use aletheiadb::embeddings::providers::ollama::{OllamaConfig, OllamaProvider};
 
     let dimensions = ollama_model_dimensions(model);
     let mut config = OllamaConfig::new(model.to_string(), dimensions);
@@ -116,9 +116,29 @@ async fn main() -> Result<()> {
 
     tracing::info!("Harness v2 - Hive Mind Orchestration System");
 
-    // 1. Create repository
-    // TODO: Switch to AletheiaRepository for production
-    let repository = Arc::new(InMemoryRepository::new());
+    // 1. Create repository with cold storage
+    // For now, use in-memory DB (AletheiaDB persistence API needs investigation)
+    // TODO: Switch to file-based persistence with proper initialization
+    let db = Arc::new(aletheiadb::AletheiaDB::new()?);
+
+    let mut repository = AletheiaRepository::new(db);
+
+    // Add vector index if embeddings are enabled
+    if let Some(ref model) = args.embedding_model {
+        let dimensions = ollama_model_dimensions(model);
+        tracing::info!(
+            dimensions = dimensions,
+            "Enabling vector index for semantic search"
+        );
+        repository = repository.with_vector_index(dimensions)?;
+    }
+
+    let repository = Arc::new(repository);
+
+    tracing::info!(
+        db_path = %db_path.display(),
+        "AletheiaDB repository initialized with cold storage"
+    );
 
     // 2. Create session
     let session = Session::new(args.workers + 1); // +1 for Strategoi

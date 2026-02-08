@@ -7,7 +7,10 @@ use std::sync::Arc;
 use harness_mcp::{HiveHandler, HiveState};
 use harness_persistence::{InMemoryRepository, Repository, Session};
 
-async fn setup_hive() -> (Arc<HiveState<InMemoryRepository>>, HiveHandler<InMemoryRepository>) {
+async fn setup_hive() -> (
+    Arc<HiveState<InMemoryRepository>>,
+    HiveHandler<InMemoryRepository>,
+) {
     let repo = Arc::new(InMemoryRepository::new());
     let session = Session::new(8);
     repo.create_session(&session).await.unwrap();
@@ -36,8 +39,7 @@ async fn test_full_coordination_flow() {
         .call_tool("register_agent", serde_json::json!({"role": "developer"}))
         .await
         .expect("register developer");
-    let dev_id: String =
-        serde_json::from_value(dev_resp.get("agent_id").unwrap().clone()).unwrap();
+    let dev_id: String = serde_json::from_value(dev_resp.get("agent_id").unwrap().clone()).unwrap();
 
     let tester_handler = HiveHandler::new(handler.state_ref().clone());
     let tester_resp = tester_handler
@@ -163,19 +165,13 @@ async fn test_concurrent_task_claims() {
                 .await
                 .unwrap();
 
-            (
-                i,
-                claim_result.get("success").unwrap().as_bool().unwrap(),
-            )
+            (i, claim_result.get("success").unwrap().as_bool().unwrap())
         });
         handles.push(handle);
     }
 
     let results = futures::future::join_all(handles).await;
-    let success_count = results
-        .iter()
-        .filter(|r| r.as_ref().unwrap().1)
-        .count();
+    let success_count = results.iter().filter(|r| r.as_ref().unwrap().1).count();
 
     // Exactly 1 should succeed, 4 should fail
     assert_eq!(success_count, 1, "Exactly one agent should claim the task");
@@ -302,8 +298,7 @@ async fn test_direct_message_thread() {
         .call_tool("register_agent", serde_json::json!({"role": "developer"}))
         .await
         .unwrap();
-    let dev_id: String =
-        serde_json::from_value(dev_resp.get("agent_id").unwrap().clone()).unwrap();
+    let dev_id: String = serde_json::from_value(dev_resp.get("agent_id").unwrap().clone()).unwrap();
 
     // Create a task
     handler
@@ -380,11 +375,7 @@ async fn test_direct_message_thread() {
     assert_eq!(messages.len(), 3);
 
     // Verify ordering (ascending by time)
-    let first_content = messages[0]
-        .get("content")
-        .unwrap()
-        .as_str()
-        .unwrap();
+    let first_content = messages[0].get("content").unwrap().as_str().unwrap();
     assert!(first_content.contains("UUID or auto-increment"));
 }
 
@@ -415,8 +406,7 @@ async fn test_hive_status_accuracy() {
         )
         .await
         .unwrap();
-    let task1_id: String =
-        serde_json::from_value(task1.get("task_id").unwrap().clone()).unwrap();
+    let task1_id: String = serde_json::from_value(task1.get("task_id").unwrap().clone()).unwrap();
 
     let task2 = handler
         .call_tool(
@@ -425,8 +415,7 @@ async fn test_hive_status_accuracy() {
         )
         .await
         .unwrap();
-    let task2_id: String =
-        serde_json::from_value(task2.get("task_id").unwrap().clone()).unwrap();
+    let task2_id: String = serde_json::from_value(task2.get("task_id").unwrap().clone()).unwrap();
 
     let task3 = handler
         .call_tool(
@@ -435,8 +424,7 @@ async fn test_hive_status_accuracy() {
         )
         .await
         .unwrap();
-    let task3_id: String =
-        serde_json::from_value(task3.get("task_id").unwrap().clone()).unwrap();
+    let task3_id: String = serde_json::from_value(task3.get("task_id").unwrap().clone()).unwrap();
 
     // Update task statuses
     handler
@@ -510,5 +498,126 @@ async fn test_hive_status_accuracy() {
         recent_knowledge.len(),
         2,
         "Should have 2 recent knowledge entries"
+    );
+}
+
+/// Test 6: Embedding service integration with semantic search.
+///
+/// This test requires Ollama to be running with the all-minilm model.
+/// If Ollama is not available, the test is skipped.
+#[tokio::test]
+async fn test_embedding_service_integration() {
+    use aletheiadb::embeddings::EmbeddingService;
+    use aletheiadb::embeddings::providers::ollama::{OllamaConfig, OllamaProvider};
+    use harness_persistence::AletheiaRepository;
+
+    // Try to connect to Ollama - skip test if not available
+    let config = OllamaConfig::new("all-minilm".to_string(), 384);
+    let provider = match OllamaProvider::new(config) {
+        Ok(p) => Arc::new(p),
+        Err(_) => {
+            eprintln!("Skipping embedding test - Ollama not available");
+            return;
+        }
+    };
+
+    let embedding_service = Arc::new(EmbeddingService::new(provider));
+
+    // Create AletheiaRepository with HNSW vector index
+    let db = Arc::new(aletheiadb::AletheiaDB::new().expect("create db"));
+    let repo = Arc::new(
+        AletheiaRepository::new_anon(db)
+            .with_vector_index(384)
+            .expect("create HNSW index"),
+    );
+    let session = Session::new(8);
+    repo.create_session(&session).await.unwrap();
+
+    // Create HiveState with embedding service
+    let state =
+        Arc::new(HiveState::new(session, repo).with_embedding_service(embedding_service.clone()));
+    let handler = HiveHandler::new(state.clone());
+
+    // Register agent
+    handler
+        .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+        .await
+        .unwrap();
+
+    // Share knowledge entries with different semantic content
+    handler
+        .call_tool(
+            "share_knowledge",
+            serde_json::json!({
+                "content": "The authentication system uses JWT tokens for session management",
+                "kind": "discovery"
+            }),
+        )
+        .await
+        .unwrap();
+
+    handler
+        .call_tool(
+            "share_knowledge",
+            serde_json::json!({
+                "content": "Database schema includes user table with email and password_hash fields",
+                "kind": "discovery"
+            }),
+        )
+        .await
+        .unwrap();
+
+    handler
+        .call_tool(
+            "share_knowledge",
+            serde_json::json!({
+                "content": "Frontend uses React with TypeScript for type safety",
+                "kind": "discovery"
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Query with semantic search - should find auth-related knowledge first
+    let auth_query = handler
+        .call_tool(
+            "ask_hive",
+            serde_json::json!({
+                "query": "How is user authentication handled?",
+                "limit": 2
+            }),
+        )
+        .await
+        .unwrap();
+
+    let auth_results = auth_query.get("results").unwrap().as_array().unwrap();
+    assert_eq!(auth_results.len(), 2, "Should return 2 results");
+
+    // The first result should be about JWT authentication (most semantically similar)
+    let first_content = auth_results[0].get("content").unwrap().as_str().unwrap();
+    assert!(
+        first_content.contains("JWT") || first_content.contains("authentication"),
+        "First result should be auth-related, got: {}",
+        first_content
+    );
+
+    // Query about database - should find DB-related knowledge
+    let db_query = handler
+        .call_tool(
+            "ask_hive",
+            serde_json::json!({
+                "query": "What database tables exist?",
+                "limit": 2
+            }),
+        )
+        .await
+        .unwrap();
+
+    let db_results = db_query.get("results").unwrap().as_array().unwrap();
+    let first_db = db_results[0].get("content").unwrap().as_str().unwrap();
+    assert!(
+        first_db.contains("Database") || first_db.contains("table"),
+        "First result should be DB-related, got: {}",
+        first_db
     );
 }

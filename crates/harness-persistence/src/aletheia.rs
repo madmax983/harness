@@ -20,8 +20,8 @@ use aletheiadb::api::transaction::{ReadTransaction, WriteTransaction};
 use aletheiadb::core::Node;
 use aletheiadb::core::id::NodeId;
 use aletheiadb::core::property::PropertyMapBuilder;
-use aletheiadb::index::vector::{DistanceMetric, HnswIndex, HnswIndexBuilder};
 use aletheiadb::index::VectorIndex;
+use aletheiadb::index::vector::{DistanceMetric, HnswIndex, HnswIndexBuilder};
 use aletheiadb::{AletheiaDB, ReadOps, WriteOps};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -889,7 +889,10 @@ impl Repository for AletheiaRepository {
 
             let mut knowledge_results = Vec::new();
             for (node_id, similarity) in results {
-                match self.get_node(node_id).and_then(|n| Self::node_to_knowledge(&n)) {
+                match self
+                    .get_node(node_id)
+                    .and_then(|n| Self::node_to_knowledge(&n))
+                {
                     Ok(knowledge) => knowledge_results.push((knowledge, similarity)),
                     Err(e) => {
                         tracing::warn!("Failed to convert node {node_id:?} to knowledge: {e}");
@@ -1561,12 +1564,27 @@ mod tests {
         repo.create_agent(&agent).await.unwrap();
 
         // Create knowledge with embeddings
-        let k1 = Knowledge::new("AletheiaDB is a graph database", KnowledgeKind::Discovery, agent.id, session.id)
-            .with_embedding(vec![0.1, 0.9, 0.2]);
-        let k2 = Knowledge::new("Rust is a systems language", KnowledgeKind::Discovery, agent.id, session.id)
-            .with_embedding(vec![0.8, 0.1, 0.3]);
-        let k3 = Knowledge::new("Graphs are useful data structures", KnowledgeKind::Discovery, agent.id, session.id)
-            .with_embedding(vec![0.2, 0.8, 0.1]);
+        let k1 = Knowledge::new(
+            "AletheiaDB is a graph database",
+            KnowledgeKind::Discovery,
+            agent.id,
+            session.id,
+        )
+        .with_embedding(vec![0.1, 0.9, 0.2]);
+        let k2 = Knowledge::new(
+            "Rust is a systems language",
+            KnowledgeKind::Discovery,
+            agent.id,
+            session.id,
+        )
+        .with_embedding(vec![0.8, 0.1, 0.3]);
+        let k3 = Knowledge::new(
+            "Graphs are useful data structures",
+            KnowledgeKind::Discovery,
+            agent.id,
+            session.id,
+        )
+        .with_embedding(vec![0.2, 0.8, 0.1]);
 
         repo.create_knowledge(&k1).await.unwrap();
         repo.create_knowledge(&k2).await.unwrap();
