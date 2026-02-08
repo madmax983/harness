@@ -8,6 +8,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use harness_orchestrator::{McpServerConfig, OrchestratorConfig, ProcessManager};
 use harness_persistence::{AgentRole, InMemoryRepository, Repository, Session};
+use harness_tui::TuiRunner;
 use tracing_subscriber::EnvFilter;
 
 /// CLI arguments for Harness.
@@ -127,11 +128,8 @@ async fn main() -> Result<()> {
         tracing::info!("Running in headless mode (no TUI). Press Ctrl+C to stop.");
         tokio::signal::ctrl_c().await?;
     } else {
-        // TODO: Start TUI dashboard when harness-tui TuiRunner is integrated
-        // let mut tui = harness_tui::TuiRunner::new(repository.clone(), session_id);
-        // tui.run().await?;
-        tracing::info!("TUI not yet integrated. Running in headless mode.");
-        tokio::signal::ctrl_c().await?;
+        let mut tui = TuiRunner::new(repository.clone(), session_id);
+        tui.run().await?;
     }
 
     // 9. Graceful shutdown

@@ -53,6 +53,8 @@ const INDEX_KEY_SELF: &str = "_index_node_id";
 pub struct AletheiaRepository {
     db: Arc<AletheiaDB>,
     index_node_id: RwLock<Option<NodeId>>,
+    /// When true, skip file I/O for the index node (for anonymous/in-memory DBs).
+    skip_file_io: bool,
 }
 
 impl AletheiaRepository {
@@ -61,6 +63,17 @@ impl AletheiaRepository {
         Self {
             db,
             index_node_id: RwLock::new(None),
+            skip_file_io: false,
+        }
+    }
+
+    /// Create a new AletheiaRepository for an anonymous (in-memory) DB.
+    /// Skips `.harness-index` file I/O so tests don't interfere with each other.
+    pub fn new_anon(db: Arc<AletheiaDB>) -> Self {
+        Self {
+            db,
+            index_node_id: RwLock::new(None),
+            skip_file_io: true,
         }
     }
 
@@ -83,9 +96,6 @@ impl AletheiaRepository {
     // --- Index management ---
 
     fn get_or_create_index_node(&self) -> RepositoryResult<NodeId> {
-        use std::fs;
-        use std::path::Path;
-
         {
             let cache = self.index_node_id.read();
             if let Some(node_id) = *cache {
@@ -93,29 +103,42 @@ impl AletheiaRepository {
             }
         }
 
-        let index_file = Path::new(".harness-index");
-
-        let node_id = if index_file.exists() {
-            let content = fs::read_to_string(index_file).map_err(|e| {
-                RepositoryError::Database(format!("Failed to read index file: {e}"))
-            })?;
-            let id_u64: u64 = content
-                .trim()
-                .parse()
-                .map_err(|e| RepositoryError::Database(format!("Invalid index file: {e}")))?;
-            NodeId::new(id_u64)
-                .map_err(|e| RepositoryError::Database(format!("Invalid NodeId: {e}")))?
-        } else {
-            let node_id = self.db_write(|tx| {
+        let node_id = if self.skip_file_io {
+            // Anonymous DB: always create a fresh index node, no file persistence.
+            self.db_write(|tx| {
                 let props = PropertyMapBuilder::new()
                     .insert(INDEX_KEY_SELF, "harness-index")
                     .build();
                 Ok(tx.create_node(LABEL_INDEX, props)?)
-            })?;
-            fs::write(index_file, node_id.as_u64().to_string()).map_err(|e| {
-                RepositoryError::Database(format!("Failed to write index file: {e}"))
-            })?;
-            node_id
+            })?
+        } else {
+            use std::fs;
+            use std::path::Path;
+
+            let index_file = Path::new(".harness-index");
+
+            if index_file.exists() {
+                let content = fs::read_to_string(index_file).map_err(|e| {
+                    RepositoryError::Database(format!("Failed to read index file: {e}"))
+                })?;
+                let id_u64: u64 = content
+                    .trim()
+                    .parse()
+                    .map_err(|e| RepositoryError::Database(format!("Invalid index file: {e}")))?;
+                NodeId::new(id_u64)
+                    .map_err(|e| RepositoryError::Database(format!("Invalid NodeId: {e}")))?
+            } else {
+                let node_id = self.db_write(|tx| {
+                    let props = PropertyMapBuilder::new()
+                        .insert(INDEX_KEY_SELF, "harness-index")
+                        .build();
+                    Ok(tx.create_node(LABEL_INDEX, props)?)
+                })?;
+                fs::write(index_file, node_id.as_u64().to_string()).map_err(|e| {
+                    RepositoryError::Database(format!("Failed to write index file: {e}"))
+                })?;
+                node_id
+            }
         };
 
         *self.index_node_id.write() = Some(node_id);
@@ -734,8 +757,16 @@ impl Repository for AletheiaRepository {
     }
 
     async fn get_subtasks(&self, parent_id: TaskId) -> RepositoryResult<Vec<Task>> {
-        let pn = self.index_get(&Self::task_key(parent_id))?;
-        self.collect_incoming(pn, EDGE_SUBTASK_OF, Self::node_to_task)
+        // Workaround: AletheiaDB's incoming adjacency index may not track all
+        // edges when multiple edges share the same target. Instead of traversing
+        // incoming SUBTASK_OF edges, look up the parent's session and filter all
+        // tasks by their parent_task property.
+        let parent = self.get_task(parent_id).await?;
+        let all_tasks = self.list_tasks(parent.session_id, None).await?;
+        Ok(all_tasks
+            .into_iter()
+            .filter(|t| t.parent_task == Some(parent_id))
+            .collect())
     }
 
     async fn create_knowledge(&self, knowledge: &Knowledge) -> RepositoryResult<()> {
@@ -910,5 +941,842 @@ impl Repository for AletheiaRepository {
         msgs.sort_by(|a, b| a.created_at.cmp(&b.created_at));
         msgs.truncate(limit);
         Ok(msgs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{KnowledgeKind, Priority, Repository};
+
+    fn setup() -> (AletheiaRepository, Session) {
+        let db = Arc::new(AletheiaDB::new().expect("Failed to create in-memory DB"));
+        let repo = AletheiaRepository::new_anon(db);
+        let session = Session::new(8);
+        (repo, session)
+    }
+
+    async fn setup_with_session() -> (AletheiaRepository, Session) {
+        let (repo, session) = setup();
+        repo.create_session(&session).await.unwrap();
+        (repo, session)
+    }
+
+    async fn setup_with_agent() -> (AletheiaRepository, Session, Agent) {
+        let (repo, session) = setup_with_session().await;
+        let agent = Agent::new(AgentRole::Developer, session.id);
+        repo.create_agent(&agent).await.unwrap();
+        (repo, session, agent)
+    }
+
+    // === Session tests ===
+
+    #[tokio::test]
+    async fn create_and_get_session() {
+        let (repo, session) = setup_with_session().await;
+
+        let fetched = repo.get_session(session.id).await.unwrap();
+        assert_eq!(fetched.id, session.id);
+        assert_eq!(fetched.population_cap, 8);
+    }
+
+    #[tokio::test]
+    async fn get_session_nonexistent_returns_error() {
+        let (repo, _session) = setup();
+        let fake_id = SessionId::new();
+        let result = repo.get_session(fake_id).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            RepositoryError::NotFound { .. }
+        ));
+    }
+
+    // === Agent tests ===
+
+    #[tokio::test]
+    async fn create_and_get_agent() {
+        let (repo, session, agent) = setup_with_agent().await;
+
+        let fetched = repo.get_agent(agent.id).await.unwrap();
+        assert_eq!(fetched.id, agent.id);
+        assert_eq!(fetched.role, AgentRole::Developer);
+        assert_eq!(fetched.status, AgentStatus::Pending);
+        assert!(!fetched.is_strategoi);
+        assert!(fetched.current_task.is_none());
+        assert_eq!(fetched.session_id, session.id);
+    }
+
+    #[tokio::test]
+    async fn update_agent_status() {
+        let (repo, _session, agent) = setup_with_agent().await;
+
+        repo.update_agent_status(agent.id, AgentStatus::Active)
+            .await
+            .unwrap();
+
+        let fetched = repo.get_agent(agent.id).await.unwrap();
+        assert_eq!(fetched.status, AgentStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn update_agent_task() {
+        let (repo, session, agent) = setup_with_agent().await;
+
+        let task = Task::new("Test task", "Details", Priority::Medium, session.id);
+        repo.create_task(&task).await.unwrap();
+
+        repo.update_agent_task(agent.id, Some(task.id))
+            .await
+            .unwrap();
+        let fetched = repo.get_agent(agent.id).await.unwrap();
+        assert_eq!(fetched.current_task, Some(task.id));
+
+        repo.update_agent_task(agent.id, None).await.unwrap();
+        let fetched = repo.get_agent(agent.id).await.unwrap();
+        assert!(fetched.current_task.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_agents_multiple() {
+        let (repo, session) = setup_with_session().await;
+
+        let a1 = Agent::new(AgentRole::Developer, session.id);
+        let a2 = Agent::new(AgentRole::Tester, session.id);
+        let a3 = Agent::new(AgentRole::Architect, session.id);
+        repo.create_agent(&a1).await.unwrap();
+        repo.create_agent(&a2).await.unwrap();
+        repo.create_agent(&a3).await.unwrap();
+
+        let agents = repo.list_agents(session.id).await.unwrap();
+        assert_eq!(agents.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn list_active_agents_filters_correctly() {
+        let (repo, session) = setup_with_session().await;
+
+        let a1 = Agent::new(AgentRole::Developer, session.id);
+        let a2 = Agent::new(AgentRole::Tester, session.id);
+        let a3 = Agent::new(AgentRole::Architect, session.id);
+        repo.create_agent(&a1).await.unwrap();
+        repo.create_agent(&a2).await.unwrap();
+        repo.create_agent(&a3).await.unwrap();
+
+        // All pending initially - none active
+        assert_eq!(repo.list_active_agents(session.id).await.unwrap().len(), 0);
+
+        // Set a1 to Starting, a2 to Active
+        repo.update_agent_status(a1.id, AgentStatus::Starting)
+            .await
+            .unwrap();
+        repo.update_agent_status(a2.id, AgentStatus::Active)
+            .await
+            .unwrap();
+
+        let active = repo.list_active_agents(session.id).await.unwrap();
+        assert_eq!(active.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn count_active_agents() {
+        let (repo, session) = setup_with_session().await;
+
+        let a1 = Agent::new(AgentRole::Developer, session.id);
+        let a2 = Agent::new(AgentRole::Tester, session.id);
+        repo.create_agent(&a1).await.unwrap();
+        repo.create_agent(&a2).await.unwrap();
+
+        assert_eq!(repo.count_active_agents(session.id).await.unwrap(), 0);
+
+        repo.update_agent_status(a1.id, AgentStatus::Active)
+            .await
+            .unwrap();
+        assert_eq!(repo.count_active_agents(session.id).await.unwrap(), 1);
+
+        repo.update_agent_status(a1.id, AgentStatus::Killed)
+            .await
+            .unwrap();
+        assert_eq!(repo.count_active_agents(session.id).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn find_agents_by_role() {
+        let (repo, session) = setup_with_session().await;
+
+        repo.create_agent(&Agent::new(AgentRole::Developer, session.id))
+            .await
+            .unwrap();
+        repo.create_agent(&Agent::new(AgentRole::Developer, session.id))
+            .await
+            .unwrap();
+        repo.create_agent(&Agent::new(AgentRole::Tester, session.id))
+            .await
+            .unwrap();
+
+        let devs = repo
+            .find_agents_by_role(session.id, AgentRole::Developer)
+            .await
+            .unwrap();
+        assert_eq!(devs.len(), 2);
+
+        let testers = repo
+            .find_agents_by_role(session.id, AgentRole::Tester)
+            .await
+            .unwrap();
+        assert_eq!(testers.len(), 1);
+
+        let architects = repo
+            .find_agents_by_role(session.id, AgentRole::Architect)
+            .await
+            .unwrap();
+        assert!(architects.is_empty());
+    }
+
+    #[tokio::test]
+    async fn strategoi_agent_flag() {
+        let (repo, session) = setup_with_session().await;
+
+        let strategoi = Agent::new(AgentRole::Strategoi, session.id);
+        repo.create_agent(&strategoi).await.unwrap();
+
+        let fetched = repo.get_agent(strategoi.id).await.unwrap();
+        assert!(fetched.is_strategoi);
+        assert_eq!(fetched.role, AgentRole::Strategoi);
+    }
+
+    // === Task tests ===
+
+    #[tokio::test]
+    async fn create_and_get_task() {
+        let (repo, session) = setup_with_session().await;
+
+        let task = Task::new(
+            "Design API",
+            "Design the REST API endpoints",
+            Priority::High,
+            session.id,
+        );
+        repo.create_task(&task).await.unwrap();
+
+        let fetched = repo.get_task(task.id).await.unwrap();
+        assert_eq!(fetched.id, task.id);
+        assert_eq!(fetched.title, "Design API");
+        assert_eq!(fetched.description, "Design the REST API endpoints");
+        assert_eq!(fetched.status, TaskStatus::Pending);
+        assert_eq!(fetched.priority, Priority::High);
+        assert_eq!(fetched.session_id, session.id);
+        assert!(fetched.assigned_to.is_none());
+        assert!(fetched.completed_at.is_none());
+        assert!(fetched.summary.is_none());
+    }
+
+    #[tokio::test]
+    async fn create_task_with_parent() {
+        let (repo, session) = setup_with_session().await;
+
+        let parent = Task::new("Epic", "Big task", Priority::High, session.id);
+        repo.create_task(&parent).await.unwrap();
+
+        let child =
+            Task::new("Subtask", "Small task", Priority::Medium, session.id).with_parent(parent.id);
+        repo.create_task(&child).await.unwrap();
+
+        let fetched = repo.get_task(child.id).await.unwrap();
+        assert_eq!(fetched.parent_task, Some(parent.id));
+    }
+
+    #[tokio::test]
+    async fn create_task_with_created_by() {
+        let (repo, session, agent) = setup_with_agent().await;
+
+        let task = Task::new("Dev task", "Details", Priority::Medium, session.id)
+            .with_created_by(agent.id);
+        repo.create_task(&task).await.unwrap();
+
+        let fetched = repo.get_task(task.id).await.unwrap();
+        assert_eq!(fetched.created_by, Some(agent.id));
+    }
+
+    #[tokio::test]
+    async fn update_task_status_without_summary() {
+        let (repo, session) = setup_with_session().await;
+
+        let task = Task::new("Task", "Details", Priority::Medium, session.id);
+        repo.create_task(&task).await.unwrap();
+
+        repo.update_task_status(task.id, TaskStatus::InProgress, None)
+            .await
+            .unwrap();
+
+        let fetched = repo.get_task(task.id).await.unwrap();
+        assert_eq!(fetched.status, TaskStatus::InProgress);
+        assert!(fetched.summary.is_none());
+        assert!(fetched.completed_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn update_task_status_completed_with_summary() {
+        let (repo, session) = setup_with_session().await;
+
+        let task = Task::new("Task", "Details", Priority::Medium, session.id);
+        repo.create_task(&task).await.unwrap();
+
+        repo.update_task_status(
+            task.id,
+            TaskStatus::Completed,
+            Some("All done with 5 endpoints"),
+        )
+        .await
+        .unwrap();
+
+        let fetched = repo.get_task(task.id).await.unwrap();
+        assert_eq!(fetched.status, TaskStatus::Completed);
+        assert_eq!(
+            fetched.summary.as_deref(),
+            Some("All done with 5 endpoints")
+        );
+        assert!(fetched.completed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn update_task_status_failed_sets_completed_at() {
+        let (repo, session) = setup_with_session().await;
+
+        let task = Task::new("Task", "Details", Priority::Medium, session.id);
+        repo.create_task(&task).await.unwrap();
+
+        repo.update_task_status(task.id, TaskStatus::Failed, Some("Build error"))
+            .await
+            .unwrap();
+
+        let fetched = repo.get_task(task.id).await.unwrap();
+        assert_eq!(fetched.status, TaskStatus::Failed);
+        assert!(fetched.completed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn claim_task_success() {
+        let (repo, session, agent) = setup_with_agent().await;
+
+        let task = Task::new("Claimable", "Details", Priority::High, session.id);
+        repo.create_task(&task).await.unwrap();
+
+        repo.claim_task(task.id, agent.id).await.unwrap();
+
+        let fetched = repo.get_task(task.id).await.unwrap();
+        assert_eq!(fetched.status, TaskStatus::Claimed);
+        assert_eq!(fetched.assigned_to, Some(agent.id));
+    }
+
+    #[tokio::test]
+    async fn claim_task_conflict_already_claimed() {
+        let (repo, session) = setup_with_session().await;
+
+        let agent_a = Agent::new(AgentRole::Developer, session.id);
+        let agent_b = Agent::new(AgentRole::Developer, session.id);
+        repo.create_agent(&agent_a).await.unwrap();
+        repo.create_agent(&agent_b).await.unwrap();
+
+        let task = Task::new(
+            "Contested",
+            "Only one can claim",
+            Priority::High,
+            session.id,
+        );
+        repo.create_task(&task).await.unwrap();
+
+        // First claim succeeds
+        repo.claim_task(task.id, agent_a.id).await.unwrap();
+
+        // Second claim fails (task no longer Pending)
+        let result = repo.claim_task(task.id, agent_b.id).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), RepositoryError::Conflict(_)));
+    }
+
+    #[tokio::test]
+    async fn claim_task_pre_assigned_wrong_agent_fails() {
+        let (repo, session) = setup_with_session().await;
+
+        let agent_a = Agent::new(AgentRole::Developer, session.id);
+        let agent_b = Agent::new(AgentRole::Developer, session.id);
+        repo.create_agent(&agent_a).await.unwrap();
+        repo.create_agent(&agent_b).await.unwrap();
+
+        let task = Task::new("Pre-assigned", "Details", Priority::Medium, session.id);
+        repo.create_task(&task).await.unwrap();
+
+        // Assign to agent_a
+        repo.assign_task(task.id, agent_a.id).await.unwrap();
+
+        // agent_b tries to claim - fails
+        let result = repo.claim_task(task.id, agent_b.id).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), RepositoryError::Conflict(_)));
+
+        // agent_a claims - succeeds
+        repo.claim_task(task.id, agent_a.id).await.unwrap();
+        let fetched = repo.get_task(task.id).await.unwrap();
+        assert_eq!(fetched.status, TaskStatus::Claimed);
+    }
+
+    #[tokio::test]
+    async fn assign_task() {
+        let (repo, session, agent) = setup_with_agent().await;
+
+        let task = Task::new("Assigned work", "Details", Priority::Medium, session.id);
+        repo.create_task(&task).await.unwrap();
+
+        repo.assign_task(task.id, agent.id).await.unwrap();
+
+        let fetched = repo.get_task(task.id).await.unwrap();
+        assert_eq!(fetched.assigned_to, Some(agent.id));
+    }
+
+    #[tokio::test]
+    async fn list_tasks_all() {
+        let (repo, session) = setup_with_session().await;
+
+        let t1 = Task::new("Task 1", "Details", Priority::Medium, session.id);
+        let t2 = Task::new("Task 2", "Details", Priority::Low, session.id);
+        let t3 = Task::new("Task 3", "Details", Priority::High, session.id);
+        repo.create_task(&t1).await.unwrap();
+        repo.create_task(&t2).await.unwrap();
+        repo.create_task(&t3).await.unwrap();
+
+        let all = repo.list_tasks(session.id, None).await.unwrap();
+        assert_eq!(all.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn list_tasks_filtered_by_status() {
+        let (repo, session) = setup_with_session().await;
+
+        let agent = Agent::new(AgentRole::Developer, session.id);
+        repo.create_agent(&agent).await.unwrap();
+
+        let t1 = Task::new("Pending", "Details", Priority::Medium, session.id);
+        let t2 = Task::new("Also pending", "Details", Priority::Low, session.id);
+        repo.create_task(&t1).await.unwrap();
+        repo.create_task(&t2).await.unwrap();
+
+        // Claim t1
+        repo.claim_task(t1.id, agent.id).await.unwrap();
+
+        let pending = repo
+            .list_tasks(session.id, Some(TaskStatus::Pending))
+            .await
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+
+        let claimed = repo
+            .list_tasks(session.id, Some(TaskStatus::Claimed))
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn get_subtasks() {
+        let (repo, session) = setup_with_session().await;
+
+        let parent = Task::new("Epic", "Big task", Priority::High, session.id);
+        repo.create_task(&parent).await.unwrap();
+
+        let child1 = Task::new("Sub 1", "First subtask", Priority::Medium, session.id)
+            .with_parent(parent.id);
+        let child2 = Task::new("Sub 2", "Second subtask", Priority::Medium, session.id)
+            .with_parent(parent.id);
+        repo.create_task(&child1).await.unwrap();
+        repo.create_task(&child2).await.unwrap();
+
+        let subtasks = repo.get_subtasks(parent.id).await.unwrap();
+        assert_eq!(subtasks.len(), 2);
+
+        let subtask_ids: Vec<TaskId> = subtasks.iter().map(|t| t.id).collect();
+        assert!(subtask_ids.contains(&child1.id));
+        assert!(subtask_ids.contains(&child2.id));
+    }
+
+    #[tokio::test]
+    async fn get_subtasks_empty() {
+        let (repo, session) = setup_with_session().await;
+
+        let task = Task::new("Standalone", "No subtasks", Priority::Medium, session.id);
+        repo.create_task(&task).await.unwrap();
+
+        let subtasks = repo.get_subtasks(task.id).await.unwrap();
+        assert!(subtasks.is_empty());
+    }
+
+    // === Knowledge tests ===
+
+    #[tokio::test]
+    async fn create_and_get_knowledge() {
+        let (repo, session, agent) = setup_with_agent().await;
+
+        let k = Knowledge::new(
+            "Found race condition in pool.rs",
+            KnowledgeKind::Discovery,
+            agent.id,
+            session.id,
+        );
+        repo.create_knowledge(&k).await.unwrap();
+
+        let fetched = repo.get_knowledge(k.id).await.unwrap();
+        assert_eq!(fetched.id, k.id);
+        assert_eq!(fetched.content, "Found race condition in pool.rs");
+        assert_eq!(fetched.kind, KnowledgeKind::Discovery);
+        assert_eq!(fetched.author_id, agent.id);
+        assert_eq!(fetched.session_id, session.id);
+        assert!(fetched.task_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn create_knowledge_with_task() {
+        let (repo, session, agent) = setup_with_agent().await;
+
+        let task = Task::new("Implement auth", "Details", Priority::High, session.id);
+        repo.create_task(&task).await.unwrap();
+
+        let k = Knowledge::new("Using JWT", KnowledgeKind::Decision, agent.id, session.id)
+            .with_task(task.id);
+        repo.create_knowledge(&k).await.unwrap();
+
+        let fetched = repo.get_knowledge(k.id).await.unwrap();
+        assert_eq!(fetched.task_id, Some(task.id));
+    }
+
+    #[tokio::test]
+    async fn get_task_knowledge() {
+        let (repo, session, agent) = setup_with_agent().await;
+
+        let task = Task::new("Implement auth", "Details", Priority::High, session.id);
+        repo.create_task(&task).await.unwrap();
+
+        let k1 = Knowledge::new("Using JWT", KnowledgeKind::Decision, agent.id, session.id)
+            .with_task(task.id);
+        let k2 = Knowledge::new(
+            "bcrypt for passwords",
+            KnowledgeKind::Decision,
+            agent.id,
+            session.id,
+        )
+        .with_task(task.id);
+        let k3 = Knowledge::new(
+            "Unrelated discovery",
+            KnowledgeKind::Discovery,
+            agent.id,
+            session.id,
+        );
+
+        repo.create_knowledge(&k1).await.unwrap();
+        repo.create_knowledge(&k2).await.unwrap();
+        repo.create_knowledge(&k3).await.unwrap();
+
+        let task_knowledge = repo.get_task_knowledge(task.id).await.unwrap();
+        assert_eq!(task_knowledge.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn get_recent_knowledge_ordering_and_limit() {
+        let (repo, session, agent) = setup_with_agent().await;
+
+        for i in 0..5 {
+            let k = Knowledge::new(
+                format!("Knowledge {i}"),
+                KnowledgeKind::Activity,
+                agent.id,
+                session.id,
+            );
+            repo.create_knowledge(&k).await.unwrap();
+        }
+
+        let recent = repo.get_recent_knowledge(session.id, 3).await.unwrap();
+        assert_eq!(recent.len(), 3);
+        // Should be ordered most recent first
+        for window in recent.windows(2) {
+            assert!(window[0].created_at >= window[1].created_at);
+        }
+    }
+
+    #[tokio::test]
+    async fn search_knowledge_returns_empty() {
+        let (repo, _session, _agent) = setup_with_agent().await;
+
+        let results = repo.search_knowledge(&[0.1, 0.2, 0.3], 10).await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    // === DirectMessage tests ===
+
+    #[tokio::test]
+    async fn create_and_get_direct_messages() {
+        let (repo, session) = setup_with_session().await;
+
+        let ba = Agent::new(AgentRole::BusinessAnalyst, session.id);
+        let pm = Agent::new(AgentRole::ProductManager, session.id);
+        repo.create_agent(&ba).await.unwrap();
+        repo.create_agent(&pm).await.unwrap();
+
+        let dm1 = DirectMessage::new(ba.id, pm.id, "What are the requirements?", session.id);
+        let dm2 = DirectMessage::new(pm.id, ba.id, "Here are the requirements...", session.id);
+        repo.create_direct_message(&dm1).await.unwrap();
+        repo.create_direct_message(&dm2).await.unwrap();
+
+        // PM received 1 message (from BA)
+        let pm_inbox = repo.get_direct_messages(pm.id, 10).await.unwrap();
+        assert_eq!(pm_inbox.len(), 1);
+        assert_eq!(pm_inbox[0].content, "What are the requirements?");
+
+        // BA received 1 message (from PM)
+        let ba_inbox = repo.get_direct_messages(ba.id, 10).await.unwrap();
+        assert_eq!(ba_inbox.len(), 1);
+        assert_eq!(ba_inbox[0].content, "Here are the requirements...");
+    }
+
+    #[tokio::test]
+    async fn create_direct_message_with_task_thread() {
+        let (repo, session) = setup_with_session().await;
+
+        let ba = Agent::new(AgentRole::BusinessAnalyst, session.id);
+        let pm = Agent::new(AgentRole::ProductManager, session.id);
+        repo.create_agent(&ba).await.unwrap();
+        repo.create_agent(&pm).await.unwrap();
+
+        let task = Task::new(
+            "PRD Interview",
+            "Gather requirements",
+            Priority::High,
+            session.id,
+        );
+        repo.create_task(&task).await.unwrap();
+
+        let dm =
+            DirectMessage::new(ba.id, pm.id, "Question about auth?", session.id).with_task(task.id);
+        repo.create_direct_message(&dm).await.unwrap();
+
+        let pm_inbox = repo.get_direct_messages(pm.id, 10).await.unwrap();
+        assert_eq!(pm_inbox.len(), 1);
+        assert_eq!(pm_inbox[0].task_id, Some(task.id));
+    }
+
+    #[tokio::test]
+    async fn get_thread_messages() {
+        let (repo, session) = setup_with_session().await;
+
+        let ba = Agent::new(AgentRole::BusinessAnalyst, session.id);
+        let pm = Agent::new(AgentRole::ProductManager, session.id);
+        repo.create_agent(&ba).await.unwrap();
+        repo.create_agent(&pm).await.unwrap();
+
+        let task = Task::new(
+            "PRD Interview",
+            "Gather requirements",
+            Priority::High,
+            session.id,
+        );
+        repo.create_task(&task).await.unwrap();
+
+        let dm1 = DirectMessage::new(ba.id, pm.id, "Question 1?", session.id).with_task(task.id);
+        let dm2 = DirectMessage::new(pm.id, ba.id, "Answer 1.", session.id).with_task(task.id);
+        let unrelated = DirectMessage::new(ba.id, pm.id, "Off-topic", session.id);
+
+        repo.create_direct_message(&dm1).await.unwrap();
+        repo.create_direct_message(&dm2).await.unwrap();
+        repo.create_direct_message(&unrelated).await.unwrap();
+
+        let thread = repo.get_thread_messages(task.id, 10).await.unwrap();
+        assert_eq!(thread.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn get_direct_messages_respects_limit() {
+        let (repo, session) = setup_with_session().await;
+
+        let sender = Agent::new(AgentRole::Developer, session.id);
+        let receiver = Agent::new(AgentRole::Tester, session.id);
+        repo.create_agent(&sender).await.unwrap();
+        repo.create_agent(&receiver).await.unwrap();
+
+        for i in 0..5 {
+            let dm = DirectMessage::new(sender.id, receiver.id, format!("Message {i}"), session.id);
+            repo.create_direct_message(&dm).await.unwrap();
+        }
+
+        let limited = repo.get_direct_messages(receiver.id, 2).await.unwrap();
+        assert_eq!(limited.len(), 2);
+    }
+
+    // === Full lifecycle test ===
+
+    #[tokio::test]
+    async fn full_task_lifecycle() {
+        let (repo, session, agent) = setup_with_agent().await;
+
+        // Create task
+        let task = Task::new("Design API", "REST API design", Priority::High, session.id);
+        repo.create_task(&task).await.unwrap();
+
+        // Pending -> Claimed
+        repo.claim_task(task.id, agent.id).await.unwrap();
+        let t = repo.get_task(task.id).await.unwrap();
+        assert_eq!(t.status, TaskStatus::Claimed);
+        assert_eq!(t.assigned_to, Some(agent.id));
+
+        // Claimed -> InProgress
+        repo.update_task_status(task.id, TaskStatus::InProgress, None)
+            .await
+            .unwrap();
+        let t = repo.get_task(task.id).await.unwrap();
+        assert_eq!(t.status, TaskStatus::InProgress);
+
+        // InProgress -> Completed with summary
+        repo.update_task_status(
+            task.id,
+            TaskStatus::Completed,
+            Some("API designed with 5 endpoints"),
+        )
+        .await
+        .unwrap();
+        let t = repo.get_task(task.id).await.unwrap();
+        assert_eq!(t.status, TaskStatus::Completed);
+        assert_eq!(t.summary.as_deref(), Some("API designed with 5 endpoints"));
+        assert!(t.completed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn agent_lifecycle_count_tracking() {
+        let (repo, session) = setup_with_session().await;
+
+        let agent = Agent::new(AgentRole::Developer, session.id);
+        repo.create_agent(&agent).await.unwrap();
+
+        // Initially pending, not counted as active
+        assert_eq!(repo.count_active_agents(session.id).await.unwrap(), 0);
+
+        // Starting -> active
+        repo.update_agent_status(agent.id, AgentStatus::Starting)
+            .await
+            .unwrap();
+        assert_eq!(repo.count_active_agents(session.id).await.unwrap(), 1);
+
+        // Active -> still active
+        repo.update_agent_status(agent.id, AgentStatus::Active)
+            .await
+            .unwrap();
+        assert_eq!(repo.count_active_agents(session.id).await.unwrap(), 1);
+
+        // Killed -> no longer active
+        repo.update_agent_status(agent.id, AgentStatus::Killed)
+            .await
+            .unwrap();
+        assert_eq!(repo.count_active_agents(session.id).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn knowledge_all_kinds() {
+        let (repo, session, agent) = setup_with_agent().await;
+
+        let kinds = [
+            KnowledgeKind::Activity,
+            KnowledgeKind::Discovery,
+            KnowledgeKind::Decision,
+            KnowledgeKind::Blocker,
+        ];
+
+        for kind in kinds {
+            let k = Knowledge::new(format!("Knowledge: {kind:?}"), kind, agent.id, session.id);
+            repo.create_knowledge(&k).await.unwrap();
+            let fetched = repo.get_knowledge(k.id).await.unwrap();
+            assert_eq!(fetched.kind, kind);
+        }
+    }
+
+    #[tokio::test]
+    async fn all_agent_roles_roundtrip() {
+        let (repo, session) = setup_with_session().await;
+
+        let roles = [
+            AgentRole::Strategoi,
+            AgentRole::BusinessAnalyst,
+            AgentRole::ProductManager,
+            AgentRole::Architect,
+            AgentRole::Developer,
+            AgentRole::Tester,
+        ];
+
+        for role in roles {
+            let agent = Agent::new(role, session.id);
+            repo.create_agent(&agent).await.unwrap();
+            let fetched = repo.get_agent(agent.id).await.unwrap();
+            assert_eq!(fetched.role, role);
+        }
+    }
+
+    #[tokio::test]
+    async fn all_priorities_roundtrip() {
+        let (repo, session) = setup_with_session().await;
+
+        let priorities = [
+            Priority::Low,
+            Priority::Medium,
+            Priority::High,
+            Priority::Critical,
+        ];
+
+        for priority in priorities {
+            let task = Task::new("Task", "Details", priority, session.id);
+            repo.create_task(&task).await.unwrap();
+            let fetched = repo.get_task(task.id).await.unwrap();
+            assert_eq!(fetched.priority, priority);
+        }
+    }
+
+    #[tokio::test]
+    async fn all_task_statuses_roundtrip() {
+        let (repo, session) = setup_with_session().await;
+
+        let statuses = [
+            TaskStatus::Pending,
+            TaskStatus::Claimed,
+            TaskStatus::InProgress,
+            TaskStatus::Completed,
+            TaskStatus::Failed,
+        ];
+
+        for status in statuses {
+            let task = Task::new("Task", "Details", Priority::Medium, session.id);
+            repo.create_task(&task).await.unwrap();
+            repo.update_task_status(task.id, status, None)
+                .await
+                .unwrap();
+            let fetched = repo.get_task(task.id).await.unwrap();
+            assert_eq!(fetched.status, status);
+        }
+    }
+
+    #[tokio::test]
+    async fn all_agent_statuses_roundtrip() {
+        let (repo, session) = setup_with_session().await;
+
+        let statuses = [
+            AgentStatus::Pending,
+            AgentStatus::Starting,
+            AgentStatus::Active,
+            AgentStatus::Idle,
+            AgentStatus::Finished,
+            AgentStatus::Killed,
+            AgentStatus::Crashed,
+        ];
+
+        for status in statuses {
+            let agent = Agent::new(AgentRole::Developer, session.id);
+            repo.create_agent(&agent).await.unwrap();
+            repo.update_agent_status(agent.id, status).await.unwrap();
+            let fetched = repo.get_agent(agent.id).await.unwrap();
+            assert_eq!(fetched.status, status);
+        }
     }
 }

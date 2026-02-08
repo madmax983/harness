@@ -5,6 +5,9 @@ edition.workspace = true
 
 [dependencies]
 harness-persistence = { path = "../harness-persistence" }
+rust-mcp-sdk.workspace = true
+rust-mcp-schema.workspace = true
+async-trait = "0.1"
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

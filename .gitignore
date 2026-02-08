@@ -1,4 +1,5 @@
 /target
 .claude/
 .gitignore
-.worktrees/
+.worktrees/crates/harness-persistence/aletheiadb/
+nul
