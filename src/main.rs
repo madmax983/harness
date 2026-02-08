@@ -5,6 +5,9 @@
 
 use std::sync::Arc;
 
+use aletheiadb::config::{HistoricalConfigBuilder, WalConfigBuilder};
+use aletheiadb::storage::index_persistence::PersistenceConfig;
+use aletheiadb::{AletheiaDB, AletheiaDBConfig};
 use anyhow::Result;
 use harness_mcp::{HiveState, start_mcp_server};
 use harness_orchestrator::{McpServerConfig, OrchestratorConfig, ProcessManager};
@@ -26,6 +29,8 @@ struct Args {
     embedding_model: Option<String>,
     /// Ollama base URL (default: http://localhost:11434).
     ollama_url: Option<String>,
+    /// Agent CLI to use (default: "claude", alternatives: "gemini", "gpt-4").
+    agent_cli: Option<String>,
 }
 
 impl Args {
@@ -38,6 +43,7 @@ impl Args {
             port: 3000,
             embedding_model: None,
             ollama_url: None,
+            agent_cli: None,
         };
 
         while let Some(arg) = args.next() {
@@ -61,6 +67,9 @@ impl Args {
                 }
                 "--ollama-url" => {
                     result.ollama_url = args.next();
+                }
+                "--agent-cli" => {
+                    result.agent_cli = args.next();
                 }
                 _ => {}
             }
@@ -116,10 +125,25 @@ async fn main() -> Result<()> {
 
     tracing::info!("Harness v2 - Hive Mind Orchestration System");
 
-    // 1. Create repository with cold storage
-    // For now, use in-memory DB (AletheiaDB persistence API needs investigation)
-    // TODO: Switch to file-based persistence with proper initialization
-    let db = Arc::new(aletheiadb::AletheiaDB::new()?);
+    // 1. Create repository with full persistence stack
+    let db_path = std::env::current_dir()?.join(".harness-data");
+
+    let config = AletheiaDBConfig::builder()
+        .wal(
+            WalConfigBuilder::new()
+                .wal_dir(db_path.join("wal"))
+                .build(),
+        )
+        .persistence(PersistenceConfig {
+            enabled: true,
+            data_dir: db_path.join("indexes"),
+            load_on_startup: true,
+            ..Default::default()
+        })
+        .historical(HistoricalConfigBuilder::new().build())
+        .build();
+
+    let db = Arc::new(AletheiaDB::with_unified_config(config)?);
 
     let mut repository = AletheiaRepository::new(db);
 
@@ -137,7 +161,7 @@ async fn main() -> Result<()> {
 
     tracing::info!(
         db_path = %db_path.display(),
-        "AletheiaDB repository initialized with cold storage"
+        "AletheiaDB initialized: WAL + Index Persistence + Cold Storage"
     );
 
     // 2. Create session
@@ -159,11 +183,14 @@ async fn main() -> Result<()> {
 
     // 4. Configure orchestrator with MCP server URL
     let mcp_url = format!("http://localhost:{}/sse", args.port);
+    let agent_cli = args.agent_cli.as_deref().unwrap_or("claude");
     let config = OrchestratorConfig {
         population_cap: args.workers + 1,
-        claude_path: "claude".into(),
+        claude_path: agent_cli.into(),
         mcp_config: McpServerConfig::http_sse(&mcp_url),
     };
+
+    tracing::info!(agent_cli = %agent_cli, "Agent CLI configured");
 
     let process_manager = Arc::new(ProcessManager::new(config, repository.clone()));
 
