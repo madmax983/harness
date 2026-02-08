@@ -777,16 +777,8 @@ impl Repository for AletheiaRepository {
     }
 
     async fn get_subtasks(&self, parent_id: TaskId) -> RepositoryResult<Vec<Task>> {
-        // Workaround: AletheiaDB's incoming adjacency index may not track all
-        // edges when multiple edges share the same target. Instead of traversing
-        // incoming SUBTASK_OF edges, look up the parent's session and filter all
-        // tasks by their parent_task property.
-        let parent = self.get_task(parent_id).await?;
-        let all_tasks = self.list_tasks(parent.session_id, None).await?;
-        Ok(all_tasks
-            .into_iter()
-            .filter(|t| t.parent_task == Some(parent_id))
-            .collect())
+        let parent_node = self.index_get(&Self::task_key(parent_id))?;
+        self.collect_incoming(parent_node, EDGE_SUBTASK_OF, Self::node_to_task)
     }
 
     async fn create_knowledge(&self, knowledge: &Knowledge) -> RepositoryResult<()> {
