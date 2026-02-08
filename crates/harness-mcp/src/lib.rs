@@ -1,7 +1,8 @@
-//! MCP chat server for Harness.
+//! MCP server for Harness v2 - Hive Mind.
 
+mod handler;
 mod state;
-mod tools;
+pub mod tools;
 
-pub use state::ChatState;
-pub use tools::*;
+pub use handler::{HandlerError, HandlerResult, HiveHandler};
+pub use state::HiveState;

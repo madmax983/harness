@@ -1,4 +1,4 @@
-//! Core domain types for Harness.
+//! Core domain types for Harness v2 - Hive Mind.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -36,73 +36,6 @@ impl std::fmt::Display for AgentId {
     }
 }
 
-/// Unique identifier for a channel.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ChannelId(String);
-
-impl ChannelId {
-    /// Create a channel ID from a name.
-    /// Channel names must start with '#' and contain only alphanumeric/hyphen/underscore.
-    pub fn new(name: &str) -> Result<Self, TypeError> {
-        let name = if name.starts_with('#') {
-            name.to_string()
-        } else {
-            format!("#{name}")
-        };
-
-        // Validate: only alphanumeric, hyphen, underscore after #
-        let rest = &name[1..];
-        if rest.is_empty() {
-            return Err(TypeError::InvalidChannelName("channel name cannot be empty".into()));
-        }
-        if !rest.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
-            return Err(TypeError::InvalidChannelName(
-                "channel name can only contain alphanumeric, hyphen, underscore".into(),
-            ));
-        }
-
-        Ok(Self(name))
-    }
-
-    /// Get the channel name including the '#' prefix.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for ChannelId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-/// Unique identifier for a message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct MessageId(Uuid);
-
-impl MessageId {
-    /// Create a new random message ID.
-    pub fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-
-    /// Create a MessageId from an existing UUID.
-    pub fn from_uuid(uuid: Uuid) -> Self {
-        Self(uuid)
-    }
-
-    /// Get the inner UUID.
-    pub fn as_uuid(&self) -> Uuid {
-        self.0
-    }
-}
-
-impl Default for MessageId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Unique identifier for a session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(Uuid);
@@ -136,12 +69,178 @@ impl std::fmt::Display for SessionId {
     }
 }
 
-/// Error type for type validation.
-#[derive(Debug, Clone, thiserror::Error)]
-pub enum TypeError {
-    /// Invalid channel name.
-    #[error("invalid channel name: {0}")]
-    InvalidChannelName(String),
+/// Unique identifier for a task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TaskId(Uuid);
+
+impl TaskId {
+    /// Create a new random task ID.
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    /// Create a TaskId from an existing UUID.
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
+
+    /// Get the inner UUID.
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl Default for TaskId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for TaskId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "task-{}", &self.0.to_string()[..8])
+    }
+}
+
+/// Unique identifier for a knowledge entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct KnowledgeId(Uuid);
+
+impl KnowledgeId {
+    /// Create a new random knowledge ID.
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    /// Create a KnowledgeId from an existing UUID.
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
+
+    /// Get the inner UUID.
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl Default for KnowledgeId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for KnowledgeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "know-{}", &self.0.to_string()[..8])
+    }
+}
+
+/// Unique identifier for a direct message between agents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DirectMessageId(Uuid);
+
+impl DirectMessageId {
+    /// Create a new random direct message ID.
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    /// Create a DirectMessageId from an existing UUID.
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
+
+    /// Get the inner UUID.
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl Default for DirectMessageId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for DirectMessageId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "dm-{}", &self.0.to_string()[..8])
+    }
+}
+
+/// Task priority levels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Priority {
+    /// Low priority - nice to have.
+    Low,
+    /// Medium priority - should be done.
+    Medium,
+    /// High priority - needs attention.
+    High,
+    /// Critical priority - blocking other work.
+    Critical,
+}
+
+/// Task status lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    /// Task created, waiting for an agent to claim it.
+    Pending,
+    /// An agent has claimed this task.
+    Claimed,
+    /// Work is actively being done.
+    InProgress,
+    /// Task completed successfully.
+    Completed,
+    /// Task failed.
+    Failed,
+}
+
+/// What kind of knowledge this is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeKind {
+    /// Routine activity: "claimed task", "started compiling".
+    Activity,
+    /// Finding: "race condition in pool.rs".
+    Discovery,
+    /// Choice: "using JWT over sessions because...".
+    Decision,
+    /// Problem: "can't proceed, need API key".
+    Blocker,
+}
+
+/// BMAD agent roles in the hive mind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRole {
+    /// The coordinator - dispatches work, never implements. Human's interface.
+    Strategoi,
+    /// Gathers requirements through structured interviews, produces PRDs.
+    BusinessAnalyst,
+    /// Prioritizes features, manages roadmap, bridges BA and technical roles.
+    ProductManager,
+    /// Designs systems, defines technical specs from requirements.
+    Architect,
+    /// Implements code from designs and specs.
+    Developer,
+    /// Validates implementations, writes and runs tests.
+    Tester,
+}
+
+impl std::fmt::Display for AgentRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Strategoi => write!(f, "Strategoi"),
+            Self::BusinessAnalyst => write!(f, "BA"),
+            Self::ProductManager => write!(f, "PM"),
+            Self::Architect => write!(f, "Architect"),
+            Self::Developer => write!(f, "Developer"),
+            Self::Tester => write!(f, "Tester"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -157,32 +256,99 @@ mod tests {
     }
 
     #[test]
-    fn channel_id_adds_hash_prefix() {
-        let id = ChannelId::new("general").unwrap();
-        assert_eq!(id.as_str(), "#general");
+    fn task_id_display_format() {
+        let id = TaskId::new();
+        let display = id.to_string();
+        assert!(display.starts_with("task-"));
+        assert_eq!(display.len(), 13); // "task-" + 8 chars
     }
 
     #[test]
-    fn channel_id_accepts_hash_prefix() {
-        let id = ChannelId::new("#general").unwrap();
-        assert_eq!(id.as_str(), "#general");
+    fn knowledge_id_display_format() {
+        let id = KnowledgeId::new();
+        let display = id.to_string();
+        assert!(display.starts_with("know-"));
+        assert_eq!(display.len(), 13); // "know-" + 8 chars
     }
 
     #[test]
-    fn channel_id_rejects_empty() {
-        let result = ChannelId::new("");
-        assert!(result.is_err());
+    fn direct_message_id_display_format() {
+        let id = DirectMessageId::new();
+        let display = id.to_string();
+        assert!(display.starts_with("dm-"));
+        assert_eq!(display.len(), 11); // "dm-" + 8 chars
     }
 
     #[test]
-    fn channel_id_rejects_spaces() {
-        let result = ChannelId::new("my channel");
-        assert!(result.is_err());
+    fn task_status_serde_roundtrip() {
+        let statuses = vec![
+            TaskStatus::Pending,
+            TaskStatus::Claimed,
+            TaskStatus::InProgress,
+            TaskStatus::Completed,
+            TaskStatus::Failed,
+        ];
+        for status in statuses {
+            let json = serde_json::to_string(&status).unwrap();
+            let deserialized: TaskStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(status, deserialized);
+        }
     }
 
     #[test]
-    fn channel_id_allows_hyphen_underscore() {
-        let id = ChannelId::new("my-channel_1").unwrap();
-        assert_eq!(id.as_str(), "#my-channel_1");
+    fn priority_ordering() {
+        assert!(Priority::Low < Priority::Medium);
+        assert!(Priority::Medium < Priority::High);
+        assert!(Priority::High < Priority::Critical);
+    }
+
+    #[test]
+    fn knowledge_kind_serde() {
+        let kinds = vec![
+            KnowledgeKind::Activity,
+            KnowledgeKind::Discovery,
+            KnowledgeKind::Decision,
+            KnowledgeKind::Blocker,
+        ];
+        for kind in kinds {
+            let json = serde_json::to_string(&kind).unwrap();
+            let deserialized: KnowledgeKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(kind, deserialized);
+        }
+    }
+
+    #[test]
+    fn agent_role_serde_roundtrip() {
+        let roles = vec![
+            AgentRole::Strategoi,
+            AgentRole::BusinessAnalyst,
+            AgentRole::ProductManager,
+            AgentRole::Architect,
+            AgentRole::Developer,
+            AgentRole::Tester,
+        ];
+        for role in roles {
+            let json = serde_json::to_string(&role).unwrap();
+            let deserialized: AgentRole = serde_json::from_str(&json).unwrap();
+            assert_eq!(role, deserialized);
+        }
+    }
+
+    #[test]
+    fn agent_role_display() {
+        assert_eq!(AgentRole::Strategoi.to_string(), "Strategoi");
+        assert_eq!(AgentRole::BusinessAnalyst.to_string(), "BA");
+        assert_eq!(AgentRole::ProductManager.to_string(), "PM");
+        assert_eq!(AgentRole::Architect.to_string(), "Architect");
+        assert_eq!(AgentRole::Developer.to_string(), "Developer");
+        assert_eq!(AgentRole::Tester.to_string(), "Tester");
+    }
+
+    #[test]
+    fn id_roundtrip_through_uuid() {
+        let original = TaskId::new();
+        let uuid = original.as_uuid();
+        let restored = TaskId::from_uuid(uuid);
+        assert_eq!(original, restored);
     }
 }

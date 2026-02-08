@@ -5,11 +5,11 @@ edition.workspace = true
 
 [dependencies]
 harness-persistence = { path = "../harness-persistence" }
-harness-orchestrator = { path = "../harness-orchestrator" }
-harness-mcp = { path = "../harness-mcp" }
 ratatui.workspace = true
 crossterm.workspace = true
 tokio.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+chrono.workspace = true
+anyhow.workspace = true

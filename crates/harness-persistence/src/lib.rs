@@ -1,13 +1,16 @@
-//! Persistence layer for Harness using AletheiaDB.
+//! Persistence layer for Harness v2 - Hive Mind.
 
+mod aletheia;
 mod entities;
-mod gallifrey;
 mod memory;
 mod repository;
 mod types;
 
-pub use entities::{Agent, AgentStatus, Channel, Message, Session};
-pub use gallifrey::AletheiaRepository;
+pub use aletheia::AletheiaRepository;
+pub use entities::{Agent, AgentStatus, DirectMessage, Knowledge, Session, Task};
 pub use memory::InMemoryRepository;
 pub use repository::{Repository, RepositoryError, RepositoryResult};
-pub use types::{AgentId, ChannelId, MessageId, SessionId, TypeError};
+pub use types::{
+    AgentId, AgentRole, DirectMessageId, KnowledgeId, KnowledgeKind, Priority, SessionId, TaskId,
+    TaskStatus,
+};
