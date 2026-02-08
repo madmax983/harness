@@ -140,7 +140,14 @@ async fn main() -> Result<()> {
             load_on_startup: true,
             ..Default::default()
         })
-        .historical(HistoricalConfigBuilder::new().build())
+        .historical(
+            HistoricalConfigBuilder::new()
+                .enable_cold_storage(true)
+                .cold_storage_path(db_path.join("cold.redb"))
+                .migration_age_threshold(std::time::Duration::from_secs(3600)) // 1 hour
+                .max_hot_versions(1000)
+                .build(),
+        )
         .build();
 
     let db = Arc::new(AletheiaDB::with_unified_config(config)?);
