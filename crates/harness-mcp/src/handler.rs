@@ -51,6 +51,11 @@ impl<R: Repository + 'static> HiveHandler<R> {
         }
     }
 
+    /// Get a reference to the shared state (for spawning new handlers in tests).
+    pub fn state_ref(&self) -> &Arc<HiveState<R>> {
+        &self.state
+    }
+
     /// Dispatch a tool call by name.
     pub async fn call_tool(
         &self,
@@ -417,6 +422,18 @@ impl<R: Repository + 'static> HiveHandler<R> {
             knowledge = knowledge.with_task(Self::parse_task_id(tid_str)?);
         }
 
+        // Generate embedding if service is available.
+        if let Some(svc) = self.state.embedding_service() {
+            match svc.embed(&req.content).await {
+                Ok(embedding) => {
+                    knowledge.embedding = Some(embedding);
+                }
+                Err(e) => {
+                    tracing::warn!("Embedding failed, storing without: {e}");
+                }
+            }
+        }
+
         let kid = knowledge.id.as_uuid().to_string();
         self.state.repository().create_knowledge(&knowledge).await?;
 
@@ -427,7 +444,30 @@ impl<R: Repository + 'static> HiveHandler<R> {
         &self,
         req: tools::AskHiveRequest,
     ) -> HandlerResult<tools::AskHiveResponse> {
-        // For now, fall back to recent knowledge (no embedding service yet)
+        // Use semantic search if embedding service is available.
+        if let Some(svc) = self.state.embedding_service() {
+            match svc.embed(&req.query).await {
+                Ok(query_vec) => {
+                    let results = self
+                        .state
+                        .repository()
+                        .search_knowledge(&query_vec, req.limit)
+                        .await?;
+
+                    return Ok(tools::AskHiveResponse {
+                        results: results
+                            .iter()
+                            .map(|(k, score)| Self::knowledge_to_result(k, *score))
+                            .collect(),
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!("Query embedding failed, falling back to recent: {e}");
+                }
+            }
+        }
+
+        // Fallback: recent knowledge ordered by time.
         let knowledge = self
             .state
             .repository()

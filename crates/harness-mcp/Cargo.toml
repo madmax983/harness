@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 harness-persistence = { path = "../harness-persistence" }
+aletheiadb.workspace = true
 rust-mcp-sdk.workspace = true
 rust-mcp-schema.workspace = true
 async-trait = "0.1"

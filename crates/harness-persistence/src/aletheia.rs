@@ -20,7 +20,10 @@ use aletheiadb::api::transaction::{ReadTransaction, WriteTransaction};
 use aletheiadb::core::Node;
 use aletheiadb::core::id::NodeId;
 use aletheiadb::core::property::PropertyMapBuilder;
+use aletheiadb::index::vector::{DistanceMetric, HnswIndex, HnswIndexBuilder};
+use aletheiadb::index::VectorIndex;
 use aletheiadb::{AletheiaDB, ReadOps, WriteOps};
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 
@@ -55,6 +58,8 @@ pub struct AletheiaRepository {
     index_node_id: RwLock<Option<NodeId>>,
     /// When true, skip file I/O for the index node (for anonymous/in-memory DBs).
     skip_file_io: bool,
+    /// Optional HNSW vector index for semantic knowledge search.
+    vector_index: Option<Arc<HnswIndex>>,
 }
 
 impl AletheiaRepository {
@@ -64,6 +69,7 @@ impl AletheiaRepository {
             db,
             index_node_id: RwLock::new(None),
             skip_file_io: false,
+            vector_index: None,
         }
     }
 
@@ -74,7 +80,20 @@ impl AletheiaRepository {
             db,
             index_node_id: RwLock::new(None),
             skip_file_io: true,
+            vector_index: None,
         }
+    }
+
+    /// Configure with an HNSW vector index for semantic knowledge search.
+    pub fn with_vector_index(mut self, dimensions: usize) -> Result<Self, RepositoryError> {
+        let index = HnswIndexBuilder::new(dimensions, DistanceMetric::Cosine)
+            .m(16)
+            .ef_construction(200)
+            .ef_search(64)
+            .build()
+            .map_err(|e| RepositoryError::Database(format!("HNSW index creation failed: {e}")))?;
+        self.vector_index = Some(Arc::new(index));
+        Ok(self)
     }
 
     // --- DB helpers: force E = RepositoryError to avoid type inference ambiguity ---
@@ -486,6 +505,7 @@ impl AletheiaRepository {
     }
 }
 
+#[async_trait]
 impl Repository for AletheiaRepository {
     async fn create_session(&self, session: &Session) -> RepositoryResult<()> {
         let id_str = session.id.as_uuid().to_string();
@@ -811,6 +831,15 @@ impl Repository for AletheiaRepository {
             })?;
         }
 
+        // Add embedding to vector index if both are present.
+        if let Some(ref embedding) = knowledge.embedding
+            && let Some(ref index) = self.vector_index
+        {
+            index
+                .add(kn, embedding)
+                .map_err(|e| RepositoryError::Database(format!("Vector index add failed: {e}")))?;
+        }
+
         Ok(())
     }
 
@@ -857,11 +886,28 @@ impl Repository for AletheiaRepository {
 
     async fn search_knowledge(
         &self,
-        _query_embedding: &[f32],
+        query_embedding: &[f32],
         limit: usize,
     ) -> RepositoryResult<Vec<(Knowledge, f32)>> {
-        // TODO: HNSW vector search. For now return empty.
-        let _ = limit;
+        // Use vector index if configured.
+        if let Some(ref index) = self.vector_index {
+            let results = index
+                .search(query_embedding, limit)
+                .map_err(|e| RepositoryError::Database(format!("Vector search failed: {e}")))?;
+
+            let mut knowledge_results = Vec::new();
+            for (node_id, similarity) in results {
+                match self.get_node(node_id).and_then(|n| Self::node_to_knowledge(&n)) {
+                    Ok(knowledge) => knowledge_results.push((knowledge, similarity)),
+                    Err(e) => {
+                        tracing::warn!("Failed to convert node {node_id:?} to knowledge: {e}");
+                    }
+                }
+            }
+            return Ok(knowledge_results);
+        }
+
+        // No vector index configured - return empty.
         Ok(Vec::new())
     }
 
@@ -1505,6 +1551,60 @@ mod tests {
     async fn search_knowledge_returns_empty() {
         let (repo, _session, _agent) = setup_with_agent().await;
 
+        let results = repo.search_knowledge(&[0.1, 0.2, 0.3], 10).await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn with_vector_index_enables_semantic_search() {
+        let db = Arc::new(AletheiaDB::new().unwrap());
+        let repo = AletheiaRepository::new_anon(db)
+            .with_vector_index(3)
+            .expect("HNSW index creation");
+
+        let session = Session::new(4);
+        repo.create_session(&session).await.unwrap();
+
+        let agent = Agent::new(AgentRole::Developer, session.id);
+        repo.create_agent(&agent).await.unwrap();
+
+        // Create knowledge with embeddings
+        let k1 = Knowledge::new("AletheiaDB is a graph database", KnowledgeKind::Discovery, agent.id, session.id)
+            .with_embedding(vec![0.1, 0.9, 0.2]);
+        let k2 = Knowledge::new("Rust is a systems language", KnowledgeKind::Discovery, agent.id, session.id)
+            .with_embedding(vec![0.8, 0.1, 0.3]);
+        let k3 = Knowledge::new("Graphs are useful data structures", KnowledgeKind::Discovery, agent.id, session.id)
+            .with_embedding(vec![0.2, 0.8, 0.1]);
+
+        repo.create_knowledge(&k1).await.unwrap();
+        repo.create_knowledge(&k2).await.unwrap();
+        repo.create_knowledge(&k3).await.unwrap();
+
+        // Search with a query similar to k1
+        let query = vec![0.15, 0.85, 0.25];
+        let results = repo.search_knowledge(&query, 2).await.unwrap();
+
+        assert_eq!(results.len(), 2);
+        // First result should be k1 or k3 (both have high second component)
+        assert!(results[0].1 > 0.5); // similarity should be high
+    }
+
+    #[tokio::test]
+    async fn search_knowledge_without_index_returns_empty() {
+        let db = Arc::new(AletheiaDB::new().unwrap());
+        let repo = AletheiaRepository::new_anon(db); // No vector index
+
+        let session = Session::new(4);
+        repo.create_session(&session).await.unwrap();
+
+        let agent = Agent::new(AgentRole::Developer, session.id);
+        repo.create_agent(&agent).await.unwrap();
+
+        let k = Knowledge::new("Test", KnowledgeKind::Activity, agent.id, session.id)
+            .with_embedding(vec![0.1, 0.2, 0.3]);
+        repo.create_knowledge(&k).await.unwrap();
+
+        // Search without index returns empty
         let results = repo.search_knowledge(&[0.1, 0.2, 0.3], 10).await.unwrap();
         assert!(results.is_empty());
     }

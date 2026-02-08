@@ -1,5 +1,7 @@
 //! Repository trait for persistence operations.
 
+use async_trait::async_trait;
+
 use crate::{
     Agent, AgentId, AgentRole, AgentStatus, DirectMessage, Knowledge, Session, SessionId, Task,
     TaskId, TaskStatus,
@@ -37,7 +39,7 @@ pub type RepositoryResult<T> = Result<T, RepositoryError>;
 /// Repository for Harness v2 hive mind entities.
 ///
 /// Abstracts over AletheiaDB for production and in-memory for testing.
-#[allow(async_fn_in_trait)]
+#[async_trait]
 pub trait Repository: Send + Sync {
     // === Session operations ===
 

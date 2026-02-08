@@ -17,7 +17,7 @@ rust-mcp-sdk = { version = "0.8", features = ["server", "macros"] }
 rust-mcp-schema = "0.8"
 
 # Persistence (local path)
-aletheiadb = { path = "../../../gallifreydb", features = ["mcp-server", "embeddings"] }
+aletheiadb = { path = "../../../gallifreydb", features = ["mcp-server", "embeddings", "embedding-openai", "embedding-ollama"] }
 
 # TUI
 ratatui = "0.29"
@@ -51,3 +51,7 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
+
+[dev-dependencies]
+futures = "0.3"
+serde_json.workspace = true

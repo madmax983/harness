@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 aletheiadb.workspace = true
+async-trait = "0.1"
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -10,6 +10,8 @@ pub struct HiveState<R: Repository> {
     session: Session,
     /// Repository for persistence.
     repository: Arc<R>,
+    /// Optional embedding service for semantic search.
+    embedding_service: Option<Arc<aletheiadb::embeddings::EmbeddingService>>,
 }
 
 impl<R: Repository + 'static> HiveState<R> {
@@ -18,7 +20,17 @@ impl<R: Repository + 'static> HiveState<R> {
         Self {
             session,
             repository,
+            embedding_service: None,
         }
+    }
+
+    /// Set the embedding service (builder pattern).
+    pub fn with_embedding_service(
+        mut self,
+        svc: Arc<aletheiadb::embeddings::EmbeddingService>,
+    ) -> Self {
+        self.embedding_service = Some(svc);
+        self
     }
 
     /// Get the current session ID.
@@ -35,6 +47,11 @@ impl<R: Repository + 'static> HiveState<R> {
     pub fn repository(&self) -> &Arc<R> {
         &self.repository
     }
+
+    /// Get the embedding service, if configured.
+    pub fn embedding_service(&self) -> Option<&Arc<aletheiadb::embeddings::EmbeddingService>> {
+        self.embedding_service.as_ref()
+    }
 }
 
 #[cfg(test)]
@@ -50,5 +67,6 @@ mod tests {
 
         let state = HiveState::new(session, repo);
         assert_eq!(state.population_cap(), 8);
+        assert!(state.embedding_service().is_none());
     }
 }

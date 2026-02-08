@@ -7,6 +7,7 @@ mod repository;
 mod types;
 
 pub use aletheia::AletheiaRepository;
+pub use async_trait::async_trait;
 pub use entities::{Agent, AgentStatus, DirectMessage, Knowledge, Session, Task};
 pub use memory::InMemoryRepository;
 pub use repository::{Repository, RepositoryError, RepositoryResult};

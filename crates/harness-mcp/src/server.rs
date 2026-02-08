@@ -15,22 +15,22 @@ use rust_mcp_sdk::schema::{
     ServerCapabilities, ServerCapabilitiesTools, TextContent, Tool, ToolInputSchema,
 };
 
-use harness_persistence::InMemoryRepository;
+use harness_persistence::Repository;
 
 use crate::handler::HiveHandler;
 use crate::state::HiveState;
 
-/// MCP server handler that wraps a `HiveHandler<InMemoryRepository>`.
+/// MCP server handler that wraps a `HiveHandler<R>`.
 ///
 /// Each incoming `call_tool` request creates a fresh `HiveHandler` so that
 /// per-connection agent state (agent_id) stays isolated.
-pub struct HiveMcpServer {
-    state: Arc<HiveState<InMemoryRepository>>,
+pub struct HiveMcpServer<R: Repository + 'static> {
+    state: Arc<HiveState<R>>,
 }
 
-impl HiveMcpServer {
+impl<R: Repository + 'static> HiveMcpServer<R> {
     /// Create a new MCP server handler backed by shared hive state.
-    pub fn new(state: Arc<HiveState<InMemoryRepository>>) -> Self {
+    pub fn new(state: Arc<HiveState<R>>) -> Self {
         Self { state }
     }
 
@@ -69,7 +69,7 @@ impl HiveMcpServer {
 }
 
 #[async_trait]
-impl ServerHandler for HiveMcpServer {
+impl<R: Repository + 'static> ServerHandler for HiveMcpServer<R> {
     async fn handle_list_tools_request(
         &self,
         _params: Option<PaginatedRequestParams>,
@@ -125,13 +125,13 @@ impl ServerHandler for HiveMcpServer {
 }
 
 /// Start the MCP server on the given host and port.
-pub async fn start_mcp_server(
-    state: Arc<HiveState<InMemoryRepository>>,
+pub async fn start_mcp_server<R: Repository + 'static>(
+    state: Arc<HiveState<R>>,
     host: &str,
     port: u16,
 ) -> Result<(), rust_mcp_sdk::error::McpSdkError> {
     let handler = HiveMcpServer::new(state);
-    let server_info = HiveMcpServer::server_info();
+    let server_info = HiveMcpServer::<R>::server_info();
 
     let options = HyperServerOptions {
         host: host.to_string(),
@@ -405,7 +405,7 @@ pub fn tool_definitions() -> Vec<Tool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use harness_persistence::{Repository, Session};
+    use harness_persistence::{InMemoryRepository, Session};
 
     #[test]
     fn test_tool_definitions_returns_14_tools() {
@@ -453,10 +453,19 @@ mod tests {
 
     #[test]
     fn test_server_info() {
-        let info = HiveMcpServer::server_info();
+        let info = HiveMcpServer::<InMemoryRepository>::server_info();
         assert_eq!(info.server_info.name, "harness-hive-mind");
         assert!(info.capabilities.tools.is_some());
         assert!(info.instructions.is_some());
+    }
+
+    #[test]
+    fn test_hive_mcp_server_is_generic() {
+        // Verify HiveMcpServer can be instantiated with InMemoryRepository explicitly.
+        let repo = Arc::new(InMemoryRepository::new());
+        let session = harness_persistence::Session::new(4);
+        let state = Arc::new(HiveState::new(session, repo));
+        let _server: HiveMcpServer<InMemoryRepository> = HiveMcpServer::new(state);
     }
 
     #[tokio::test]

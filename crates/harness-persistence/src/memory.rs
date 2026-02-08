@@ -5,6 +5,8 @@ use std::sync::RwLock;
 
 use chrono::Utc;
 
+use async_trait::async_trait;
+
 use crate::{
     Agent, AgentId, AgentRole, AgentStatus, DirectMessage, Knowledge, KnowledgeId, Repository,
     RepositoryError, RepositoryResult, Session, SessionId, Task, TaskId, TaskStatus,
@@ -27,6 +29,7 @@ impl InMemoryRepository {
     }
 }
 
+#[async_trait]
 impl Repository for InMemoryRepository {
     // === Session operations ===
 
