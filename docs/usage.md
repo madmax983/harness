@@ -18,6 +18,24 @@ cargo run -- --no-tui
 cargo run -- --prompt "Build a REST API for user management"
 ```
 
+### With Alternative Agent CLIs
+
+Harness supports different LLM CLI tools beyond Claude:
+
+```bash
+# Use Gemini CLI instead of Claude
+cargo run -- --agent-cli gemini
+
+# Use GPT-4 CLI
+cargo run -- --agent-cli gpt-4
+
+# Combine with other options
+cargo run -- \
+  --agent-cli gemini \
+  --workers 3 \
+  --prompt "Design microservices architecture"
+```
+
 ### With Ollama Embeddings (Semantic Search)
 
 First, ensure Ollama is running with your desired model:
@@ -37,9 +55,10 @@ cargo run -- --embedding-model nomic-embed-text
 # With custom Ollama URL
 cargo run -- --embedding-model nomic-embed-text --ollama-url http://localhost:11434
 
-# Full example
+# Full example with Gemini and embeddings
 cargo run -- \
   --workers 4 \
+  --agent-cli gemini \
   --embedding-model nomic-embed-text \
   --prompt "Implement authentication system" \
   --port 3000
@@ -63,6 +82,7 @@ cargo run -- \
 --port <PORT>               MCP server port (default: 3000)
 --embedding-model, -e <MODEL>  Ollama model for semantic search
 --ollama-url <URL>          Ollama base URL (default: http://localhost:11434)
+--agent-cli <CLI>           Agent CLI executable (default: "claude", alternatives: "gemini", "gpt-4")
 ```
 
 ## Architecture
