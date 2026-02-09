@@ -2,11 +2,11 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Build a multi-Claude orchestration system with MCP chat server, GallifreyDB persistence, and Ratatui TUI.
+**Goal:** Build a multi-Claude orchestration system with MCP chat server, AletheiaDB persistence, and Ratatui TUI.
 
-**Architecture:** Workspace with 4 crates (harness-mcp, harness-orchestrator, harness-persistence, harness-tui) plus a binary that wires them together. MCP server exposes chat tools, orchestrator manages Claude processes, persistence layer talks to GallifreyDB, TUI provides god-mode interface.
+**Architecture:** Workspace with 4 crates (harness-mcp, harness-orchestrator, harness-persistence, harness-tui) plus a binary that wires them together. MCP server exposes chat tools, orchestrator manages Claude processes, persistence layer talks to AletheiaDB, TUI provides god-mode interface.
 
-**Tech Stack:** rust-mcp-sdk, gallifreydb (local path dependency), ratatui + crossterm, tokio
+**Tech Stack:** rust-mcp-sdk, aletheiadb (local path dependency), ratatui + crossterm, tokio
 
 ---
 
@@ -56,7 +56,7 @@ rust-mcp-sdk = { version = "0.8", features = ["server", "macros"] }
 rust-mcp-schema = "0.8"
 
 # Persistence (local path)
-gallifreydb = { path = "../gallifreydb", features = ["mcp-server", "embeddings"] }
+aletheiadb = { path = "../aletheiadb", features = ["mcp-server", "embeddings"] }
 
 # TUI
 ratatui = "0.29"
@@ -101,7 +101,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-gallifreydb.workspace = true
+aletheiadb.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -173,7 +173,7 @@ tracing.workspace = true
 
 For `crates/harness-persistence/src/lib.rs`:
 ```rust
-//! Persistence layer for Harness using GallifreyDB.
+//! Persistence layer for Harness using AletheiaDB.
 
 pub fn placeholder() {}
 ```
@@ -436,7 +436,7 @@ Expected: All tests PASS
 
 Replace `crates/harness-persistence/src/lib.rs`:
 ```rust
-//! Persistence layer for Harness using GallifreyDB.
+//! Persistence layer for Harness using AletheiaDB.
 
 mod types;
 
@@ -695,7 +695,7 @@ Expected: All tests PASS
 
 Replace `crates/harness-persistence/src/lib.rs`:
 ```rust
-//! Persistence layer for Harness using GallifreyDB.
+//! Persistence layer for Harness using AletheiaDB.
 
 mod entities;
 mod types;
@@ -725,7 +725,7 @@ Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>"
 
 ---
 
-### Task 2.3: GallifreyDB Repository Trait
+### Task 2.3: AletheiaDB Repository Trait
 
 **Files:**
 - Create: `crates/harness-persistence/src/repository.rs`
@@ -763,7 +763,7 @@ pub type RepositoryResult<T> = Result<T, RepositoryError>;
 
 /// Repository for Harness entities.
 ///
-/// This trait abstracts over the storage backend (GallifreyDB),
+/// This trait abstracts over the storage backend (AletheiaDB),
 /// enabling testing with in-memory implementations.
 #[allow(async_fn_in_trait)]
 pub trait Repository: Send + Sync {
@@ -838,7 +838,7 @@ pub trait Repository: Send + Sync {
 
 Update `crates/harness-persistence/src/lib.rs`:
 ```rust
-//! Persistence layer for Harness using GallifreyDB.
+//! Persistence layer for Harness using AletheiaDB.
 
 mod entities;
 mod repository;
@@ -1163,7 +1163,7 @@ Expected: All tests PASS
 **Step 3: Update lib.rs**
 
 ```rust
-//! Persistence layer for Harness using GallifreyDB.
+//! Persistence layer for Harness using AletheiaDB.
 
 mod entities;
 mod memory;
@@ -1187,7 +1187,7 @@ Expected: Compiles successfully
 git add -A
 git commit -m "feat(persistence): add InMemoryRepository
 
-Implements Repository trait for testing without GallifreyDB.
+Implements Repository trait for testing without AletheiaDB.
 Includes tests for session, agent lifecycle, message ordering.
 
 Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>"
@@ -2269,7 +2269,7 @@ async fn main() -> Result<()> {
 
     tracing::info!("Harness - Multi-Claude Orchestration System");
 
-    // Create repository (will be replaced with GallifreyDB)
+    // Create repository (will be replaced with AletheiaDB)
     let repository = Arc::new(InMemoryRepository::new());
 
     // Create session
@@ -2334,6 +2334,6 @@ This plan covers the foundational layers:
 
 **Next phases to plan:**
 - MCP server implementation with rust-mcp-sdk
-- GallifreyDB repository implementation
+- AletheiaDB repository implementation
 - Full TUI rendering with ratatui
 - End-to-end testing with real Claude instances

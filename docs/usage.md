@@ -1,0 +1,168 @@
+# Harness v2 - Usage Guide
+
+## Quick Start
+
+### Basic Usage (No Embeddings)
+
+```bash
+# Start with default settings (3 workers, TUI enabled)
+cargo run
+
+# Specify number of workers
+cargo run -- --workers 5
+
+# Run headless (no TUI)
+cargo run -- --no-tui
+
+# Provide initial prompt for Strategoi
+cargo run -- --prompt "Build a REST API for user management"
+```
+
+### With Ollama Embeddings (Semantic Search)
+
+First, ensure Ollama is running with your desired model:
+
+```bash
+# Pull and run a model (if not already available)
+ollama pull nomic-embed-text
+ollama run nomic-embed-text
+```
+
+Then start Harness with embeddings enabled:
+
+```bash
+# Basic embedding support
+cargo run -- --embedding-model nomic-embed-text
+
+# With custom Ollama URL
+cargo run -- --embedding-model nomic-embed-text --ollama-url http://localhost:11434
+
+# Full example
+cargo run -- \
+  --workers 4 \
+  --embedding-model nomic-embed-text \
+  --prompt "Implement authentication system" \
+  --port 3000
+```
+
+### Supported Embedding Models
+
+| Model | Dimensions | Use Case |
+|-------|------------|----------|
+| `nomic-embed-text` | 768 | General-purpose, balanced performance (recommended) |
+| `mxbai-embed-large` | 1024 | High accuracy, larger embeddings |
+| `all-minilm` | 384 | Fast, smaller embeddings |
+| `snowflake-arctic-embed` | 1024 | Code and text understanding |
+
+### CLI Options
+
+```
+--workers, -w <NUM>         Number of worker agents (default: 3)
+--no-tui                    Disable TUI dashboard
+--prompt, -p <TEXT>         Initial prompt/goal for Strategoi
+--port <PORT>               MCP server port (default: 3000)
+--embedding-model, -e <MODEL>  Ollama model for semantic search
+--ollama-url <URL>          Ollama base URL (default: http://localhost:11434)
+```
+
+## Architecture
+
+### Without Embeddings
+- Knowledge queries (`ask_hive`) return recent entries ordered by time
+- Agents share knowledge via `share_knowledge` tool
+- Fast, no external dependencies
+
+### With Embeddings
+- Knowledge entries are embedded on creation
+- Queries use HNSW vector search for semantic similarity
+- Returns most relevant knowledge, not just most recent
+- Requires Ollama running locally or remotely
+
+## MCP Server
+
+The MCP server starts automatically on the specified port (default 3000) and exposes 14 tools for agent coordination:
+
+**Endpoint:** `http://localhost:3000/sse`
+
+Connect Claude Desktop/CLI with this configuration in `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "harness-hive": {
+      "command": "cargo",
+      "args": ["run", "--", "--embedding-model", "nomic-embed-text"],
+      "env": {}
+    }
+  }
+}
+```
+
+## Examples
+
+### Example 1: Basic Task Coordination
+
+```bash
+# Start with 2 workers
+cargo run -- --workers 2 --prompt "Analyze codebase and suggest improvements"
+```
+
+The Strategoi will:
+1. Register itself and workers
+2. Create tasks based on the prompt
+3. Assign tasks to workers
+4. Workers share discoveries via knowledge
+5. Results visible in TUI
+
+### Example 2: BMAD Workflow with Semantic Search
+
+```bash
+# Start with full BMAD team + embeddings
+cargo run -- \
+  --workers 5 \
+  --embedding-model nomic-embed-text \
+  --prompt "Design and implement user authentication"
+```
+
+The team workflow:
+1. **Business Analyst** interviews stakeholders, shares requirements
+2. **Product Manager** queries relevant requirements via semantic search
+3. **Architect** designs system based on discovered knowledge
+4. **Developers** implement features
+5. **Tester** validates implementation
+
+All knowledge is semantically searchable across the team.
+
+## Troubleshooting
+
+### Ollama Connection Issues
+
+```bash
+# Check if Ollama is running
+curl http://localhost:11434/api/tags
+
+# Verify model is available
+ollama list | grep nomic-embed-text
+```
+
+### MCP Server Not Starting
+
+- Check port is not in use: `netstat -an | grep 3000`
+- Check logs for errors: `RUST_LOG=debug cargo run`
+
+### Embedding Dimension Mismatch
+
+If using a custom model not in the supported list, you may see warnings about defaulting to 768 dimensions. The system will work but accuracy may be reduced. The model dimensions are auto-detected for common models.
+
+## Performance Notes
+
+- Embedding generation adds ~50-200ms latency per knowledge entry
+- HNSW search is fast (~1-5ms for 1000s of entries)
+- Ollama should have 2GB+ RAM for embedding models
+- Consider running headless (`--no-tui`) for production
+
+## Next Steps
+
+- See `docs/architecture.md` for system design details
+- See `docs/mcp-tools.md` for complete tool reference
+- Run integration tests: `cargo test --test integration`

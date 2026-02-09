@@ -4,7 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-gallifreydb.workspace = true
+aletheiadb.workspace = true
+async-trait = "0.1"
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -12,3 +13,4 @@ thiserror.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 tracing.workspace = true
+parking_lot = "0.12.5"
