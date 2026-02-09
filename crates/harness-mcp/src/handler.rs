@@ -114,6 +114,12 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 let resp = self.handle_ask_hive(req).await?;
                 Ok(serde_json::to_value(resp).unwrap())
             }
+            "fish_knowledge" => {
+                let req: tools::FishKnowledgeRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_fish_knowledge(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
 
             // Agent tools
             "register_agent" => {
@@ -166,6 +172,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
             "get_task_context",
             "share_knowledge",
             "ask_hive",
+            "fish_knowledge",
             "register_agent",
             "list_agents",
             "get_hive_status",
@@ -478,6 +485,144 @@ impl<R: Repository + 'static> HiveHandler<R> {
             results: knowledge
                 .iter()
                 .map(|k| Self::knowledge_to_result(k, 0.0))
+                .collect(),
+        })
+    }
+
+    async fn handle_fish_knowledge(
+        &self,
+        req: tools::FishKnowledgeRequest,
+    ) -> HandlerResult<tools::FishKnowledgeResponse> {
+        use harness_persistence::KnowledgeId;
+        use std::collections::{HashMap, HashSet};
+
+        // Parse knowledge ID
+        let kid = KnowledgeId::from_uuid(
+            uuid::Uuid::parse_str(&req.knowledge_id)
+                .map_err(|_| HandlerError::InvalidArgs("invalid knowledge_id".into()))?,
+        );
+
+        // Get the starting knowledge entry
+        let start_knowledge = self.state.repository().get_knowledge(kid).await?;
+        let starting_from = format!("{} [{}]",
+            start_knowledge.content.chars().take(50).collect::<String>(),
+            format!("{:?}", start_knowledge.kind).to_lowercase());
+
+        // Track results with scores
+        let mut results: HashMap<KnowledgeId, (Knowledge, f32, Vec<String>)> = HashMap::new();
+        let mut visited = HashSet::new();
+        visited.insert(kid);
+
+        // 1. Get vector-similar knowledge (semantic component)
+        if let Some(embedding) = &start_knowledge.embedding {
+            if let Ok(similar) = self
+                .state
+                .repository()
+                .search_knowledge(embedding, req.limit * 2)
+                .await
+            {
+                for (k, similarity) in similar {
+                    if k.id != kid {
+                        let k_id = k.id;
+                        let score = similarity * 0.7; // Weight vector similarity
+                        let paths = vec![format!("Vector Similarity: {:.4}", similarity)];
+                        results.insert(k_id, (k, score, paths));
+                        visited.insert(k_id);
+                    }
+                }
+            }
+        }
+
+        // 2. Get graph-connected knowledge (structural component)
+        // Knowledge connected via same task
+        if let Some(task_id) = start_knowledge.task_id {
+            if let Ok(task_knowledge) = self.state.repository().get_task_knowledge(task_id).await {
+                for k in task_knowledge {
+                    if !visited.contains(&k.id) {
+                        let k_id = k.id;
+                        let score = 0.8; // Graph connection weight
+                        let task_title = self
+                            .state
+                            .repository()
+                            .get_task(task_id)
+                            .await
+                            .map(|t| t.title)
+                            .unwrap_or_else(|_| "Unknown Task".into());
+                        let paths = vec![format!("via Task: {}", task_title)];
+
+                        // If we already have this from vector search, combine scores
+                        results.entry(k_id)
+                            .and_modify(|(_, s, p)| {
+                                *s += score;
+                                p.push(paths[0].clone());
+                            })
+                            .or_insert((k, score, paths));
+                        visited.insert(k_id);
+                    }
+                }
+            }
+        }
+
+        // Knowledge from same author (connection weight)
+        if let Ok(all_knowledge) = self
+            .state
+            .repository()
+            .get_recent_knowledge(self.state.session_id(), 100)
+            .await
+        {
+            for k in all_knowledge {
+                if k.author_id == start_knowledge.author_id && !visited.contains(&k.id) {
+                    let k_id = k.id;
+                    let score = 0.3; // Same author weight
+                    let author_role = self
+                        .state
+                        .repository()
+                        .get_agent(start_knowledge.author_id)
+                        .await
+                        .map(|a| format!("{:?}", a.role))
+                        .unwrap_or_else(|_| "Unknown".into());
+                    let paths = vec![format!("via Same Author [{}]", author_role)];
+
+                    results.entry(k_id)
+                        .and_modify(|(_, s, p)| {
+                            *s += score;
+                            p.push(paths[0].clone());
+                        })
+                        .or_insert((k, score, paths));
+                    visited.insert(k_id);
+                }
+            }
+        }
+
+        // 3. Add freshness boost (recency component)
+        let now = chrono::Utc::now();
+        for (_, (k, score, _)) in results.iter_mut() {
+            let age_hours = now.signed_duration_since(k.created_at).num_hours();
+            if age_hours < 24 {
+                *score += 0.2; // Fresh knowledge boost
+            }
+        }
+
+        // Sort by score and limit
+        let mut sorted_results: Vec<_> = results.into_values().collect();
+        sorted_results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        sorted_results.truncate(req.limit);
+
+        Ok(tools::FishKnowledgeResponse {
+            starting_from,
+            results: sorted_results
+                .into_iter()
+                .map(|(k, score, paths)| tools::FishResult {
+                    id: k.id.as_uuid().to_string(),
+                    content: k.content,
+                    kind: format!("{:?}", k.kind).to_lowercase(),
+                    author: k.author_id.as_uuid().to_string(),
+                    score,
+                    vector_similarity: k.embedding.as_ref().and_then(|_| Some(score * 0.7)),
+                    connection_paths: paths,
+                    created_at: k.created_at.to_rfc3339(),
+                    task_id: k.task_id.map(|t| t.as_uuid().to_string()),
+                })
                 .collect(),
         })
     }
@@ -812,6 +957,7 @@ mod tests {
         assert!(names.contains(&"share_knowledge"));
         assert!(names.contains(&"register_agent"));
         assert!(names.contains(&"send_direct_message"));
-        assert_eq!(names.len(), 14);
+        assert!(names.contains(&"fish_knowledge"));
+        assert_eq!(names.len(), 15);
     }
 }
