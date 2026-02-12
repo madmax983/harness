@@ -18,6 +18,30 @@ cargo run -- --no-tui
 cargo run -- --prompt "Build a REST API for user management"
 ```
 
+### Standalone MCP Daemon (No Orchestrator/TUI)
+
+Use this when you want local Claude/Codex/Gemini instances to share Harness
+knowledge without spawning the harness swarm.
+
+```bash
+# Start MCP + persistence only (localhost:3000)
+cargo run --bin harness-mcpd
+
+# Custom host/port/session file
+cargo run --bin harness-mcpd -- \
+  --host 127.0.0.1 \
+  --port 3000 \
+  --session-file .harness-mcp-session
+```
+
+Then register the server once in each local agent CLI:
+
+```bash
+claude mcp add --transport sse harness http://localhost:3000/sse
+codex mcp add harness --url http://localhost:3000/sse
+gemini mcp add --scope user -t sse harness http://localhost:3000/sse
+```
+
 ### With Alternative Agent CLIs
 
 Harness supports different LLM CLI tools beyond Claude:
@@ -51,6 +75,9 @@ Then start Harness with embeddings enabled:
 ```bash
 # Basic embedding support
 cargo run -- --embedding-model nomic-embed-text
+
+# Standalone MCP daemon with embeddings
+cargo run --bin harness-mcpd -- --embedding-model nomic-embed-text
 
 # With custom Ollama URL
 cargo run -- --embedding-model nomic-embed-text --ollama-url http://localhost:11434
