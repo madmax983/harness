@@ -29,6 +29,9 @@ pub enum HandlerError {
 
     #[error("parse error: {0}")]
     Parse(String),
+
+    #[error("internal error: {0}")]
+    InternalError(String),
 }
 
 /// Result type for handler operations.
@@ -2190,25 +2193,29 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 .await?;
         }
 
-        // Generate spawn prompt for strategoi to use with Task tool
-        let spawn_prompt = format!(
-            "You are a developer agent in the harness hive mind. Your agent_id is {}. \n\n\
-             IMPORTANT: Register immediately using mcp__harness__register_agent with:\n\
-             - role: \"developer\"\n\
-             - agent_id: \"{}\"\n\n\
-             After registration, check your assigned tasks using mcp__harness__list_tasks and \
-             claim the task assigned to you. Then complete the work described in the task.",
-            agent_id_str, agent_id_str
+        // Generate system prompt with auto-polling instructions
+        let system_prompt = crate::generate_agent_system_prompt(
+            &agent_id_str,
+            &req.role,
+            req.custom_prompt.as_deref(),
+            req.poll_interval_secs,
         );
+
+        // Spawn CLI process using ProcessManager
+        self.state
+            .process_manager()
+            .spawn(agent_id, &system_prompt)
+            .await
+            .map_err(|e| HandlerError::InternalError(format!("Failed to spawn process: {}", e)))?;
+
+        // Build CLI command string for response
+        let cli_command = format!("{} {}", req.cli_command, req.cli_args.join(" "));
 
         Ok(tools::SpawnAgentResponse {
             agent_id: agent_id_str,
-            process_id: None,  // TODO: Implement in GREEN phase
-            cli_command: None, // TODO: Implement in GREEN phase
-            teammate_id: Some(format!(
-                "Use Task tool with description: 'Spawn developer agent {}' and prompt:\n{}",
-                req.name, spawn_prompt
-            )),
+            process_id: None, // ProcessManager doesn't expose PID currently
+            cli_command: Some(cli_command),
+            teammate_id: None, // Deprecated - actual process spawned
         })
     }
 
