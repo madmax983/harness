@@ -361,13 +361,27 @@ pub fn tool_definitions() -> Vec<Tool> {
             "register_agent",
             "Register a new agent in the hive with the given role.",
             vec!["role"],
-            HashMap::from([(
-                "role".into(),
-                prop(
-                    "string",
-                    "Agent role: strategoi, business_analyst, product_manager, architect, developer, tester",
+            HashMap::from([
+                (
+                    "role".into(),
+                    prop(
+                        "string",
+                        "Agent role: strategoi, business_analyst, product_manager, architect, developer, tester",
+                    ),
                 ),
-            )]),
+                (
+                    "project_name".into(),
+                    prop("string", "Optional project name (e.g., 'harness', 'arthropod')"),
+                ),
+                (
+                    "project_path".into(),
+                    prop("string", "Optional project directory path"),
+                ),
+                (
+                    "agent_id".into(),
+                    prop("string", "For spawned agents: pre-created agent ID to activate"),
+                ),
+            ]),
         ),
         make_tool(
             "list_agents",
@@ -380,6 +394,31 @@ pub fn tool_definitions() -> Vec<Tool> {
             "Get comprehensive status of the hive including agents, task summary, and recent knowledge.",
             vec![],
             HashMap::new(),
+        ),
+        make_tool(
+            "spawn_agent",
+            "Spawn a new agent to work on tasks (strategoi only).",
+            vec!["role", "name"],
+            HashMap::from([
+                (
+                    "role".into(),
+                    prop("string", "Role for spawned agent (developer)"),
+                ),
+                ("name".into(), prop("string", "Name for the spawned teammate")),
+                (
+                    "initial_task_id".into(),
+                    prop("string", "Optional task to assign immediately"),
+                ),
+            ]),
+        ),
+        make_tool(
+            "disconnect_agent",
+            "Disconnect an agent from the hive.",
+            vec![],
+            HashMap::from([(
+                "agent_id".into(),
+                prop("string", "Optional agent ID to disconnect (defaults to self)"),
+            )]),
         ),
         // --- Message tools ---
         make_tool(
