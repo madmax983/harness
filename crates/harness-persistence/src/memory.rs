@@ -301,6 +301,34 @@ impl Repository for InMemoryRepository {
             .collect())
     }
 
+    async fn add_task_dependency(
+        &self,
+        _task_id: TaskId,
+        _blocked_task_id: TaskId,
+    ) -> RepositoryResult<()> {
+        // In-memory repository doesn't support graph edges
+        Ok(())
+    }
+
+    async fn remove_task_dependency(
+        &self,
+        _task_id: TaskId,
+        _blocked_task_id: TaskId,
+    ) -> RepositoryResult<()> {
+        // In-memory repository doesn't support graph edges
+        Ok(())
+    }
+
+    async fn get_blocking_tasks(&self, _task_id: TaskId) -> RepositoryResult<Vec<Task>> {
+        // In-memory repository doesn't support graph edges
+        Ok(Vec::new())
+    }
+
+    async fn get_blocked_tasks(&self, _task_id: TaskId) -> RepositoryResult<Vec<Task>> {
+        // In-memory repository doesn't support graph edges
+        Ok(Vec::new())
+    }
+
     // === Knowledge operations ===
 
     async fn create_knowledge(&self, knowledge: &Knowledge) -> RepositoryResult<()> {

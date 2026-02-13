@@ -12,6 +12,7 @@
 //! (Agent)──[:SHARED]──────────────►(Knowledge)
 //! (Knowledge)─[:ABOUT]───────────►(Task)
 //! (Task)──[:SUBTASK_OF]───────────►(Task)
+//! (Task)──[:BLOCKS]───────────────►(Task)
 //! (Agent)──[:SENT_DM]────────────►(DirectMessage)
 //! (DirectMessage)─[:DM_TO]───────►(Agent)
 //! (DirectMessage)─[:DM_THREAD]───►(Task)
@@ -56,6 +57,7 @@ const EDGE_CLAIMS: &str = "CLAIMS";
 const EDGE_SHARED: &str = "SHARED";
 const EDGE_ABOUT: &str = "ABOUT";
 const EDGE_SUBTASK_OF: &str = "SUBTASK_OF";
+const EDGE_BLOCKS: &str = "BLOCKS";
 const EDGE_SENT_DM: &str = "SENT_DM";
 const EDGE_DM_TO: &str = "DM_TO";
 const EDGE_DM_THREAD: &str = "DM_THREAD";
@@ -638,6 +640,26 @@ impl AletheiaRepository {
         })
     }
 
+    fn collect_outgoing<T>(
+        &self,
+        source: NodeId,
+        edge_label: &str,
+        convert: fn(&Node) -> RepositoryResult<T>,
+    ) -> RepositoryResult<Vec<T>> {
+        self.db_read(|tx| {
+            let edge_ids = tx.get_outgoing_edges_with_label(source, edge_label);
+            let mut result = Vec::new();
+            for eid in edge_ids {
+                let edge = tx.get_edge(eid)?;
+                let node = tx.get_node(edge.target)?;
+                if let Ok(item) = convert(&node) {
+                    result.push(item);
+                }
+            }
+            Ok(result)
+        })
+    }
+
     fn get_node(&self, node_id: NodeId) -> RepositoryResult<Node> {
         self.db_read(|tx| Ok(tx.get_node(node_id)?))
     }
@@ -872,6 +894,24 @@ impl Repository for AletheiaRepository {
         let agent_node = self.index_get(&Self::agent_key(agent_id))?;
         let aid_str = agent_id.as_uuid().to_string();
 
+        // Check for blocking dependencies before allowing claim
+        let blocking_tasks = self.get_blocking_tasks(task_id).await?;
+        let uncompleted: Vec<_> = blocking_tasks
+            .iter()
+            .filter(|t| !matches!(t.status, TaskStatus::Completed))
+            .collect();
+
+        if !uncompleted.is_empty() {
+            let blocker_ids: Vec<String> = uncompleted
+                .iter()
+                .map(|t| t.id.as_uuid().to_string())
+                .collect();
+            return Err(RepositoryError::Conflict(format!(
+                "task {task_id} is blocked by uncompleted tasks: {}",
+                blocker_ids.join(", ")
+            )));
+        }
+
         self.db_write(|tx| {
             let node = tx.get_node(task_node)?;
             let status = Self::parse_task_status(Self::pstr(&node, "status")?)?;
@@ -935,6 +975,55 @@ impl Repository for AletheiaRepository {
     async fn get_subtasks(&self, parent_id: TaskId) -> RepositoryResult<Vec<Task>> {
         let parent_node = self.index_get(&Self::task_key(parent_id))?;
         self.collect_incoming(parent_node, EDGE_SUBTASK_OF, Self::node_to_task)
+    }
+
+    async fn add_task_dependency(
+        &self,
+        task_id: TaskId,
+        blocked_task_id: TaskId,
+    ) -> RepositoryResult<()> {
+        let task_node = self.index_get(&Self::task_key(task_id))?;
+        let blocked_node = self.index_get(&Self::task_key(blocked_task_id))?;
+
+        self.db_write(|tx| {
+            tx.create_edge(
+                task_node,
+                blocked_node,
+                EDGE_BLOCKS,
+                PropertyMapBuilder::new().build(),
+            )?;
+            Ok(())
+        })
+    }
+
+    async fn remove_task_dependency(
+        &self,
+        task_id: TaskId,
+        blocked_task_id: TaskId,
+    ) -> RepositoryResult<()> {
+        let task_node = self.index_get(&Self::task_key(task_id))?;
+        let blocked_node = self.index_get(&Self::task_key(blocked_task_id))?;
+
+        self.db_write(|tx| {
+            let edges = tx.get_outgoing_edges_with_label(task_node, EDGE_BLOCKS);
+            for eid in edges {
+                let edge = tx.get_edge(eid)?;
+                if edge.target == blocked_node {
+                    tx.delete_edge(eid)?;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    async fn get_blocking_tasks(&self, task_id: TaskId) -> RepositoryResult<Vec<Task>> {
+        let task_node = self.index_get(&Self::task_key(task_id))?;
+        self.collect_incoming(task_node, EDGE_BLOCKS, Self::node_to_task)
+    }
+
+    async fn get_blocked_tasks(&self, task_id: TaskId) -> RepositoryResult<Vec<Task>> {
+        let task_node = self.index_get(&Self::task_key(task_id))?;
+        self.collect_outgoing(task_node, EDGE_BLOCKS, Self::node_to_task)
     }
 
     async fn create_knowledge(&self, knowledge: &Knowledge) -> RepositoryResult<()> {

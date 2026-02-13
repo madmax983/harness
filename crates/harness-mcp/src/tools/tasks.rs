@@ -42,6 +42,10 @@ pub struct TaskInfo {
     pub created_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_by: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocks: Option<Vec<String>>,
 }
 
 /// Response from list_tasks.
@@ -104,4 +108,33 @@ pub struct GetTaskContextResponse {
     pub task: TaskInfo,
     pub knowledge: Vec<super::knowledge::KnowledgeResult>,
     pub subtasks: Vec<TaskInfo>,
+}
+
+
+// === Task Dependency Tools ===
+
+/// Request to add a task dependency.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AddTaskDependencyRequest {
+    pub task_id: String,
+    pub blocked_task_id: String,
+}
+
+/// Response from add_task_dependency.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AddTaskDependencyResponse {
+    pub success: bool,
+}
+
+/// Request to remove a task dependency.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RemoveTaskDependencyRequest {
+    pub task_id: String,
+    pub blocked_task_id: String,
+}
+
+/// Response from remove_task_dependency.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RemoveTaskDependencyResponse {
+    pub success: bool,
 }

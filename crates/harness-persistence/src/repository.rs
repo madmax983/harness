@@ -120,6 +120,26 @@ pub trait Repository: Send + Sync {
     /// Get subtasks of a parent task.
     async fn get_subtasks(&self, parent_id: TaskId) -> RepositoryResult<Vec<Task>>;
 
+    /// Add a blocking dependency: task_id blocks blocked_task_id from starting.
+    async fn add_task_dependency(
+        &self,
+        task_id: TaskId,
+        blocked_task_id: TaskId,
+    ) -> RepositoryResult<()>;
+
+    /// Remove a blocking dependency between tasks.
+    async fn remove_task_dependency(
+        &self,
+        task_id: TaskId,
+        blocked_task_id: TaskId,
+    ) -> RepositoryResult<()>;
+
+    /// Get tasks that are blocking this task (must complete before this task can start).
+    async fn get_blocking_tasks(&self, task_id: TaskId) -> RepositoryResult<Vec<Task>>;
+
+    /// Get tasks that this task is blocking (waiting for this task to complete).
+    async fn get_blocked_tasks(&self, task_id: TaskId) -> RepositoryResult<Vec<Task>>;
+
     // === Knowledge operations ===
 
     /// Create a knowledge entry.

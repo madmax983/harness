@@ -106,6 +106,18 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 let resp = self.handle_get_task_context(req).await?;
                 Ok(serde_json::to_value(resp).unwrap())
             }
+            "add_task_dependency" => {
+                let req: tools::AddTaskDependencyRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_add_task_dependency(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "remove_task_dependency" => {
+                let req: tools::RemoveTaskDependencyRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_remove_task_dependency(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
 
             // Knowledge tools
             "share_knowledge" => {
@@ -214,6 +226,8 @@ impl<R: Repository + 'static> HiveHandler<R> {
             "update_task_status",
             "assign_task",
             "get_task_context",
+            "add_task_dependency",
+            "remove_task_dependency",
             "share_knowledge",
             "ask_hive",
             "fish_knowledge",
@@ -368,6 +382,8 @@ impl<R: Repository + 'static> HiveHandler<R> {
             assigned_to: t.assigned_to.map(|a| a.as_uuid().to_string()),
             created_at: t.created_at.to_rfc3339(),
             summary: t.summary.clone(),
+            blocked_by: None, // Populated by handlers when needed
+            blocks: None,      // Populated by handlers when needed
         }
     }
 
@@ -543,14 +559,68 @@ impl<R: Repository + 'static> HiveHandler<R> {
         let knowledge = repo.get_task_knowledge(task_id).await?;
         let subtasks = repo.get_subtasks(task_id).await?;
 
+        // Get dependency information
+        let blocking_tasks = repo.get_blocking_tasks(task_id).await?;
+        let blocked_tasks = repo.get_blocked_tasks(task_id).await?;
+
+        let mut task_info = Self::task_to_info(&task);
+
+        // Populate blocked_by and blocks fields
+        if !blocking_tasks.is_empty() {
+            task_info.blocked_by = Some(
+                blocking_tasks
+                    .iter()
+                    .map(|t| t.id.as_uuid().to_string())
+                    .collect(),
+            );
+        }
+        if !blocked_tasks.is_empty() {
+            task_info.blocks = Some(
+                blocked_tasks
+                    .iter()
+                    .map(|t| t.id.as_uuid().to_string())
+                    .collect(),
+            );
+        }
+
         Ok(tools::GetTaskContextResponse {
-            task: Self::task_to_info(&task),
+            task: task_info,
             knowledge: knowledge
                 .iter()
                 .map(|k| Self::knowledge_to_result(k, 0.0))
                 .collect(),
             subtasks: subtasks.iter().map(Self::task_to_info).collect(),
         })
+    }
+
+    async fn handle_add_task_dependency(
+        &self,
+        req: tools::AddTaskDependencyRequest,
+    ) -> HandlerResult<tools::AddTaskDependencyResponse> {
+        let task_id = Self::parse_task_id(&req.task_id)?;
+        let blocked_task_id = Self::parse_task_id(&req.blocked_task_id)?;
+
+        self.state
+            .repository()
+            .add_task_dependency(task_id, blocked_task_id)
+            .await?;
+
+        Ok(tools::AddTaskDependencyResponse { success: true })
+    }
+
+    async fn handle_remove_task_dependency(
+        &self,
+        req: tools::RemoveTaskDependencyRequest,
+    ) -> HandlerResult<tools::RemoveTaskDependencyResponse> {
+        let task_id = Self::parse_task_id(&req.task_id)?;
+        let blocked_task_id = Self::parse_task_id(&req.blocked_task_id)?;
+
+        self.state
+            .repository()
+            .remove_task_dependency(task_id, blocked_task_id)
+            .await?;
+
+        Ok(tools::RemoveTaskDependencyResponse { success: true })
     }
 
     // --- Knowledge handlers ---
