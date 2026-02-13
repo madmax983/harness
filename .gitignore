@@ -1,7 +1,12 @@
 /target
 .claude/
 .gitignore
-.worktrees/crates/harness-persistence/aletheiadb/
+.worktrees/
 nul
 crates/harness-persistence/aletheiadb/
 aletheiadb/
+
+# Harness MCP runtime artifacts
+.harness-data/
+.harness-index
+.harness-mcp-session

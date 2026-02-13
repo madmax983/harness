@@ -168,6 +168,39 @@ impl std::fmt::Display for DirectMessageId {
     }
 }
 
+/// Unique identifier for a product.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProductId(Uuid);
+
+impl ProductId {
+    /// Create a new random product ID.
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    /// Create a ProductId from an existing UUID.
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
+
+    /// Get the inner UUID.
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl Default for ProductId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for ProductId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "product-{}", &self.0.to_string()[..8])
+    }
+}
+
 /// Task priority levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -196,6 +229,120 @@ pub enum TaskStatus {
     Completed,
     /// Task failed.
     Failed,
+}
+
+/// Product status lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductStatus {
+    /// Product in concept phase.
+    Concept,
+    /// Product is active.
+    Active,
+    /// Product in maintenance phase.
+    Maintenance,
+    /// Product is archived.
+    Archived,
+}
+
+/// Unique identifier for a project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProjectId(Uuid);
+
+impl ProjectId {
+    /// Create a new random project ID.
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    /// Create a ProjectId from an existing UUID.
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
+
+    /// Get the inner UUID.
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl Default for ProjectId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for ProjectId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "project-{}", &self.0.to_string()[..8])
+    }
+}
+
+/// Project status lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectStatus {
+    /// Project in planning phase.
+    Planning,
+    /// Project is active.
+    Active,
+    /// Project is on hold.
+    OnHold,
+    /// Project is completed.
+    Completed,
+    /// Project is archived.
+    Archived,
+}
+
+/// Unique identifier for a plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PlanId(Uuid);
+
+impl PlanId {
+    /// Create a new random plan ID.
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    /// Create a PlanId from an existing UUID.
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
+
+    /// Get the inner UUID.
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl Default for PlanId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for PlanId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "plan-{}", &self.0.to_string()[..8])
+    }
+}
+
+/// Plan status lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanStatus {
+    /// Plan in draft phase.
+    Draft,
+    /// Plan has been approved.
+    Approved,
+    /// Plan is currently in execution.
+    InExecution,
+    /// Plan is paused.
+    Paused,
+    /// Plan is completed.
+    Completed,
+    /// Plan was abandoned.
+    Abandoned,
 }
 
 /// What kind of knowledge this is.
@@ -350,5 +497,101 @@ mod tests {
         let uuid = original.as_uuid();
         let restored = TaskId::from_uuid(uuid);
         assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn product_id_display_format() {
+        let id = ProductId::new();
+        let display = id.to_string();
+        assert!(display.starts_with("product-"));
+        assert_eq!(display.len(), 16); // "product-" + 8 chars
+    }
+
+    #[test]
+    fn product_id_roundtrip() {
+        let original = ProductId::new();
+        let uuid = original.as_uuid();
+        let restored = ProductId::from_uuid(uuid);
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn product_status_serde_roundtrip() {
+        let statuses = vec![
+            ProductStatus::Concept,
+            ProductStatus::Active,
+            ProductStatus::Maintenance,
+            ProductStatus::Archived,
+        ];
+        for status in statuses {
+            let json = serde_json::to_string(&status).unwrap();
+            let deserialized: ProductStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(status, deserialized);
+        }
+    }
+
+    #[test]
+    fn project_id_display_format() {
+        let id = ProjectId::new();
+        let display = id.to_string();
+        assert!(display.starts_with("project-"));
+        assert_eq!(display.len(), 16); // "project-" + 8 chars
+    }
+
+    #[test]
+    fn project_id_roundtrip() {
+        let original = ProjectId::new();
+        let uuid = original.as_uuid();
+        let restored = ProjectId::from_uuid(uuid);
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn project_status_serde_roundtrip() {
+        let statuses = vec![
+            ProjectStatus::Planning,
+            ProjectStatus::Active,
+            ProjectStatus::OnHold,
+            ProjectStatus::Completed,
+            ProjectStatus::Archived,
+        ];
+        for status in statuses {
+            let json = serde_json::to_string(&status).unwrap();
+            let deserialized: ProjectStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(status, deserialized);
+        }
+    }
+
+    #[test]
+    fn plan_id_display_format() {
+        let id = PlanId::new();
+        let display = id.to_string();
+        assert!(display.starts_with("plan-"));
+        assert_eq!(display.len(), 13); // "plan-" + 8 chars
+    }
+
+    #[test]
+    fn plan_id_roundtrip() {
+        let original = PlanId::new();
+        let uuid = original.as_uuid();
+        let restored = PlanId::from_uuid(uuid);
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn plan_status_serde_roundtrip() {
+        let statuses = vec![
+            PlanStatus::Draft,
+            PlanStatus::Approved,
+            PlanStatus::InExecution,
+            PlanStatus::Paused,
+            PlanStatus::Completed,
+            PlanStatus::Abandoned,
+        ];
+        for status in statuses {
+            let json = serde_json::to_string(&status).unwrap();
+            let deserialized: PlanStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(status, deserialized);
+        }
     }
 }

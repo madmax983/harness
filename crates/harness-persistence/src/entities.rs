@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AgentId, AgentRole, DirectMessageId, KnowledgeId, KnowledgeKind, Priority, SessionId, TaskId,
-    TaskStatus,
+    AgentId, AgentRole, DirectMessageId, KnowledgeId, KnowledgeKind, Priority, ProductId,
+    ProductStatus, ProjectId, ProjectStatus, PlanId, PlanStatus, SessionId, TaskId, TaskStatus,
 };
 
 /// Status of an agent in its lifecycle.
@@ -252,6 +252,9 @@ pub struct Session {
     pub started_at: DateTime<Utc>,
     /// Maximum number of agents allowed.
     pub population_cap: usize,
+    /// Agent ID associated with this session (for MCP clients).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<AgentId>,
 }
 
 impl Session {
@@ -261,7 +264,139 @@ impl Session {
             id: SessionId::new(),
             started_at: Utc::now(),
             population_cap,
+            agent_id: None,
         }
+    }
+}
+
+/// A top-level product in the hive mind.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Product {
+    /// Unique identifier.
+    pub id: ProductId,
+    /// Name of the product.
+    pub name: String,
+    /// Detailed description.
+    pub description: String,
+    /// Current status in the lifecycle.
+    pub status: ProductStatus,
+    /// Session this product belongs to.
+    pub session_id: SessionId,
+    /// When the product was created.
+    pub created_at: DateTime<Utc>,
+}
+
+impl Product {
+    /// Create a new product in concept phase.
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        session_id: SessionId,
+    ) -> Self {
+        Self {
+            id: ProductId::new(),
+            name: name.into(),
+            description: description.into(),
+            status: ProductStatus::Concept,
+            session_id,
+            created_at: Utc::now(),
+        }
+    }
+
+    /// Create a product with a specific ID (for restoring from persistence).
+    pub fn with_id(mut self, id: ProductId) -> Self {
+        self.id = id;
+        self
+    }
+}
+
+/// A project (collection of related tasks with shared objectives).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Project {
+    /// Unique identifier.
+    pub id: ProjectId,
+    /// Name of the project.
+    pub name: String,
+    /// Detailed description.
+    pub description: String,
+    /// Current status in the lifecycle.
+    pub status: ProjectStatus,
+    /// Product this project belongs to.
+    pub product_id: ProductId,
+    /// Session this project belongs to.
+    pub session_id: SessionId,
+    /// When the project was created.
+    pub created_at: DateTime<Utc>,
+}
+
+impl Project {
+    /// Create a new project in planning phase.
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        product_id: ProductId,
+        session_id: SessionId,
+    ) -> Self {
+        Self {
+            id: ProjectId::new(),
+            name: name.into(),
+            description: description.into(),
+            status: ProjectStatus::Planning,
+            product_id,
+            session_id,
+            created_at: Utc::now(),
+        }
+    }
+
+    /// Create a project with a specific ID (for restoring from persistence).
+    pub fn with_id(mut self, id: ProjectId) -> Self {
+        self.id = id;
+        self
+    }
+}
+
+/// A plan (actionable strategy within a project).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Plan {
+    /// Unique identifier.
+    pub id: PlanId,
+    /// Name of the plan.
+    pub name: String,
+    /// Strategic approach or execution strategy.
+    pub strategy: String,
+    /// Current status in the lifecycle.
+    pub status: PlanStatus,
+    /// Project this plan belongs to.
+    pub project_id: ProjectId,
+    /// Session this plan belongs to.
+    pub session_id: SessionId,
+    /// When the plan was created.
+    pub created_at: DateTime<Utc>,
+}
+
+impl Plan {
+    /// Create a new plan in draft phase.
+    pub fn new(
+        name: impl Into<String>,
+        strategy: impl Into<String>,
+        project_id: ProjectId,
+        session_id: SessionId,
+    ) -> Self {
+        Self {
+            id: PlanId::new(),
+            name: name.into(),
+            strategy: strategy.into(),
+            status: PlanStatus::Draft,
+            project_id,
+            session_id,
+            created_at: Utc::now(),
+        }
+    }
+
+    /// Create a plan with a specific ID (for restoring from persistence).
+    pub fn with_id(mut self, id: PlanId) -> Self {
+        self.id = id;
+        self
     }
 }
 
@@ -378,5 +513,135 @@ mod tests {
         let dm =
             DirectMessage::new(ba.id, pm.id, "Question about auth", session.id).with_task(task.id);
         assert_eq!(dm.task_id, Some(task.id));
+    }
+
+    #[test]
+    fn product_starts_in_concept() {
+        let session = Session::new(8);
+        let product = Product::new("Harness v2", "Hive mind AI platform", session.id);
+        assert_eq!(product.status, ProductStatus::Concept);
+        assert_eq!(product.name, "Harness v2");
+        assert_eq!(product.session_id, session.id);
+    }
+
+    #[test]
+    fn product_with_id() {
+        let session = Session::new(8);
+        let original_id = ProductId::new();
+        let product = Product::new("Harness v2", "Hive mind AI platform", session.id)
+            .with_id(original_id);
+        assert_eq!(product.id, original_id);
+    }
+
+    #[test]
+    fn project_starts_in_planning() {
+        let session = Session::new(8);
+        let product = Product::new("Harness v2", "Hive mind AI platform", session.id);
+        let project = Project::new("Core MCP Server", "Implement HTTP/SSE MCP server", product.id, session.id);
+        assert_eq!(project.status, ProjectStatus::Planning);
+        assert_eq!(project.name, "Core MCP Server");
+        assert_eq!(project.product_id, product.id);
+        assert_eq!(project.session_id, session.id);
+    }
+
+    #[test]
+    fn project_with_id() {
+        let session = Session::new(8);
+        let product = Product::new("Harness v2", "Hive mind AI platform", session.id);
+        let original_id = ProjectId::new();
+        let project = Project::new("Core MCP Server", "Implement HTTP/SSE MCP server", product.id, session.id)
+            .with_id(original_id);
+        assert_eq!(project.id, original_id);
+    }
+
+    #[test]
+    fn project_maintains_associations() {
+        let session = Session::new(8);
+        let product = Product::new("Harness v2", "Hive mind AI platform", session.id);
+        let project = Project::new("Core MCP Server", "Implement HTTP/SSE MCP server", product.id, session.id);
+        // Verify all associations are preserved
+        assert_eq!(project.product_id, product.id);
+        assert_eq!(project.session_id, session.id);
+        assert!(!project.name.is_empty());
+        assert!(!project.description.is_empty());
+    }
+
+    #[test]
+    fn plan_starts_in_draft() {
+        let session = Session::new(8);
+        let product = Product::new("Harness v2", "Hive mind AI platform", session.id);
+        let project = Project::new("Core MCP Server", "Implement HTTP/SSE MCP server", product.id, session.id);
+        let plan = Plan::new("MVP Execution", "Implement HTTP server first, then SSE", project.id, session.id);
+        assert_eq!(plan.status, PlanStatus::Draft);
+        assert_eq!(plan.name, "MVP Execution");
+        assert_eq!(plan.project_id, project.id);
+        assert_eq!(plan.session_id, session.id);
+    }
+
+    #[test]
+    fn plan_with_id() {
+        let session = Session::new(8);
+        let product = Product::new("Harness v2", "Hive mind AI platform", session.id);
+        let project = Project::new("Core MCP Server", "Implement HTTP/SSE MCP server", product.id, session.id);
+        let original_id = PlanId::new();
+        let plan = Plan::new("MVP Execution", "Implement HTTP server first, then SSE", project.id, session.id)
+            .with_id(original_id);
+        assert_eq!(plan.id, original_id);
+    }
+
+    #[test]
+    fn plan_maintains_associations() {
+        let session = Session::new(8);
+        let product = Product::new("Harness v2", "Hive mind AI platform", session.id);
+        let project = Project::new("Core MCP Server", "Implement HTTP/SSE MCP server", product.id, session.id);
+        let plan = Plan::new("MVP Execution", "Implement HTTP server first, then SSE", project.id, session.id);
+        // Verify all associations are preserved
+        assert_eq!(plan.project_id, project.id);
+        assert_eq!(plan.session_id, session.id);
+        assert!(!plan.name.is_empty());
+        assert!(!plan.strategy.is_empty());
+    }
+
+    #[test]
+    fn plan_serde_with_all_statuses() {
+        let session = Session::new(8);
+        let product = Product::new("Harness v2", "Hive mind AI platform", session.id);
+        let project = Project::new("Core MCP Server", "Implement HTTP/SSE MCP server", product.id, session.id);
+
+        let statuses = vec![
+            PlanStatus::Draft,
+            PlanStatus::Approved,
+            PlanStatus::InExecution,
+            PlanStatus::Paused,
+            PlanStatus::Completed,
+            PlanStatus::Abandoned,
+        ];
+
+        for status in statuses {
+            let mut plan = Plan::new("Test Plan", "Test strategy", project.id, session.id);
+            plan.status = status;
+
+            let json = serde_json::to_string(&plan).unwrap();
+            let deserialized: Plan = serde_json::from_str(&json).unwrap();
+
+            assert_eq!(deserialized.status, status);
+            assert_eq!(deserialized.name, "Test Plan");
+            assert_eq!(deserialized.strategy, "Test strategy");
+        }
+    }
+
+    #[test]
+    fn product_project_plan_hierarchy() {
+        let session = Session::new(8);
+        let product = Product::new("Harness v2", "Hive mind AI platform", session.id);
+        let project = Project::new("Core MCP Server", "Implement HTTP/SSE MCP server", product.id, session.id);
+        let plan = Plan::new("MVP Execution", "Implement HTTP server first, then SSE", project.id, session.id);
+
+        // Verify the complete hierarchy
+        assert_eq!(product.session_id, session.id);
+        assert_eq!(project.product_id, product.id);
+        assert_eq!(project.session_id, session.id);
+        assert_eq!(plan.project_id, project.id);
+        assert_eq!(plan.session_id, session.id);
     }
 }

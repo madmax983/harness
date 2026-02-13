@@ -29,7 +29,8 @@ use parking_lot::RwLock;
 
 use crate::{
     Agent, AgentId, AgentRole, AgentStatus, DirectMessage, DirectMessageId, Knowledge, KnowledgeId,
-    KnowledgeKind, Priority, Repository, RepositoryError, RepositoryResult, Session, SessionId,
+    KnowledgeKind, Plan, PlanId, PlanStatus, Priority, Product, ProductId, ProductStatus, Project,
+    ProjectId, ProjectStatus, Repository, RepositoryError, RepositoryResult, Session, SessionId,
     Task, TaskId, TaskStatus,
 };
 
@@ -38,6 +39,9 @@ const LABEL_AGENT: &str = "Agent";
 const LABEL_TASK: &str = "Task";
 const LABEL_KNOWLEDGE: &str = "Knowledge";
 const LABEL_DIRECT_MESSAGE: &str = "DirectMessage";
+const LABEL_PRODUCT: &str = "Product";
+const LABEL_PROJECT: &str = "Project";
+const LABEL_PLAN: &str = "Plan";
 const LABEL_INDEX: &str = "HarnessIndex";
 
 const EDGE_CONTAINS_AGENT: &str = "CONTAINS_AGENT";
@@ -331,6 +335,39 @@ impl AletheiaRepository {
         }
     }
 
+    fn parse_product_status(s: &str) -> RepositoryResult<ProductStatus> {
+        match s {
+            "concept" => Ok(ProductStatus::Concept),
+            "active" => Ok(ProductStatus::Active),
+            "maintenance" => Ok(ProductStatus::Maintenance),
+            "archived" => Ok(ProductStatus::Archived),
+            _ => Err(RepositoryError::Database(format!("Invalid product status: {s}"))),
+        }
+    }
+
+    fn parse_project_status(s: &str) -> RepositoryResult<ProjectStatus> {
+        match s {
+            "planning" => Ok(ProjectStatus::Planning),
+            "active" => Ok(ProjectStatus::Active),
+            "on_hold" => Ok(ProjectStatus::OnHold),
+            "completed" => Ok(ProjectStatus::Completed),
+            "archived" => Ok(ProjectStatus::Archived),
+            _ => Err(RepositoryError::Database(format!("Invalid project status: {s}"))),
+        }
+    }
+
+    fn parse_plan_status(s: &str) -> RepositoryResult<PlanStatus> {
+        match s {
+            "draft" => Ok(PlanStatus::Draft),
+            "approved" => Ok(PlanStatus::Approved),
+            "in_execution" => Ok(PlanStatus::InExecution),
+            "paused" => Ok(PlanStatus::Paused),
+            "completed" => Ok(PlanStatus::Completed),
+            "abandoned" => Ok(PlanStatus::Abandoned),
+            _ => Err(RepositoryError::Database(format!("Invalid plan status: {s}"))),
+        }
+    }
+
     // --- Node property helpers ---
 
     fn pstr<'a>(n: &'a Node, k: &str) -> RepositoryResult<&'a str> {
@@ -364,6 +401,9 @@ impl AletheiaRepository {
             id: SessionId::from_uuid(Self::parse_uuid(Self::pstr(n, "id")?)?),
             population_cap: Self::pint(n, "population_cap")? as usize,
             started_at: Self::ts_to_dt(Self::pint(n, "started_at")?),
+            agent_id: Self::opt_str(n, "agent_id")
+                .and_then(|s| Self::parse_uuid(s).ok())
+                .map(AgentId::from_uuid),
         })
     }
 
@@ -433,6 +473,41 @@ impl AletheiaRepository {
                 .map(TaskId::from_uuid),
             created_at: Self::ts_to_dt(Self::pint(n, "created_at")?),
             session_id: SessionId::from_uuid(Self::parse_uuid(Self::pstr(n, "session_id")?)?),
+        })
+    }
+
+    fn node_to_product(n: &Node) -> RepositoryResult<Product> {
+        Ok(Product {
+            id: ProductId::from_uuid(Self::parse_uuid(Self::pstr(n, "id")?)?),
+            name: Self::pstr(n, "name")?.to_string(),
+            description: Self::pstr(n, "description")?.to_string(),
+            status: Self::parse_product_status(Self::pstr(n, "status")?)?,
+            session_id: SessionId::from_uuid(Self::parse_uuid(Self::pstr(n, "session_id")?)?),
+            created_at: Self::ts_to_dt(Self::pint(n, "created_at")?),
+        })
+    }
+
+    fn node_to_project(n: &Node) -> RepositoryResult<Project> {
+        Ok(Project {
+            id: ProjectId::from_uuid(Self::parse_uuid(Self::pstr(n, "id")?)?),
+            name: Self::pstr(n, "name")?.to_string(),
+            description: Self::pstr(n, "description")?.to_string(),
+            status: Self::parse_project_status(Self::pstr(n, "status")?)?,
+            product_id: ProductId::from_uuid(Self::parse_uuid(Self::pstr(n, "product_id")?)?),
+            session_id: SessionId::from_uuid(Self::parse_uuid(Self::pstr(n, "session_id")?)?),
+            created_at: Self::ts_to_dt(Self::pint(n, "created_at")?),
+        })
+    }
+
+    fn node_to_plan(n: &Node) -> RepositoryResult<Plan> {
+        Ok(Plan {
+            id: PlanId::from_uuid(Self::parse_uuid(Self::pstr(n, "id")?)?),
+            name: Self::pstr(n, "name")?.to_string(),
+            strategy: Self::pstr(n, "strategy")?.to_string(),
+            status: Self::parse_plan_status(Self::pstr(n, "status")?)?,
+            project_id: ProjectId::from_uuid(Self::parse_uuid(Self::pstr(n, "project_id")?)?),
+            session_id: SessionId::from_uuid(Self::parse_uuid(Self::pstr(n, "session_id")?)?),
+            created_at: Self::ts_to_dt(Self::pint(n, "created_at")?),
         })
     }
 
@@ -526,6 +601,24 @@ impl Repository for AletheiaRepository {
     async fn get_session(&self, id: SessionId) -> RepositoryResult<Session> {
         let node_id = self.index_get(&Self::session_key(id))?;
         Self::node_to_session(&self.get_node(node_id)?)
+    }
+
+    async fn set_session_agent(
+        &self,
+        session_id: SessionId,
+        agent_id: AgentId,
+    ) -> RepositoryResult<()> {
+        let session_node = self.index_get(&Self::session_key(session_id))?;
+        let agent_id_str = agent_id.as_uuid().to_string();
+
+        self.db_write(|tx| {
+            Ok(tx.update_node(
+                session_node,
+                PropertyMapBuilder::new()
+                    .insert("agent_id", agent_id_str.as_str())
+                    .build(),
+            )?)
+        })
     }
 
     async fn create_agent(&self, agent: &Agent) -> RepositoryResult<()> {
@@ -982,6 +1075,126 @@ impl Repository for AletheiaRepository {
         msgs.sort_by(|a, b| a.created_at.cmp(&b.created_at));
         msgs.truncate(limit);
         Ok(msgs)
+    }
+
+    // === Product operations ===
+
+    async fn create_product(&self, product: &Product) -> RepositoryResult<()> {
+        let id_str = product.id.as_uuid().to_string();
+        let status_str = format!("{:?}", product.status).to_lowercase();
+        let session_id_str = product.session_id.as_uuid().to_string();
+        let created_at = Self::dt_to_ts(product.created_at);
+
+        let node_id = self.db_write(|tx| {
+            let props = PropertyMapBuilder::new()
+                .insert("id", id_str.as_str())
+                .insert("name", product.name.as_str())
+                .insert("description", product.description.as_str())
+                .insert("status", status_str.as_str())
+                .insert("session_id", session_id_str.as_str())
+                .insert("created_at", created_at)
+                .build();
+            Ok(tx.create_node(LABEL_PRODUCT, props)?)
+        })?;
+
+        self.index_set(&format!("Product:{}", product.id.as_uuid()), node_id)
+    }
+
+    async fn get_product(&self, id: ProductId) -> RepositoryResult<Product> {
+        let key = format!("Product:{}", id.as_uuid());
+        let node_id = self.index_get(&key)?;
+        Self::node_to_product(&self.get_node(node_id)?)
+    }
+
+    async fn list_products(
+        &self,
+        _session_id: SessionId,
+        _status: Option<ProductStatus>,
+    ) -> RepositoryResult<Vec<Product>> {
+        // Stub: return empty for now (would scan with status filter)
+        Ok(Vec::new())
+    }
+
+    // === Project operations ===
+
+    async fn create_project(&self, project: &Project) -> RepositoryResult<()> {
+        let id_str = project.id.as_uuid().to_string();
+        let status_str = format!("{:?}", project.status).to_lowercase();
+        let product_id_str = project.product_id.as_uuid().to_string();
+        let session_id_str = project.session_id.as_uuid().to_string();
+        let created_at = Self::dt_to_ts(project.created_at);
+
+        let node_id = self.db_write(|tx| {
+            let props = PropertyMapBuilder::new()
+                .insert("id", id_str.as_str())
+                .insert("name", project.name.as_str())
+                .insert("description", project.description.as_str())
+                .insert("status", status_str.as_str())
+                .insert("product_id", product_id_str.as_str())
+                .insert("session_id", session_id_str.as_str())
+                .insert("created_at", created_at)
+                .build();
+            Ok(tx.create_node(LABEL_PROJECT, props)?)
+        })?;
+
+        self.index_set(&format!("Project:{}", project.id.as_uuid()), node_id)
+    }
+
+    async fn get_project(&self, id: ProjectId) -> RepositoryResult<Project> {
+        let key = format!("Project:{}", id.as_uuid());
+        let node_id = self.index_get(&key)?;
+        Self::node_to_project(&self.get_node(node_id)?)
+    }
+
+    async fn list_projects(
+        &self,
+        _session_id: SessionId,
+        _product_id: Option<ProductId>,
+        _status: Option<ProjectStatus>,
+    ) -> RepositoryResult<Vec<Project>> {
+        // Stub: return empty for now (would scan with product_id and status filter)
+        Ok(Vec::new())
+    }
+
+    // === Plan operations ===
+
+    async fn create_plan(&self, plan: &Plan) -> RepositoryResult<()> {
+        let id_str = plan.id.as_uuid().to_string();
+        let status_str = format!("{:?}", plan.status).to_lowercase();
+        let project_id_str = plan.project_id.as_uuid().to_string();
+        let session_id_str = plan.session_id.as_uuid().to_string();
+        let created_at = Self::dt_to_ts(plan.created_at);
+
+        let node_id = self.db_write(|tx| {
+            let props = PropertyMapBuilder::new()
+                .insert("id", id_str.as_str())
+                .insert("name", plan.name.as_str())
+                .insert("strategy", plan.strategy.as_str())
+                .insert("status", status_str.as_str())
+                .insert("project_id", project_id_str.as_str())
+                .insert("session_id", session_id_str.as_str())
+                .insert("created_at", created_at)
+                .build();
+            Ok(tx.create_node(LABEL_PLAN, props)?)
+        })?;
+
+        self.index_set(&format!("Plan:{}", plan.id.as_uuid()), node_id)
+    }
+
+    async fn get_plan(&self, id: PlanId) -> RepositoryResult<Plan> {
+        let key = format!("Plan:{}", id.as_uuid());
+        let node_id = self.index_get(&key)?;
+        Self::node_to_plan(&self.get_node(node_id)?)
+    }
+
+    async fn list_plans(
+        &self,
+        _session_id: SessionId,
+        _project_id: Option<ProjectId>,
+        _status: Option<PlanStatus>,
+    ) -> RepositoryResult<Vec<Plan>> {
+        // Stub: return empty for now (would scan with project_id and status filter)
+        Ok(Vec::new())
     }
 }
 

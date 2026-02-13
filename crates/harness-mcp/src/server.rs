@@ -49,9 +49,9 @@ impl<R: Repository + 'static> HiveMcpServer<R> {
                 tasks: None,
             },
             instructions: Some(
-                "Harness Hive Mind MCP server. Provides 14 tools for multi-agent \
+                "Harness Hive Mind MCP server. Provides 21 tools for multi-agent \
                  coordination: task management, knowledge sharing, agent registration, \
-                 and direct messaging."
+                 direct messaging, and planning (products, projects, plans)."
                     .into(),
             ),
             meta: None,
@@ -88,6 +88,18 @@ impl<R: Repository + 'static> ServerHandler for HiveMcpServer<R> {
         _runtime: Arc<dyn McpServer>,
     ) -> Result<CallToolResult, CallToolError> {
         let handler = HiveHandler::new(self.state.clone());
+
+        // Restore agent_id from session if it exists (for MCP client persistence)
+        if let Ok(session) = self
+            .state
+            .repository()
+            .get_session(self.state.session_id())
+            .await
+        {
+            if let Some(agent_id) = session.agent_id {
+                handler.restore_agent_id(agent_id).await;
+            }
+        }
 
         let arguments = match params.arguments {
             Some(map) => serde_json::Value::Object(map),
@@ -325,6 +337,25 @@ pub fn tool_definitions() -> Vec<Tool> {
                 ),
             ]),
         ),
+        make_tool(
+            "fish_knowledge",
+            "Retrieve knowledge through associative memory retrieval (vector + graph connections).",
+            vec!["knowledge_id"],
+            HashMap::from([
+                (
+                    "knowledge_id".into(),
+                    prop("string", "ID of the knowledge entry to fish from"),
+                ),
+                (
+                    "limit".into(),
+                    prop_with_default(
+                        "integer",
+                        "Maximum number of results to return",
+                        serde_json::Value::Number(15.into()),
+                    ),
+                ),
+            ]),
+        ),
         // --- Agent tools ---
         make_tool(
             "register_agent",
@@ -399,6 +430,90 @@ pub fn tool_definitions() -> Vec<Tool> {
                 ),
             ]),
         ),
+        // --- Planning tools ---
+        make_tool(
+            "create_product",
+            "Create a new product.",
+            vec!["name", "description"],
+            HashMap::from([
+                ("name".into(), prop("string", "Name of the product")),
+                (
+                    "description".into(),
+                    prop("string", "Detailed description of the product"),
+                ),
+            ]),
+        ),
+        make_tool(
+            "list_products",
+            "List products in the current session, optionally filtered by status.",
+            vec![],
+            HashMap::from([(
+                "status".into(),
+                prop("string", "Filter by status: concept, active, maintenance, archived"),
+            )]),
+        ),
+        make_tool(
+            "create_project",
+            "Create a new project within a product.",
+            vec!["product_id", "name", "description"],
+            HashMap::from([
+                ("product_id".into(), prop("string", "ID of the parent product")),
+                ("name".into(), prop("string", "Name of the project")),
+                (
+                    "description".into(),
+                    prop("string", "Detailed description of the project"),
+                ),
+            ]),
+        ),
+        make_tool(
+            "list_projects",
+            "List projects in the current session, optionally filtered by product and/or status.",
+            vec![],
+            HashMap::from([
+                (
+                    "product_id".into(),
+                    prop("string", "Filter by parent product ID"),
+                ),
+                (
+                    "status".into(),
+                    prop(
+                        "string",
+                        "Filter by status: planning, active, on_hold, completed, archived",
+                    ),
+                ),
+            ]),
+        ),
+        make_tool(
+            "create_plan",
+            "Create a new plan within a project.",
+            vec!["project_id", "name", "strategy"],
+            HashMap::from([
+                ("project_id".into(), prop("string", "ID of the parent project")),
+                ("name".into(), prop("string", "Name of the plan")),
+                (
+                    "strategy".into(),
+                    prop("string", "Strategic approach or execution strategy"),
+                ),
+            ]),
+        ),
+        make_tool(
+            "list_plans",
+            "List plans in the current session, optionally filtered by project and/or status.",
+            vec![],
+            HashMap::from([
+                (
+                    "project_id".into(),
+                    prop("string", "Filter by parent project ID"),
+                ),
+                (
+                    "status".into(),
+                    prop(
+                        "string",
+                        "Filter by status: draft, approved, in_execution, paused, completed, abandoned",
+                    ),
+                ),
+            ]),
+        ),
     ]
 }
 
@@ -408,9 +523,9 @@ mod tests {
     use harness_persistence::{InMemoryRepository, Session};
 
     #[test]
-    fn test_tool_definitions_returns_14_tools() {
+    fn test_tool_definitions_returns_21_tools() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 14);
+        assert_eq!(tools.len(), 21);
     }
 
     #[test]

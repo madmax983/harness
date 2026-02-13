@@ -6,7 +6,8 @@
 use std::sync::Arc;
 
 use harness_persistence::{
-    Agent, AgentId, AgentRole, DirectMessage, Knowledge, KnowledgeKind, Priority, Repository,
+    Agent, AgentId, AgentRole, DirectMessage, Knowledge, KnowledgeKind, Plan, PlanId, PlanStatus,
+    Priority, Product, ProductId, ProductStatus, Project, ProjectId, ProjectStatus, Repository,
     RepositoryError, Task, TaskId, TaskStatus,
 };
 use tokio::sync::RwLock;
@@ -54,6 +55,11 @@ impl<R: Repository + 'static> HiveHandler<R> {
     /// Get a reference to the shared state (for spawning new handlers in tests).
     pub fn state_ref(&self) -> &Arc<HiveState<R>> {
         &self.state
+    }
+
+    /// Restore the agent ID from a previous session (for MCP client persistence).
+    pub async fn restore_agent_id(&self, agent_id: AgentId) {
+        *self.agent_id.write().await = Some(agent_id);
     }
 
     /// Dispatch a tool call by name.
@@ -157,6 +163,44 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 Ok(serde_json::to_value(resp).unwrap())
             }
 
+            // Planning tools
+            "create_product" => {
+                let req: tools::CreateProductRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_create_product(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "list_products" => {
+                let req: tools::ListProductsRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_list_products(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "create_project" => {
+                let req: tools::CreateProjectRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_create_project(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "list_projects" => {
+                let req: tools::ListProjectsRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_list_projects(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "create_plan" => {
+                let req: tools::CreatePlanRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_create_plan(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "list_plans" => {
+                let req: tools::ListPlansRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_list_plans(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+
             _ => Err(HandlerError::UnknownTool(name.to_string())),
         }
     }
@@ -179,6 +223,12 @@ impl<R: Repository + 'static> HiveHandler<R> {
             "send_direct_message",
             "get_messages",
             "get_thread_messages",
+            "create_product",
+            "list_products",
+            "create_project",
+            "list_projects",
+            "create_plan",
+            "list_plans",
         ]
     }
 
@@ -252,6 +302,63 @@ impl<R: Repository + 'static> HiveHandler<R> {
         }
     }
 
+    fn parse_product_id(s: &str) -> HandlerResult<ProductId> {
+        let uuid = uuid::Uuid::parse_str(s)
+            .map_err(|_| HandlerError::Parse(format!("Invalid product ID: {s}")))?;
+        Ok(ProductId::from_uuid(uuid))
+    }
+
+    fn parse_project_id(s: &str) -> HandlerResult<ProjectId> {
+        let uuid = uuid::Uuid::parse_str(s)
+            .map_err(|_| HandlerError::Parse(format!("Invalid project ID: {s}")))?;
+        Ok(ProjectId::from_uuid(uuid))
+    }
+
+    fn parse_plan_id(s: &str) -> HandlerResult<PlanId> {
+        let uuid = uuid::Uuid::parse_str(s)
+            .map_err(|_| HandlerError::Parse(format!("Invalid plan ID: {s}")))?;
+        Ok(PlanId::from_uuid(uuid))
+    }
+
+    fn parse_product_status(s: &str) -> HandlerResult<ProductStatus> {
+        match s {
+            "concept" => Ok(ProductStatus::Concept),
+            "active" => Ok(ProductStatus::Active),
+            "maintenance" => Ok(ProductStatus::Maintenance),
+            "archived" => Ok(ProductStatus::Archived),
+            _ => Err(HandlerError::InvalidArgs(format!(
+                "Invalid product status: {s}"
+            ))),
+        }
+    }
+
+    fn parse_project_status(s: &str) -> HandlerResult<ProjectStatus> {
+        match s {
+            "planning" => Ok(ProjectStatus::Planning),
+            "active" => Ok(ProjectStatus::Active),
+            "on_hold" => Ok(ProjectStatus::OnHold),
+            "completed" => Ok(ProjectStatus::Completed),
+            "archived" => Ok(ProjectStatus::Archived),
+            _ => Err(HandlerError::InvalidArgs(format!(
+                "Invalid project status: {s}"
+            ))),
+        }
+    }
+
+    fn parse_plan_status(s: &str) -> HandlerResult<PlanStatus> {
+        match s {
+            "draft" => Ok(PlanStatus::Draft),
+            "approved" => Ok(PlanStatus::Approved),
+            "in_execution" => Ok(PlanStatus::InExecution),
+            "paused" => Ok(PlanStatus::Paused),
+            "completed" => Ok(PlanStatus::Completed),
+            "abandoned" => Ok(PlanStatus::Abandoned),
+            _ => Err(HandlerError::InvalidArgs(format!(
+                "Invalid plan status: {s}"
+            ))),
+        }
+    }
+
     fn task_to_info(t: &Task) -> tools::TaskInfo {
         tools::TaskInfo {
             id: t.id.as_uuid().to_string(),
@@ -294,6 +401,38 @@ impl<R: Repository + 'static> HiveHandler<R> {
             content: m.content.clone(),
             created_at: m.created_at.to_rfc3339(),
             task_id: m.task_id.map(|t| t.as_uuid().to_string()),
+        }
+    }
+
+    fn product_to_info(p: &Product) -> tools::ProductInfo {
+        tools::ProductInfo {
+            id: p.id.as_uuid().to_string(),
+            name: p.name.clone(),
+            description: p.description.clone(),
+            status: format!("{:?}", p.status).to_lowercase(),
+            created_at: p.created_at.to_rfc3339(),
+        }
+    }
+
+    fn project_to_info(p: &Project) -> tools::ProjectInfo {
+        tools::ProjectInfo {
+            id: p.id.as_uuid().to_string(),
+            name: p.name.clone(),
+            description: p.description.clone(),
+            status: format!("{:?}", p.status).to_lowercase(),
+            product_id: p.product_id.as_uuid().to_string(),
+            created_at: p.created_at.to_rfc3339(),
+        }
+    }
+
+    fn plan_to_info(p: &Plan) -> tools::PlanInfo {
+        tools::PlanInfo {
+            id: p.id.as_uuid().to_string(),
+            name: p.name.clone(),
+            strategy: p.strategy.clone(),
+            status: format!("{:?}", p.status).to_lowercase(),
+            project_id: p.project_id.as_uuid().to_string(),
+            created_at: p.created_at.to_rfc3339(),
         }
     }
 
@@ -504,9 +643,11 @@ impl<R: Repository + 'static> HiveHandler<R> {
 
         // Get the starting knowledge entry
         let start_knowledge = self.state.repository().get_knowledge(kid).await?;
-        let starting_from = format!("{} [{}]",
+        let starting_from = format!(
+            "{} [{}]",
             start_knowledge.content.chars().take(50).collect::<String>(),
-            format!("{:?}", start_knowledge.kind).to_lowercase());
+            format!("{:?}", start_knowledge.kind).to_lowercase()
+        );
 
         // Track results with scores
         let mut results: HashMap<KnowledgeId, (Knowledge, f32, Vec<String>)> = HashMap::new();
@@ -551,7 +692,8 @@ impl<R: Repository + 'static> HiveHandler<R> {
                         let paths = vec![format!("via Task: {}", task_title)];
 
                         // If we already have this from vector search, combine scores
-                        results.entry(k_id)
+                        results
+                            .entry(k_id)
                             .and_modify(|(_, s, p)| {
                                 *s += score;
                                 p.push(paths[0].clone());
@@ -583,7 +725,8 @@ impl<R: Repository + 'static> HiveHandler<R> {
                         .unwrap_or_else(|_| "Unknown".into());
                     let paths = vec![format!("via Same Author [{}]", author_role)];
 
-                    results.entry(k_id)
+                    results
+                        .entry(k_id)
                         .and_modify(|(_, s, p)| {
                             *s += score;
                             p.push(paths[0].clone());
@@ -638,6 +781,13 @@ impl<R: Repository + 'static> HiveHandler<R> {
         let aid = agent.id;
 
         self.state.repository().create_agent(&agent).await?;
+
+        // Persist session-agent association for MCP client persistence
+        self.state
+            .repository()
+            .set_session_agent(self.state.session_id(), aid)
+            .await?;
+
         *self.agent_id.write().await = Some(aid);
 
         Ok(tools::RegisterAgentResponse {
@@ -749,6 +899,119 @@ impl<R: Repository + 'static> HiveHandler<R> {
 
         Ok(tools::GetThreadMessagesResponse {
             messages: messages.iter().map(Self::dm_to_info).collect(),
+        })
+    }
+
+    // --- Planning handlers ---
+
+    async fn handle_create_product(
+        &self,
+        req: tools::CreateProductRequest,
+    ) -> HandlerResult<tools::CreateProductResponse> {
+        let session_id = self.state.session_id();
+        let product = Product::new(&req.name, &req.description, session_id);
+        let product_id = product.id.as_uuid().to_string();
+
+        self.state.repository().create_product(&product).await?;
+
+        Ok(tools::CreateProductResponse { product_id })
+    }
+
+    async fn handle_list_products(
+        &self,
+        req: tools::ListProductsRequest,
+    ) -> HandlerResult<tools::ListProductsResponse> {
+        let status = req
+            .status
+            .as_deref()
+            .map(Self::parse_product_status)
+            .transpose()?;
+        let products = self
+            .state
+            .repository()
+            .list_products(self.state.session_id(), status)
+            .await?;
+
+        Ok(tools::ListProductsResponse {
+            products: products.iter().map(Self::product_to_info).collect(),
+        })
+    }
+
+    async fn handle_create_project(
+        &self,
+        req: tools::CreateProjectRequest,
+    ) -> HandlerResult<tools::CreateProjectResponse> {
+        let product_id = Self::parse_product_id(&req.product_id)?;
+        let session_id = self.state.session_id();
+        let project = Project::new(&req.name, &req.description, product_id, session_id);
+        let project_id = project.id.as_uuid().to_string();
+
+        self.state.repository().create_project(&project).await?;
+
+        Ok(tools::CreateProjectResponse { project_id })
+    }
+
+    async fn handle_list_projects(
+        &self,
+        req: tools::ListProjectsRequest,
+    ) -> HandlerResult<tools::ListProjectsResponse> {
+        let product_id = req
+            .product_id
+            .as_deref()
+            .map(Self::parse_product_id)
+            .transpose()?;
+        let status = req
+            .status
+            .as_deref()
+            .map(Self::parse_project_status)
+            .transpose()?;
+        let projects = self
+            .state
+            .repository()
+            .list_projects(self.state.session_id(), product_id, status)
+            .await?;
+
+        Ok(tools::ListProjectsResponse {
+            projects: projects.iter().map(Self::project_to_info).collect(),
+        })
+    }
+
+    async fn handle_create_plan(
+        &self,
+        req: tools::CreatePlanRequest,
+    ) -> HandlerResult<tools::CreatePlanResponse> {
+        let project_id = Self::parse_project_id(&req.project_id)?;
+        let session_id = self.state.session_id();
+        let plan = Plan::new(&req.name, &req.strategy, project_id, session_id);
+        let plan_id = plan.id.as_uuid().to_string();
+
+        self.state.repository().create_plan(&plan).await?;
+
+        Ok(tools::CreatePlanResponse { plan_id })
+    }
+
+    async fn handle_list_plans(
+        &self,
+        req: tools::ListPlansRequest,
+    ) -> HandlerResult<tools::ListPlansResponse> {
+        let project_id = req
+            .project_id
+            .as_deref()
+            .map(Self::parse_project_id)
+            .transpose()?;
+        let status = req
+            .status
+            .as_deref()
+            .map(Self::parse_plan_status)
+            .transpose()?;
+        let plans = self
+            .state
+            .repository()
+            .list_plans(self.state.session_id(), project_id, status)
+            .await?;
+
+        Ok(tools::ListPlansResponse {
+            plans: plans.iter().map(Self::plan_to_info).collect(),
         })
     }
 }
@@ -958,6 +1221,12 @@ mod tests {
         assert!(names.contains(&"register_agent"));
         assert!(names.contains(&"send_direct_message"));
         assert!(names.contains(&"fish_knowledge"));
-        assert_eq!(names.len(), 15);
+        assert!(names.contains(&"create_product"));
+        assert!(names.contains(&"list_products"));
+        assert!(names.contains(&"create_project"));
+        assert!(names.contains(&"list_projects"));
+        assert!(names.contains(&"create_plan"));
+        assert!(names.contains(&"list_plans"));
+        assert_eq!(names.len(), 21);
     }
 }

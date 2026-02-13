@@ -8,7 +8,8 @@ use chrono::Utc;
 use async_trait::async_trait;
 
 use crate::{
-    Agent, AgentId, AgentRole, AgentStatus, DirectMessage, Knowledge, KnowledgeId, Repository,
+    Agent, AgentId, AgentRole, AgentStatus, DirectMessage, Knowledge, KnowledgeId, Plan, PlanId,
+    PlanStatus, Product, ProductId, ProductStatus, Project, ProjectId, ProjectStatus, Repository,
     RepositoryError, RepositoryResult, Session, SessionId, Task, TaskId, TaskStatus,
 };
 
@@ -20,6 +21,9 @@ pub struct InMemoryRepository {
     tasks: RwLock<HashMap<TaskId, Task>>,
     knowledge: RwLock<HashMap<KnowledgeId, Knowledge>>,
     direct_messages: RwLock<Vec<DirectMessage>>,
+    products: RwLock<HashMap<ProductId, Product>>,
+    projects: RwLock<HashMap<ProjectId, Project>>,
+    plans: RwLock<HashMap<PlanId, Plan>>,
 }
 
 impl InMemoryRepository {
@@ -51,6 +55,25 @@ impl Repository for InMemoryRepository {
                 entity_type: "Session".into(),
                 id: id.as_uuid().to_string(),
             })
+    }
+
+    async fn set_session_agent(
+        &self,
+        session_id: SessionId,
+        agent_id: AgentId,
+    ) -> RepositoryResult<()> {
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|e| RepositoryError::Database(e.to_string()))?;
+        let session = sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| RepositoryError::NotFound {
+                entity_type: "Session".into(),
+                id: session_id.as_uuid().to_string(),
+            })?;
+        session.agent_id = Some(agent_id);
+        Ok(())
     }
 
     // === Agent operations ===
@@ -396,6 +419,133 @@ impl Repository for InMemoryRepository {
             .collect();
         result.sort_by(|a, b| a.created_at.cmp(&b.created_at));
         result.truncate(limit);
+        Ok(result)
+    }
+
+    // === Product operations ===
+
+    async fn create_product(&self, product: &Product) -> RepositoryResult<()> {
+        self.products
+            .write()
+            .map_err(|e| RepositoryError::Database(e.to_string()))?
+            .insert(product.id, product.clone());
+        Ok(())
+    }
+
+    async fn get_product(&self, id: ProductId) -> RepositoryResult<Product> {
+        self.products
+            .read()
+            .map_err(|e| RepositoryError::Database(e.to_string()))?
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| RepositoryError::NotFound {
+                entity_type: "Product".into(),
+                id: id.as_uuid().to_string(),
+            })
+    }
+
+    async fn list_products(
+        &self,
+        session_id: SessionId,
+        status: Option<ProductStatus>,
+    ) -> RepositoryResult<Vec<Product>> {
+        let products = self
+            .products
+            .read()
+            .map_err(|e| RepositoryError::Database(e.to_string()))?;
+        let mut result: Vec<_> = products
+            .values()
+            .filter(|p| p.session_id == session_id)
+            .filter(|p| status.is_none() || p.status == status.unwrap())
+            .cloned()
+            .collect();
+        result.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(result)
+    }
+
+    // === Project operations ===
+
+    async fn create_project(&self, project: &Project) -> RepositoryResult<()> {
+        self.projects
+            .write()
+            .map_err(|e| RepositoryError::Database(e.to_string()))?
+            .insert(project.id, project.clone());
+        Ok(())
+    }
+
+    async fn get_project(&self, id: ProjectId) -> RepositoryResult<Project> {
+        self.projects
+            .read()
+            .map_err(|e| RepositoryError::Database(e.to_string()))?
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| RepositoryError::NotFound {
+                entity_type: "Project".into(),
+                id: id.as_uuid().to_string(),
+            })
+    }
+
+    async fn list_projects(
+        &self,
+        session_id: SessionId,
+        product_id: Option<ProductId>,
+        status: Option<ProjectStatus>,
+    ) -> RepositoryResult<Vec<Project>> {
+        let projects = self
+            .projects
+            .read()
+            .map_err(|e| RepositoryError::Database(e.to_string()))?;
+        let mut result: Vec<_> = projects
+            .values()
+            .filter(|p| p.session_id == session_id)
+            .filter(|p| product_id.is_none() || p.product_id == product_id.unwrap())
+            .filter(|p| status.is_none() || p.status == status.unwrap())
+            .cloned()
+            .collect();
+        result.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(result)
+    }
+
+    // === Plan operations ===
+
+    async fn create_plan(&self, plan: &Plan) -> RepositoryResult<()> {
+        self.plans
+            .write()
+            .map_err(|e| RepositoryError::Database(e.to_string()))?
+            .insert(plan.id, plan.clone());
+        Ok(())
+    }
+
+    async fn get_plan(&self, id: PlanId) -> RepositoryResult<Plan> {
+        self.plans
+            .read()
+            .map_err(|e| RepositoryError::Database(e.to_string()))?
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| RepositoryError::NotFound {
+                entity_type: "Plan".into(),
+                id: id.as_uuid().to_string(),
+            })
+    }
+
+    async fn list_plans(
+        &self,
+        session_id: SessionId,
+        project_id: Option<ProjectId>,
+        status: Option<PlanStatus>,
+    ) -> RepositoryResult<Vec<Plan>> {
+        let plans = self
+            .plans
+            .read()
+            .map_err(|e| RepositoryError::Database(e.to_string()))?;
+        let mut result: Vec<_> = plans
+            .values()
+            .filter(|p| p.session_id == session_id)
+            .filter(|p| project_id.is_none() || p.project_id == project_id.unwrap())
+            .filter(|p| status.is_none() || p.status == status.unwrap())
+            .cloned()
+            .collect();
+        result.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         Ok(result)
     }
 }
@@ -843,5 +993,299 @@ mod tests {
 
         let thread = repo.get_thread_messages(task.id, 10).await.unwrap();
         assert_eq!(thread.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_product_crud() {
+        let repo = InMemoryRepository::new();
+        let session = Session::new(8);
+        repo.create_session(&session).await.unwrap();
+
+        let product = Product::new("AletheiaDB", "Bi-temporal graph database", session.id);
+        let product_id = product.id;
+        repo.create_product(&product).await.unwrap();
+
+        let fetched = repo.get_product(product_id).await.unwrap();
+        assert_eq!(fetched.id, product_id);
+        assert_eq!(fetched.name, "AletheiaDB");
+        assert_eq!(fetched.status, ProductStatus::Concept);
+        assert_eq!(fetched.session_id, session.id);
+    }
+
+    #[tokio::test]
+    async fn test_list_products_all() {
+        let repo = InMemoryRepository::new();
+        let session = Session::new(8);
+        repo.create_session(&session).await.unwrap();
+
+        repo.create_product(&Product::new("Harness", "Multi-agent orchestration", session.id))
+            .await
+            .unwrap();
+        repo.create_product(&Product::new("Thorp", "Quant trading platform", session.id))
+            .await
+            .unwrap();
+
+        let products = repo.list_products(session.id, None).await.unwrap();
+        assert_eq!(products.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_list_products_by_status() {
+        let repo = InMemoryRepository::new();
+        let session = Session::new(8);
+        repo.create_session(&session).await.unwrap();
+
+        let mut product1 = Product::new("Active Product", "Active", session.id);
+        product1.status = ProductStatus::Active;
+        let mut product2 = Product::new("Concept Product", "Concept", session.id);
+        product2.status = ProductStatus::Concept;
+
+        repo.create_product(&product1).await.unwrap();
+        repo.create_product(&product2).await.unwrap();
+
+        let active = repo
+            .list_products(session.id, Some(ProductStatus::Active))
+            .await
+            .unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].name, "Active Product");
+    }
+
+    #[tokio::test]
+    async fn test_project_crud() {
+        let repo = InMemoryRepository::new();
+        let session = Session::new(8);
+        repo.create_session(&session).await.unwrap();
+
+        let product = Product::new("Harness", "Multi-agent orchestration", session.id);
+        repo.create_product(&product).await.unwrap();
+
+        let project = Project::new(
+            "MCP Server",
+            "Implement MCP server for hive coordination",
+            product.id,
+            session.id,
+        );
+        let project_id = project.id;
+        repo.create_project(&project).await.unwrap();
+
+        let fetched = repo.get_project(project_id).await.unwrap();
+        assert_eq!(fetched.id, project_id);
+        assert_eq!(fetched.name, "MCP Server");
+        assert_eq!(fetched.product_id, product.id);
+        assert_eq!(fetched.status, ProjectStatus::Planning);
+    }
+
+    #[tokio::test]
+    async fn test_list_projects_all() {
+        let repo = InMemoryRepository::new();
+        let session = Session::new(8);
+        repo.create_session(&session).await.unwrap();
+
+        let product = Product::new("Harness", "Multi-agent", session.id);
+        repo.create_product(&product).await.unwrap();
+
+        repo.create_project(&Project::new("Project A", "Desc A", product.id, session.id))
+            .await
+            .unwrap();
+        repo.create_project(&Project::new("Project B", "Desc B", product.id, session.id))
+            .await
+            .unwrap();
+
+        let projects = repo.list_projects(session.id, None, None).await.unwrap();
+        assert_eq!(projects.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_list_projects_by_product() {
+        let repo = InMemoryRepository::new();
+        let session = Session::new(8);
+        repo.create_session(&session).await.unwrap();
+
+        let product1 = Product::new("Harness", "Multi-agent", session.id);
+        let product2 = Product::new("Thorp", "Trading", session.id);
+        repo.create_product(&product1).await.unwrap();
+        repo.create_product(&product2).await.unwrap();
+
+        repo.create_project(&Project::new("Harness Project", "H", product1.id, session.id))
+            .await
+            .unwrap();
+        repo.create_project(&Project::new("Thorp Project", "T", product2.id, session.id))
+            .await
+            .unwrap();
+
+        let harness_projects = repo
+            .list_projects(session.id, Some(product1.id), None)
+            .await
+            .unwrap();
+        assert_eq!(harness_projects.len(), 1);
+        assert_eq!(harness_projects[0].name, "Harness Project");
+    }
+
+    #[tokio::test]
+    async fn test_list_projects_by_status() {
+        let repo = InMemoryRepository::new();
+        let session = Session::new(8);
+        repo.create_session(&session).await.unwrap();
+
+        let product = Product::new("Harness", "Multi-agent", session.id);
+        repo.create_product(&product).await.unwrap();
+
+        let mut active_proj = Project::new("Active", "A", product.id, session.id);
+        active_proj.status = ProjectStatus::Active;
+        let planning_proj = Project::new("Planning", "P", product.id, session.id);
+
+        repo.create_project(&active_proj).await.unwrap();
+        repo.create_project(&planning_proj).await.unwrap();
+
+        let active = repo
+            .list_projects(session.id, None, Some(ProjectStatus::Active))
+            .await
+            .unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].name, "Active");
+    }
+
+    #[tokio::test]
+    async fn test_plan_crud() {
+        let repo = InMemoryRepository::new();
+        let session = Session::new(8);
+        repo.create_session(&session).await.unwrap();
+
+        let product = Product::new("Harness", "Multi-agent", session.id);
+        repo.create_product(&product).await.unwrap();
+
+        let project = Project::new("MCP Server", "Implement MCP", product.id, session.id);
+        repo.create_project(&project).await.unwrap();
+
+        let plan = Plan::new(
+            "Phase 1: Core Tools",
+            "Implement task/agent/knowledge tools first",
+            project.id,
+            session.id,
+        );
+        let plan_id = plan.id;
+        repo.create_plan(&plan).await.unwrap();
+
+        let fetched = repo.get_plan(plan_id).await.unwrap();
+        assert_eq!(fetched.id, plan_id);
+        assert_eq!(fetched.name, "Phase 1: Core Tools");
+        assert_eq!(fetched.project_id, project.id);
+        assert_eq!(fetched.status, PlanStatus::Draft);
+    }
+
+    #[tokio::test]
+    async fn test_list_plans_all() {
+        let repo = InMemoryRepository::new();
+        let session = Session::new(8);
+        repo.create_session(&session).await.unwrap();
+
+        let product = Product::new("Harness", "Multi-agent", session.id);
+        repo.create_product(&product).await.unwrap();
+
+        let project = Project::new("MCP Server", "MCP", product.id, session.id);
+        repo.create_project(&project).await.unwrap();
+
+        repo.create_plan(&Plan::new("Phase 1", "P1", project.id, session.id))
+            .await
+            .unwrap();
+        repo.create_plan(&Plan::new("Phase 2", "P2", project.id, session.id))
+            .await
+            .unwrap();
+
+        let plans = repo.list_plans(session.id, None, None).await.unwrap();
+        assert_eq!(plans.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_list_plans_by_project() {
+        let repo = InMemoryRepository::new();
+        let session = Session::new(8);
+        repo.create_session(&session).await.unwrap();
+
+        let product = Product::new("Harness", "Multi-agent", session.id);
+        repo.create_product(&product).await.unwrap();
+
+        let project1 = Project::new("Project A", "PA", product.id, session.id);
+        let project2 = Project::new("Project B", "PB", product.id, session.id);
+        repo.create_project(&project1).await.unwrap();
+        repo.create_project(&project2).await.unwrap();
+
+        repo.create_plan(&Plan::new("A-Plan", "AP", project1.id, session.id))
+            .await
+            .unwrap();
+        repo.create_plan(&Plan::new("B-Plan", "BP", project2.id, session.id))
+            .await
+            .unwrap();
+
+        let project1_plans = repo
+            .list_plans(session.id, Some(project1.id), None)
+            .await
+            .unwrap();
+        assert_eq!(project1_plans.len(), 1);
+        assert_eq!(project1_plans[0].name, "A-Plan");
+    }
+
+    #[tokio::test]
+    async fn test_list_plans_by_status() {
+        let repo = InMemoryRepository::new();
+        let session = Session::new(8);
+        repo.create_session(&session).await.unwrap();
+
+        let product = Product::new("Harness", "Multi-agent", session.id);
+        repo.create_product(&product).await.unwrap();
+
+        let project = Project::new("Project", "P", product.id, session.id);
+        repo.create_project(&project).await.unwrap();
+
+        let mut approved = Plan::new("Approved Plan", "A", project.id, session.id);
+        approved.status = PlanStatus::Approved;
+        let draft = Plan::new("Draft Plan", "D", project.id, session.id);
+
+        repo.create_plan(&approved).await.unwrap();
+        repo.create_plan(&draft).await.unwrap();
+
+        let approved_plans = repo
+            .list_plans(session.id, None, Some(PlanStatus::Approved))
+            .await
+            .unwrap();
+        assert_eq!(approved_plans.len(), 1);
+        assert_eq!(approved_plans[0].name, "Approved Plan");
+    }
+
+    #[tokio::test]
+    async fn test_product_project_plan_hierarchy() {
+        let repo = InMemoryRepository::new();
+        let session = Session::new(8);
+        repo.create_session(&session).await.unwrap();
+
+        // Create full hierarchy
+        let product = Product::new("Harness", "Multi-agent orchestration", session.id);
+        repo.create_product(&product).await.unwrap();
+
+        let project = Project::new("MCP Server", "Implement MCP", product.id, session.id);
+        repo.create_project(&project).await.unwrap();
+
+        let plan = Plan::new("Phase 1", "Core tools", project.id, session.id);
+        repo.create_plan(&plan).await.unwrap();
+
+        // Verify hierarchy relationships
+        let fetched_product = repo.get_product(product.id).await.unwrap();
+        assert_eq!(fetched_product.name, "Harness");
+
+        let projects = repo
+            .list_projects(session.id, Some(product.id), None)
+            .await
+            .unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].id, project.id);
+
+        let plans = repo
+            .list_plans(session.id, Some(project.id), None)
+            .await
+            .unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].id, plan.id);
+        assert_eq!(plans[0].project_id, project.id);
     }
 }

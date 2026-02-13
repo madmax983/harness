@@ -42,6 +42,19 @@ codex mcp add harness --url http://localhost:3000/sse
 gemini mcp add --scope user -t sse harness http://localhost:3000/sse
 ```
 
+If a local agent only accepts `command` + `args` MCP config, use a stdio bridge:
+
+```json
+{
+  "mcpServers": {
+    "harness": {
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "mcp-remote", "http://localhost:3000/sse"]
+    }
+  }
+}
+```
+
 ### With Alternative Agent CLIs
 
 Harness supports different LLM CLI tools beyond Claude:
@@ -110,6 +123,7 @@ cargo run -- \
 --embedding-model, -e <MODEL>  Ollama model for semantic search
 --ollama-url <URL>          Ollama base URL (default: http://localhost:11434)
 --agent-cli <CLI>           Agent CLI executable (default: "claude", alternatives: "gemini", "gpt-4")
+--agent-runtime <RUNTIME>   Runtime adapter override: claude, codex, gemini, claude_compatible
 ```
 
 ## Architecture
@@ -127,18 +141,26 @@ cargo run -- \
 
 ## MCP Server
 
-The MCP server starts automatically on the specified port (default 3000) and exposes 14 tools for agent coordination:
+The MCP server endpoint is `http://localhost:3000/sse` (by default) and exposes 14 tools for agent coordination.
 
-**Endpoint:** `http://localhost:3000/sse`
+Start either runtime:
 
-Connect Claude Desktop/CLI with this configuration in `claude_desktop_config.json`:
+```bash
+# Full swarm runtime (orchestrator + TUI/headless + MCP)
+cargo run -- --port 3000
+
+# MCP + persistence only
+cargo run --bin harness-mcpd -- --port 3000
+```
+
+Example command/args MCP config (Claude Desktop/other stdio-style clients):
 
 ```json
 {
   "mcpServers": {
-    "harness-hive": {
-      "command": "cargo",
-      "args": ["run", "--", "--embedding-model", "nomic-embed-text"],
+    "harness": {
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "mcp-remote", "http://localhost:3000/sse"],
       "env": {}
     }
   }

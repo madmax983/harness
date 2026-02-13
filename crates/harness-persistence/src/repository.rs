@@ -3,8 +3,9 @@
 use async_trait::async_trait;
 
 use crate::{
-    Agent, AgentId, AgentRole, AgentStatus, DirectMessage, Knowledge, Session, SessionId, Task,
-    TaskId, TaskStatus,
+    Agent, AgentId, AgentRole, AgentStatus, DirectMessage, Knowledge, Plan, PlanId, PlanStatus,
+    Product, ProductId, ProductStatus, Project, ProjectId, ProjectStatus, Session, SessionId,
+    Task, TaskId, TaskStatus,
 };
 
 /// Error type for repository operations.
@@ -48,6 +49,13 @@ pub trait Repository: Send + Sync {
 
     /// Get a session by ID.
     async fn get_session(&self, id: SessionId) -> RepositoryResult<Session>;
+
+    /// Set the agent ID for a session (for MCP client persistence).
+    async fn set_session_agent(
+        &self,
+        session_id: SessionId,
+        agent_id: AgentId,
+    ) -> RepositoryResult<()>;
 
     // === Agent operations ===
 
@@ -157,4 +165,51 @@ pub trait Repository: Send + Sync {
         task_id: TaskId,
         limit: usize,
     ) -> RepositoryResult<Vec<DirectMessage>>;
+
+    // === Product operations ===
+
+    /// Create a new product.
+    async fn create_product(&self, product: &Product) -> RepositoryResult<()>;
+
+    /// Get a product by ID.
+    async fn get_product(&self, id: ProductId) -> RepositoryResult<Product>;
+
+    /// List products in a session, optionally filtered by status.
+    async fn list_products(
+        &self,
+        session_id: SessionId,
+        status: Option<ProductStatus>,
+    ) -> RepositoryResult<Vec<Product>>;
+
+    // === Project operations ===
+
+    /// Create a new project.
+    async fn create_project(&self, project: &Project) -> RepositoryResult<()>;
+
+    /// Get a project by ID.
+    async fn get_project(&self, id: ProjectId) -> RepositoryResult<Project>;
+
+    /// List projects in a session, optionally filtered by product and/or status.
+    async fn list_projects(
+        &self,
+        session_id: SessionId,
+        product_id: Option<ProductId>,
+        status: Option<ProjectStatus>,
+    ) -> RepositoryResult<Vec<Project>>;
+
+    // === Plan operations ===
+
+    /// Create a new plan.
+    async fn create_plan(&self, plan: &Plan) -> RepositoryResult<()>;
+
+    /// Get a plan by ID.
+    async fn get_plan(&self, id: PlanId) -> RepositoryResult<Plan>;
+
+    /// List plans in a session, optionally filtered by project and/or status.
+    async fn list_plans(
+        &self,
+        session_id: SessionId,
+        project_id: Option<ProjectId>,
+        status: Option<PlanStatus>,
+    ) -> RepositoryResult<Vec<Plan>>;
 }

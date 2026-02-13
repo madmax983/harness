@@ -2,13 +2,19 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::runtime::AgentRuntimeKind;
+
 /// Configuration for spawning agents.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrchestratorConfig {
     /// Maximum number of concurrent agents.
     pub population_cap: usize,
-    /// Path to the claude CLI executable.
-    pub claude_path: String,
+    /// Path to the agent CLI executable.
+    #[serde(alias = "claude_path")]
+    pub agent_cli_path: String,
+    /// Runtime adapter for the CLI.
+    #[serde(default)]
+    pub agent_runtime: AgentRuntimeKind,
     /// MCP server configuration to pass to agents.
     pub mcp_config: McpServerConfig,
 }
@@ -17,7 +23,8 @@ impl Default for OrchestratorConfig {
     fn default() -> Self {
         Self {
             population_cap: 8,
-            claude_path: "claude".into(),
+            agent_cli_path: "claude".into(),
+            agent_runtime: AgentRuntimeKind::default(),
             mcp_config: McpServerConfig::default(),
         }
     }
@@ -100,6 +107,14 @@ impl McpServerConfig {
                 }
             })
             .to_string(),
+        }
+    }
+
+    /// Return HTTP/SSE URL if transport is `HttpSse`.
+    pub fn http_sse_url(&self) -> Option<&str> {
+        match &self.transport {
+            McpTransport::HttpSse { url } => Some(url.as_str()),
+            McpTransport::Stdio { .. } => None,
         }
     }
 }

@@ -10,7 +10,7 @@ use aletheiadb::storage::index_persistence::PersistenceConfig;
 use aletheiadb::{AletheiaDB, AletheiaDBConfig};
 use anyhow::Result;
 use harness_mcp::{HiveState, start_mcp_server};
-use harness_orchestrator::{McpServerConfig, OrchestratorConfig, ProcessManager};
+use harness_orchestrator::{AgentRuntimeKind, McpServerConfig, OrchestratorConfig, ProcessManager};
 use harness_persistence::{AgentRole, AletheiaRepository, Repository, Session};
 use harness_tui::TuiRunner;
 use tracing_subscriber::EnvFilter;
@@ -31,6 +31,8 @@ struct Args {
     ollama_url: Option<String>,
     /// Agent CLI to use (default: "claude", alternatives: "gemini", "gpt-4").
     agent_cli: Option<String>,
+    /// Runtime adapter override (claude, codex, gemini, claude_compatible).
+    agent_runtime: Option<String>,
 }
 
 impl Args {
@@ -44,6 +46,7 @@ impl Args {
             embedding_model: None,
             ollama_url: None,
             agent_cli: None,
+            agent_runtime: None,
         };
 
         while let Some(arg) = args.next() {
@@ -71,12 +74,29 @@ impl Args {
                 "--agent-cli" => {
                     result.agent_cli = args.next();
                 }
+                "--agent-runtime" => {
+                    result.agent_runtime = args.next();
+                }
                 _ => {}
             }
         }
 
         result
     }
+}
+
+fn resolve_agent_runtime(agent_cli: &str, runtime_override: Option<&str>) -> AgentRuntimeKind {
+    if let Some(value) = runtime_override {
+        if let Some(kind) = AgentRuntimeKind::from_flag(value) {
+            return kind;
+        }
+        tracing::warn!(
+            runtime_override = %value,
+            "Unknown --agent-runtime override, inferring runtime from --agent-cli"
+        );
+    }
+
+    AgentRuntimeKind::infer_from_cli(agent_cli)
 }
 
 /// Get the embedding dimensions for common Ollama models.
@@ -129,11 +149,7 @@ async fn main() -> Result<()> {
     let db_path = std::env::current_dir()?.join(".harness-data");
 
     let config = AletheiaDBConfig::builder()
-        .wal(
-            WalConfigBuilder::new()
-                .wal_dir(db_path.join("wal"))
-                .build(),
-        )
+        .wal(WalConfigBuilder::new().wal_dir(db_path.join("wal")).build())
         .persistence(PersistenceConfig {
             enabled: true,
             data_dir: db_path.join("indexes"),
@@ -191,13 +207,19 @@ async fn main() -> Result<()> {
     // 4. Configure orchestrator with MCP server URL
     let mcp_url = format!("http://localhost:{}/sse", args.port);
     let agent_cli = args.agent_cli.as_deref().unwrap_or("claude");
+    let agent_runtime = resolve_agent_runtime(agent_cli, args.agent_runtime.as_deref());
     let config = OrchestratorConfig {
         population_cap: args.workers + 1,
-        claude_path: agent_cli.into(),
+        agent_cli_path: agent_cli.into(),
+        agent_runtime,
         mcp_config: McpServerConfig::http_sse(&mcp_url),
     };
 
-    tracing::info!(agent_cli = %agent_cli, "Agent CLI configured");
+    tracing::info!(
+        agent_cli = %agent_cli,
+        agent_runtime = ?agent_runtime,
+        "Agent CLI configured"
+    );
 
     let process_manager = Arc::new(ProcessManager::new(config, repository.clone()));
 
@@ -313,5 +335,37 @@ mod tests {
         let roles = default_worker_roles(1);
         assert_eq!(roles.len(), 1);
         assert_eq!(roles[0], AgentRole::Developer);
+    }
+
+    #[test]
+    fn runtime_inferred_from_cli_name() {
+        assert_eq!(
+            resolve_agent_runtime("codex", None),
+            AgentRuntimeKind::Codex
+        );
+        assert_eq!(
+            resolve_agent_runtime("gemini", None),
+            AgentRuntimeKind::Gemini
+        );
+        assert_eq!(
+            resolve_agent_runtime("claude", None),
+            AgentRuntimeKind::Claude
+        );
+    }
+
+    #[test]
+    fn runtime_override_wins_when_valid() {
+        assert_eq!(
+            resolve_agent_runtime("claude", Some("codex")),
+            AgentRuntimeKind::Codex
+        );
+    }
+
+    #[test]
+    fn runtime_override_falls_back_when_invalid() {
+        assert_eq!(
+            resolve_agent_runtime("gemini", Some("unknown")),
+            AgentRuntimeKind::Gemini
+        );
     }
 }

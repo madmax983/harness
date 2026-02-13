@@ -1,4 +1,4 @@
-//! Process management for Claude agents.
+//! Process management for agent CLI processes.
 
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -10,6 +10,7 @@ use tokio::sync::RwLock;
 
 use crate::config::OrchestratorConfig;
 use crate::prompts;
+use crate::runtime::{AgentRuntime, build_runtime};
 
 /// Error type for process operations.
 #[derive(Debug, thiserror::Error)]
@@ -38,9 +39,10 @@ pub enum ProcessError {
 /// Result type for process operations.
 pub type ProcessResult<T> = Result<T, ProcessError>;
 
-/// Manages Claude processes.
+/// Manages agent processes.
 pub struct ProcessManager<R: Repository> {
     config: OrchestratorConfig,
+    runtime: Arc<dyn AgentRuntime>,
     repository: Arc<R>,
     processes: RwLock<HashMap<AgentId, Child>>,
 }
@@ -48,8 +50,10 @@ pub struct ProcessManager<R: Repository> {
 impl<R: Repository + 'static> ProcessManager<R> {
     /// Create a new process manager.
     pub fn new(config: OrchestratorConfig, repository: Arc<R>) -> Self {
+        let runtime = build_runtime(config.agent_runtime);
         Self {
             config,
+            runtime,
             repository,
             processes: RwLock::new(HashMap::new()),
         }
@@ -57,7 +61,7 @@ impl<R: Repository + 'static> ProcessManager<R> {
 
     /// Spawn the Strategoi agent.
     ///
-    /// Creates the agent record and spawns a Claude process with the Strategoi prompt.
+    /// Creates the agent record and spawns a process with the Strategoi prompt.
     pub async fn spawn_strategoi(
         &self,
         session_id: SessionId,
@@ -69,7 +73,7 @@ impl<R: Repository + 'static> ProcessManager<R> {
 
     /// Spawn a worker agent with a specific BMAD role.
     ///
-    /// Creates the agent record and spawns a Claude process with the role-specific prompt.
+    /// Creates the agent record and spawns a process with the role-specific prompt.
     pub async fn spawn_worker(
         &self,
         role: AgentRole,
@@ -121,7 +125,7 @@ impl<R: Repository + 'static> ProcessManager<R> {
         Ok(agent_id)
     }
 
-    /// Spawn a Claude process for a pre-existing agent with a custom prompt.
+    /// Spawn a process for a pre-existing agent with a custom prompt.
     pub async fn spawn(&self, agent_id: AgentId, prompt: &str) -> ProcessResult<()> {
         // Check population cap
         let agent = self
@@ -145,15 +149,15 @@ impl<R: Repository + 'static> ProcessManager<R> {
         self.spawn_process(agent_id, prompt).await
     }
 
-    /// Internal: spawn a Claude process and track it.
+    /// Internal: spawn an agent process and track it.
     async fn spawn_process(&self, agent_id: AgentId, prompt: &str) -> ProcessResult<()> {
-        let mcp_json = self.config.mcp_config.to_json();
+        let spec = self
+            .runtime
+            .build_command(&self.config.agent_cli_path, prompt, &self.config.mcp_config)
+            .map_err(|e| ProcessError::SpawnFailed(e.to_string()))?;
 
-        let child = Command::new(&self.config.claude_path)
-            .arg("-p")
-            .arg(prompt)
-            .arg("--mcp-config")
-            .arg(&mcp_json)
+        let child = Command::new(&spec.program)
+            .args(&spec.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -222,12 +226,20 @@ mod tests {
     use super::*;
     use harness_persistence::{InMemoryRepository, Session};
 
+    fn test_cli_path() -> String {
+        if cfg!(windows) {
+            std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string())
+        } else {
+            "sh".to_string()
+        }
+    }
+
     #[tokio::test]
     async fn test_cap_enforcement() {
         let repo = Arc::new(InMemoryRepository::new());
         let config = OrchestratorConfig {
             population_cap: 1,
-            claude_path: "echo".into(),
+            agent_cli_path: test_cli_path(),
             ..Default::default()
         };
 
@@ -254,7 +266,7 @@ mod tests {
         let repo = Arc::new(InMemoryRepository::new());
         let config = OrchestratorConfig {
             population_cap: 8,
-            claude_path: "echo".into(),
+            agent_cli_path: test_cli_path(),
             ..Default::default()
         };
 
@@ -277,7 +289,7 @@ mod tests {
         let repo = Arc::new(InMemoryRepository::new());
         let config = OrchestratorConfig {
             population_cap: 8,
-            claude_path: "echo".into(),
+            agent_cli_path: test_cli_path(),
             ..Default::default()
         };
 
