@@ -654,6 +654,41 @@ impl Repository for InMemoryRepository {
         result.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         Ok(result)
     }
+
+    // === Experimental features access (not supported in memory) ===
+
+    fn get_raw_db(&self) -> RepositoryResult<&aletheiadb::AletheiaDB> {
+        Err(RepositoryError::Database(
+            "InMemoryRepository does not support raw AletheiaDB access".into(),
+        ))
+    }
+
+    fn get_node_id_for_task(
+        &self,
+        _task_id: TaskId,
+    ) -> RepositoryResult<aletheiadb::core::id::NodeId> {
+        Err(RepositoryError::Database(
+            "InMemoryRepository does not support NodeId lookups".into(),
+        ))
+    }
+
+    fn get_node_id_for_knowledge(
+        &self,
+        _knowledge_id: crate::KnowledgeId,
+    ) -> RepositoryResult<aletheiadb::core::id::NodeId> {
+        Err(RepositoryError::Database(
+            "InMemoryRepository does not support NodeId lookups".into(),
+        ))
+    }
+
+    fn get_node_id_for_agent(
+        &self,
+        _agent_id: AgentId,
+    ) -> RepositoryResult<aletheiadb::core::id::NodeId> {
+        Err(RepositoryError::Database(
+            "InMemoryRepository does not support NodeId lookups".into(),
+        ))
+    }
 }
 
 #[cfg(test)]

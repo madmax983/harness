@@ -1586,6 +1586,33 @@ impl Repository for AletheiaRepository {
 
         Ok(all)
     }
+
+    // === Experimental features access ===
+
+    fn get_raw_db(&self) -> RepositoryResult<&aletheiadb::AletheiaDB> {
+        Ok(&self.db)
+    }
+
+    fn get_node_id_for_task(
+        &self,
+        task_id: TaskId,
+    ) -> RepositoryResult<aletheiadb::core::id::NodeId> {
+        self.index_get(&Self::task_key(task_id))
+    }
+
+    fn get_node_id_for_knowledge(
+        &self,
+        knowledge_id: crate::KnowledgeId,
+    ) -> RepositoryResult<aletheiadb::core::id::NodeId> {
+        self.index_get(&Self::knowledge_key(knowledge_id))
+    }
+
+    fn get_node_id_for_agent(
+        &self,
+        agent_id: AgentId,
+    ) -> RepositoryResult<aletheiadb::core::id::NodeId> {
+        self.index_get(&Self::agent_key(agent_id))
+    }
 }
 
 #[cfg(test)]

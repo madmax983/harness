@@ -49,9 +49,11 @@ impl<R: Repository + 'static> HiveMcpServer<R> {
                 tasks: None,
             },
             instructions: Some(
-                "Harness Hive Mind MCP server. Provides 34 tools for multi-agent \
+                "Harness Hive Mind MCP server. Provides 40 tools for multi-agent \
                  coordination: task management, knowledge sharing, agent registration, \
-                 direct messaging, and planning (products, projects, plans)."
+                 direct messaging, planning (products, projects, plans), and AletheiaDB Nova \
+                 experimental features (temporal paths, semantic navigation, clustering, graph \
+                 layout, activity resonance, temporal snapshots)."
                     .into(),
             ),
             meta: None,
@@ -271,7 +273,7 @@ fn with_agent_id(
     props
 }
 
-/// Returns the full list of 34 tool definitions with JSON Schema input schemas.
+/// Returns the full list of 40 tool definitions with JSON Schema input schemas.
 pub fn tool_definitions() -> Vec<Tool> {
     vec![
         // --- Task tools ---
@@ -822,6 +824,185 @@ pub fn tool_definitions() -> Vec<Tool> {
                 ),
             ])),
         ),
+        // --- Nova Experimental Features ---
+        make_tool(
+            "find_temporal_path",
+            "Find temporal path between two entities at a specific point in time using Chronos temporal navigation.",
+            vec![
+                "entity_type",
+                "start_entity_id",
+                "end_entity_id",
+                "valid_time",
+                "tx_time",
+            ],
+            with_agent_id(HashMap::from([
+                (
+                    "entity_type".into(),
+                    prop("string", "Entity type: task | knowledge"),
+                ),
+                (
+                    "start_entity_id".into(),
+                    prop("string", "Starting entity UUID"),
+                ),
+                ("end_entity_id".into(), prop("string", "Target entity UUID")),
+                ("valid_time".into(), prop("string", "Valid time (RFC3339)")),
+                (
+                    "tx_time".into(),
+                    prop("string", "Transaction time (RFC3339)"),
+                ),
+            ])),
+        ),
+        make_tool(
+            "navigate_semantic_graph",
+            "Navigate graph using semantic similarity to find shortest path weighted by vector distance.",
+            vec![
+                "entity_type",
+                "start_entity_id",
+                "end_entity_id",
+                "vector_property",
+            ],
+            with_agent_id(HashMap::from([
+                (
+                    "entity_type".into(),
+                    prop("string", "Entity type: task | knowledge"),
+                ),
+                (
+                    "start_entity_id".into(),
+                    prop("string", "Starting entity UUID"),
+                ),
+                ("end_entity_id".into(), prop("string", "Target entity UUID")),
+                (
+                    "vector_property".into(),
+                    prop(
+                        "string",
+                        "Vector property name to use for semantic distance",
+                    ),
+                ),
+            ])),
+        ),
+        make_tool(
+            "discover_semantic_clusters",
+            "Discover semantic clusters using Cartographer k-means clustering on entity vectors.",
+            vec!["vector_property", "num_clusters"],
+            with_agent_id(HashMap::from([
+                (
+                    "vector_property".into(),
+                    prop("string", "Vector property name to cluster on"),
+                ),
+                (
+                    "num_clusters".into(),
+                    prop("integer", "Number of clusters to discover"),
+                ),
+                (
+                    "reify".into(),
+                    prop_with_default(
+                        "boolean",
+                        "Create graph nodes for cluster regions",
+                        serde_json::Value::Bool(false),
+                    ),
+                ),
+            ])),
+        ),
+        make_tool(
+            "generate_graph_layout",
+            "Generate 2D graph layout using Kaleidoscope force-directed algorithm with optional semantic links.",
+            vec!["entity_type"],
+            with_agent_id(HashMap::from([
+                (
+                    "entity_type".into(),
+                    prop("string", "Entity type: task | knowledge"),
+                ),
+                (
+                    "iterations".into(),
+                    prop_with_default(
+                        "integer",
+                        "Number of layout iterations",
+                        serde_json::Value::Number(50.into()),
+                    ),
+                ),
+                (
+                    "width".into(),
+                    prop_with_default(
+                        "number",
+                        "Layout width",
+                        serde_json::Value::Number(serde_json::Number::from_f64(800.0).unwrap()),
+                    ),
+                ),
+                (
+                    "height".into(),
+                    prop_with_default(
+                        "number",
+                        "Layout height",
+                        serde_json::Value::Number(serde_json::Number::from_f64(600.0).unwrap()),
+                    ),
+                ),
+                (
+                    "vector_property".into(),
+                    prop("string", "Optional vector property for semantic attraction"),
+                ),
+            ])),
+        ),
+        make_tool(
+            "find_activity_resonance",
+            "Find entities with similar temporal activity patterns using Echo Chamber activity density analysis.",
+            vec![
+                "entity_type",
+                "target_entity_id",
+                "window_seconds",
+                "num_bins",
+            ],
+            with_agent_id(HashMap::from([
+                (
+                    "entity_type".into(),
+                    prop("string", "Entity type: task | knowledge"),
+                ),
+                (
+                    "target_entity_id".into(),
+                    prop("string", "Target entity UUID to match activity against"),
+                ),
+                (
+                    "window_seconds".into(),
+                    prop("integer", "Time window for activity analysis (seconds)"),
+                ),
+                (
+                    "num_bins".into(),
+                    prop("integer", "Number of temporal bins for fingerprint"),
+                ),
+                (
+                    "min_similarity".into(),
+                    prop_with_default(
+                        "number",
+                        "Minimum similarity score (0-1)",
+                        serde_json::Value::Number(serde_json::Number::from_f64(0.5).unwrap()),
+                    ),
+                ),
+                (
+                    "limit".into(),
+                    prop_with_default(
+                        "integer",
+                        "Max results",
+                        serde_json::Value::Number(10.into()),
+                    ),
+                ),
+            ])),
+        ),
+        make_tool(
+            "compare_temporal_snapshots",
+            "Compare two temporal snapshots to identify added, removed, and modified entities using TemporalDiff.",
+            vec!["t1", "t2"],
+            with_agent_id(HashMap::from([
+                ("t1".into(), prop("string", "First timestamp (RFC3339)")),
+                ("t2".into(), prop("string", "Second timestamp (RFC3339)")),
+                (
+                    "limit".into(),
+                    prop_with_default(
+                        "integer",
+                        "Max changes to return",
+                        serde_json::Value::Number(100.into()),
+                    ),
+                ),
+            ])),
+        ),
     ]
 }
 
@@ -831,9 +1012,9 @@ mod tests {
     use harness_persistence::{InMemoryRepository, Session};
 
     #[test]
-    fn test_tool_definitions_returns_21_tools() {
+    fn test_tool_definitions_returns_40_tools() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 34);
+        assert_eq!(tools.len(), 40);
     }
 
     #[test]

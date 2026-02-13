@@ -249,4 +249,27 @@ pub trait Repository: Send + Sync {
         project_id: Option<ProjectId>,
         status: Option<PlanStatus>,
     ) -> RepositoryResult<Vec<Plan>>;
+
+    // === Experimental features access ===
+
+    /// Get raw AletheiaDB instance for experimental features (nova feature flag).
+    fn get_raw_db(&self) -> RepositoryResult<&aletheiadb::AletheiaDB>;
+
+    /// Get the AletheiaDB NodeId for a task.
+    fn get_node_id_for_task(
+        &self,
+        task_id: TaskId,
+    ) -> RepositoryResult<aletheiadb::core::id::NodeId>;
+
+    /// Get the AletheiaDB NodeId for a knowledge entry.
+    fn get_node_id_for_knowledge(
+        &self,
+        knowledge_id: crate::KnowledgeId,
+    ) -> RepositoryResult<aletheiadb::core::id::NodeId>;
+
+    /// Get the AletheiaDB NodeId for an agent.
+    fn get_node_id_for_agent(
+        &self,
+        agent_id: AgentId,
+    ) -> RepositoryResult<aletheiadb::core::id::NodeId>;
 }
