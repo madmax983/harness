@@ -154,6 +154,12 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 let resp = self.handle_get_hive_status().await?;
                 Ok(serde_json::to_value(resp).unwrap())
             }
+            "spawn_agent" => {
+                let req: tools::SpawnAgentRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_spawn_agent(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
             "disconnect_agent" => {
                 let req: tools::DisconnectAgentRequest = serde_json::from_value(arguments)
                     .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
@@ -240,6 +246,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
             "register_agent",
             "list_agents",
             "get_hive_status",
+            "spawn_agent",
             "disconnect_agent",
             "send_direct_message",
             "get_messages",
@@ -856,16 +863,56 @@ impl<R: Repository + 'static> HiveHandler<R> {
         req: tools::RegisterAgentRequest,
     ) -> HandlerResult<tools::RegisterAgentResponse> {
         let role = Self::parse_role(&req.role)?;
-        let mut agent = Agent::new(role, self.state.session_id());
 
-        // Add project context if provided
-        if let (Some(name), Some(path)) = (req.project_name, req.project_path) {
-            agent = agent.with_project(name, path);
-        }
+        // Two registration paths: spawned agent or self-registration
+        let aid = if let Some(ref agent_id_str) = req.agent_id {
+            // Spawned agent: activate existing agent
+            let agent_id = Self::parse_agent_id(agent_id_str)?;
+            let mut agent = self.state.repository().get_agent(agent_id).await?;
 
-        let aid = agent.id;
+            // Validate agent is in Starting status (prevent hijacking)
+            if agent.status != AgentStatus::Starting {
+                return Err(HandlerError::InvalidArgs(format!(
+                    "Agent {} is not in Starting status (current: {:?})",
+                    agent_id_str, agent.status
+                )));
+            }
 
-        self.state.repository().create_agent(&agent).await?;
+            // Validate role matches
+            if agent.role != role {
+                return Err(HandlerError::InvalidArgs(format!(
+                    "Role mismatch: expected {:?}, got {:?}",
+                    agent.role, role
+                )));
+            }
+
+            // Update to Active and add project context
+            self.state
+                .repository()
+                .update_agent_status(agent_id, AgentStatus::Active)
+                .await?;
+
+            // Add project context if provided (update the agent entity)
+            if let (Some(name), Some(path)) = (req.project_name.clone(), req.project_path.clone()) {
+                agent = agent.with_project(name, path);
+                // TODO: Add repository method to update project context
+                // For now, the agent is Active but project context isn't persisted for spawned agents
+            }
+
+            agent_id
+        } else {
+            // Self-registration: create new agent
+            let mut agent = Agent::new(role, self.state.session_id());
+
+            // Add project context if provided
+            if let (Some(name), Some(path)) = (req.project_name, req.project_path) {
+                agent = agent.with_project(name, path);
+            }
+
+            let aid = agent.id;
+            self.state.repository().create_agent(&agent).await?;
+            aid
+        };
 
         // Persist session-agent association for MCP client persistence
         self.state
@@ -930,6 +977,65 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 .iter()
                 .map(|k| Self::knowledge_to_result(k, 0.0))
                 .collect(),
+            inbox: None,           // TODO: Populate from message visibility implementation
+            active_threads: None,  // TODO: Populate from message visibility implementation
+        })
+    }
+
+    async fn handle_spawn_agent(
+        &self,
+        req: tools::SpawnAgentRequest,
+    ) -> HandlerResult<tools::SpawnAgentResponse> {
+        // Validate caller is strategoi
+        let caller_id = self.require_agent_id().await?;
+        let caller = self.state.repository().get_agent(caller_id).await?;
+        if !caller.is_strategoi {
+            return Err(HandlerError::InvalidArgs(
+                "Only strategoi can spawn agents".into(),
+            ));
+        }
+
+        // For MVP, only support developer role
+        let role = Self::parse_role(&req.role)?;
+        if role != AgentRole::Developer {
+            return Err(HandlerError::InvalidArgs(
+                "MVP only supports spawning developer agents".into(),
+            ));
+        }
+
+        // Create agent entity with Starting status
+        let agent = Agent::new(role, self.state.session_id());
+        let agent_id = agent.id;
+        let agent_id_str = agent_id.as_uuid().to_string();
+
+        self.state.repository().create_agent(&agent).await?;
+
+        // Assign initial task if provided
+        if let Some(ref task_id_str) = req.initial_task_id {
+            let task_id = Self::parse_task_id(task_id_str)?;
+            self.state
+                .repository()
+                .assign_task(task_id, agent_id)
+                .await?;
+        }
+
+        // Generate spawn prompt for strategoi to use with Task tool
+        let spawn_prompt = format!(
+            "You are a developer agent in the harness hive mind. Your agent_id is {}. \n\n\
+             IMPORTANT: Register immediately using mcp__harness__register_agent with:\n\
+             - role: \"developer\"\n\
+             - agent_id: \"{}\"\n\n\
+             After registration, check your assigned tasks using mcp__harness__list_tasks and \
+             claim the task assigned to you. Then complete the work described in the task.",
+            agent_id_str, agent_id_str
+        );
+
+        Ok(tools::SpawnAgentResponse {
+            agent_id: agent_id_str,
+            teammate_id: Some(format!(
+                "Use Task tool with description: 'Spawn developer agent {}' and prompt:\n{}",
+                req.name, spawn_prompt
+            )),
         })
     }
 
