@@ -5,12 +5,23 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use harness_persistence::{Agent, AgentId, AgentRole, AgentStatus, Repository, SessionId};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::RwLock;
 
 use crate::config::OrchestratorConfig;
 use crate::prompts;
-use crate::runtime::{AgentRuntime, build_runtime};
+use crate::runtime::{AgentRuntime, AgentRuntimeKind, build_runtime};
+
+/// Process handle with captured output and session tracking.
+struct ProcessHandle {
+    child: Child,
+    stdout_buffer: Arc<RwLock<String>>,
+    stderr_buffer: Arc<RwLock<String>>,
+    /// CLI-specific session ID (e.g., codex thread_id, claude session_id).
+    /// Used for resuming conversations with `command_agent()`.
+    cli_session_id: Option<String>,
+}
 
 /// Error type for process operations.
 #[derive(Debug, thiserror::Error)]
@@ -44,7 +55,7 @@ pub struct ProcessManager<R: Repository> {
     config: OrchestratorConfig,
     runtime: Arc<dyn AgentRuntime>,
     repository: Arc<R>,
-    processes: RwLock<HashMap<AgentId, Child>>,
+    processes: RwLock<HashMap<AgentId, ProcessHandle>>,
 }
 
 impl<R: Repository + 'static> ProcessManager<R> {
@@ -183,6 +194,45 @@ impl<R: Repository + 'static> ProcessManager<R> {
             .await
     }
 
+    /// Internal: create a process handle with output capture.
+    fn create_process_handle(mut child: Child) -> ProcessHandle {
+        let stdout_buffer = Arc::new(RwLock::new(String::new()));
+        let stderr_buffer = Arc::new(RwLock::new(String::new()));
+
+        // Spawn task to read stdout
+        if let Some(stdout) = child.stdout.take() {
+            let buffer = stdout_buffer.clone();
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(stdout).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    let mut buf = buffer.write().await;
+                    buf.push_str(&line);
+                    buf.push('\n');
+                }
+            });
+        }
+
+        // Spawn task to read stderr
+        if let Some(stderr) = child.stderr.take() {
+            let buffer = stderr_buffer.clone();
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    let mut buf = buffer.write().await;
+                    buf.push_str(&line);
+                    buf.push('\n');
+                }
+            });
+        }
+
+        ProcessHandle {
+            child,
+            stdout_buffer,
+            stderr_buffer,
+            cli_session_id: None,
+        }
+    }
+
     /// Internal: spawn an agent process and track it.
     async fn spawn_process(&self, agent_id: AgentId, prompt: &str) -> ProcessResult<()> {
         let spec = self
@@ -198,6 +248,9 @@ impl<R: Repository + 'static> ProcessManager<R> {
             .spawn()
             .map_err(|e| ProcessError::SpawnFailed(e.to_string()))?;
 
+        // Create process handle with output capture
+        let handle = Self::create_process_handle(child);
+
         // Update status to Starting
         self.repository
             .update_agent_status(agent_id, AgentStatus::Starting)
@@ -205,9 +258,18 @@ impl<R: Repository + 'static> ProcessManager<R> {
             .map_err(|e| ProcessError::Repository(e.to_string()))?;
 
         // Store process handle
-        self.processes.write().await.insert(agent_id, child);
+        self.processes.write().await.insert(agent_id, handle);
 
         Ok(())
+    }
+
+    /// Build MCP-augmented prompt with connection instructions.
+    fn build_mcp_prompt(&self, prompt: &str) -> String {
+        let mcp_json = self.config.mcp_config.to_json();
+        format!(
+            "{}\n\n# MCP Connection\nConnect to harness MCP server with this config:\n```json\n{}\n```",
+            prompt, mcp_json
+        )
     }
 
     /// Internal: spawn an agent process with custom CLI command.
@@ -219,11 +281,7 @@ impl<R: Repository + 'static> ProcessManager<R> {
         prompt: &str,
     ) -> ProcessResult<()> {
         // Build full prompt with MCP connection instructions
-        let mcp_json = self.config.mcp_config.to_json();
-        let full_prompt = format!(
-            "{}\n\n# MCP Connection\nConnect to harness MCP server with this config:\n```json\n{}\n```",
-            prompt, mcp_json
-        );
+        let full_prompt = self.build_mcp_prompt(prompt);
 
         // Replace {PROMPT} placeholder in args with actual prompt
         let mut resolved_args: Vec<String> = cli_args
@@ -255,6 +313,9 @@ impl<R: Repository + 'static> ProcessManager<R> {
             .spawn()
             .map_err(|e| ProcessError::SpawnFailed(format!("Failed to spawn '{}': {}", program, e)))?;
 
+        // Create process handle with output capture
+        let handle = Self::create_process_handle(child);
+
         // Update status to Starting
         self.repository
             .update_agent_status(agent_id, AgentStatus::Starting)
@@ -262,7 +323,7 @@ impl<R: Repository + 'static> ProcessManager<R> {
             .map_err(|e| ProcessError::Repository(e.to_string()))?;
 
         // Store process handle
-        self.processes.write().await.insert(agent_id, child);
+        self.processes.write().await.insert(agent_id, handle);
 
         Ok(())
     }
@@ -270,11 +331,11 @@ impl<R: Repository + 'static> ProcessManager<R> {
     /// Kill an agent's process.
     pub async fn kill(&self, agent_id: AgentId) -> ProcessResult<()> {
         let mut processes = self.processes.write().await;
-        let child = processes
+        let handle = processes
             .get_mut(&agent_id)
             .ok_or(ProcessError::NotFound(agent_id))?;
 
-        child.kill().await?;
+        handle.child.kill().await?;
         processes.remove(&agent_id);
 
         // Update status to Killed
@@ -289,11 +350,196 @@ impl<R: Repository + 'static> ProcessManager<R> {
     /// Check if a process is still running.
     pub async fn is_running(&self, agent_id: AgentId) -> bool {
         let processes = self.processes.read().await;
-        if let Some(child) = processes.get(&agent_id) {
-            child.id().is_some()
+        if let Some(handle) = processes.get(&agent_id) {
+            handle.child.id().is_some()
         } else {
             false
         }
+    }
+
+    /// Get captured output from a process.
+    pub async fn get_output(&self, agent_id: AgentId) -> ProcessResult<(String, String)> {
+        let processes = self.processes.read().await;
+        let handle = processes
+            .get(&agent_id)
+            .ok_or(ProcessError::NotFound(agent_id))?;
+
+        let stdout = handle.stdout_buffer.read().await.clone();
+        let stderr = handle.stderr_buffer.read().await.clone();
+
+        Ok((stdout, stderr))
+    }
+
+    /// Extract CLI session ID from process output.
+    /// For codex: looks for thread_id in JSON output.
+    /// For claude: looks for session_id pattern.
+    /// For gemini: looks for session_id pattern.
+    async fn extract_session_id(&self, agent_id: AgentId, runtime_kind: AgentRuntimeKind) -> Option<String> {
+        let processes = self.processes.read().await;
+        let handle = processes.get(&agent_id)?;
+
+        // First check if we already have a stored session ID
+        if let Some(ref stored_id) = handle.cli_session_id {
+            return Some(stored_id.clone());
+        }
+
+        let stdout = handle.stdout_buffer.read().await;
+        let stderr = handle.stderr_buffer.read().await;
+
+        // Combine stdout and stderr for scanning
+        let combined = format!("{}\n{}", *stdout, *stderr);
+
+        // Try runtime-specific patterns
+        match runtime_kind {
+            AgentRuntimeKind::Codex => {
+                // Try JSON parsing first for codex --json output
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&combined)
+                    && let Some(thread_id) = json.get("thread_id").and_then(|v| v.as_str())
+                {
+                    return Some(thread_id.to_string());
+                }
+
+                // Fallback to string search for partial JSON
+                if let Some(start) = combined.find("\"thread_id\":\"") {
+                    let id_start = start + "\"thread_id\":\"".len();
+                    if let Some(end) = combined[id_start..].find('"') {
+                        return Some(combined[id_start..id_start + end].to_string());
+                    }
+                }
+            }
+            AgentRuntimeKind::Claude | AgentRuntimeKind::ClaudeCompatible => {
+                // Look for "session id: <uuid>" pattern in Claude output
+                if let Some(start) = combined.find("session id: ") {
+                    let id_start = start + "session id: ".len();
+                    // UUID format: 8-4-4-4-12 hex chars with dashes
+                    if let Some(end) = combined[id_start..].find(|c: char| !c.is_ascii_hexdigit() && c != '-') {
+                        let candidate = &combined[id_start..id_start + end];
+                        if candidate.len() == 36 {  // Standard UUID length
+                            return Some(candidate.to_string());
+                        }
+                    }
+                }
+            }
+            AgentRuntimeKind::Gemini => {
+                // Look for "Session ID: <uuid>" pattern in Gemini output
+                if let Some(start) = combined.find("Session ID: ") {
+                    let id_start = start + "Session ID: ".len();
+                    if let Some(end) = combined[id_start..].find(|c: char| !c.is_ascii_hexdigit() && c != '-') {
+                        let candidate = &combined[id_start..id_start + end];
+                        if candidate.len() == 36 {
+                            return Some(candidate.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Command an agent to continue with a new prompt (strategoi-centric orchestration).
+    /// Uses CLI-specific resume functionality (e.g., `codex exec resume <SESSION_ID>`).
+    pub async fn command_agent(
+        &self,
+        agent_id: AgentId,
+        cli_command: &str,
+        cli_args: &[String],
+        prompt: &str,
+    ) -> ProcessResult<()> {
+        // Infer runtime kind from CLI command
+        let runtime_kind = AgentRuntimeKind::infer_from_cli(cli_command);
+
+        // Extract session ID from current process (checks stored ID first, then parses output)
+        let session_id = self.extract_session_id(agent_id, runtime_kind).await;
+
+        if session_id.is_none() {
+            tracing::warn!(
+                agent_id = %agent_id,
+                runtime = ?runtime_kind,
+                "No session ID found for agent, spawning fresh"
+            );
+        }
+
+        // Kill existing process
+        let _ = self.kill(agent_id).await; // Ignore errors if already dead
+
+        // Build MCP-augmented prompt
+        let full_prompt = self.build_mcp_prompt(prompt);
+
+        // Build resume command with runtime-specific logic
+        let mut resolved_args: Vec<String> = match (runtime_kind, session_id.as_ref()) {
+            // Codex with session: exec resume <SESSION_ID> <PROMPT> [--json and other flags]
+            (AgentRuntimeKind::Codex, Some(sid)) => {
+                let mut args = vec![
+                    "exec".to_string(),
+                    "resume".to_string(),
+                    sid.clone(),
+                    full_prompt.clone(),
+                ];
+                // Preserve flags like --json from original cli_args
+                args.extend(
+                    cli_args
+                        .iter()
+                        .filter(|arg| arg.starts_with("--") || arg.starts_with('-'))
+                        .cloned(),
+                );
+                args
+            }
+            // Claude/Gemini with session: not implemented yet, fall back to fresh
+            (AgentRuntimeKind::Claude | AgentRuntimeKind::Gemini | AgentRuntimeKind::ClaudeCompatible, Some(_sid)) => {
+                tracing::warn!(
+                    runtime = ?runtime_kind,
+                    "Session resume not implemented for this runtime, spawning fresh"
+                );
+                cli_args.iter().map(|arg| arg.replace("{PROMPT}", &full_prompt)).collect()
+            }
+            // No session: use original args with prompt replacement
+            (_, None) => {
+                cli_args.iter().map(|arg| arg.replace("{PROMPT}", &full_prompt)).collect()
+            }
+        };
+
+        // Platform-aware command resolution (same as spawn_process_with_cli)
+        let (program, args) = if cfg!(windows)
+            && (cli_command.ends_with(".cmd")
+                || cli_command.ends_with(".bat")
+                || (!cli_command.contains('\\')
+                    && !cli_command.contains('/')
+                    && !cli_command.ends_with(".exe")))
+        {
+            let mut cmd_args = vec!["/c".to_string(), cli_command.to_string()];
+            cmd_args.append(&mut resolved_args);
+            ("cmd.exe".to_string(), cmd_args)
+        } else {
+            (cli_command.to_string(), resolved_args)
+        };
+
+        // Spawn new process
+        let child = Command::new(&program)
+            .args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| ProcessError::SpawnFailed(format!("Failed to command '{}': {}", program, e)))?;
+
+        let mut handle = Self::create_process_handle(child);
+
+        // Preserve session ID if we had one
+        if let Some(sid) = session_id {
+            handle.cli_session_id = Some(sid);
+        }
+
+        // Update status to Starting
+        self.repository
+            .update_agent_status(agent_id, AgentStatus::Starting)
+            .await
+            .map_err(|e| ProcessError::Repository(e.to_string()))?;
+
+        // Store new process handle
+        self.processes.write().await.insert(agent_id, handle);
+
+        Ok(())
     }
 
     /// Get the number of running processes.
@@ -401,5 +647,145 @@ mod tests {
             .spawn_worker(AgentRole::Strategoi, session.id, "Test")
             .await;
         assert!(matches!(result, Err(ProcessError::SpawnFailed(_))));
+    }
+
+    #[tokio::test]
+    async fn test_extract_session_id_codex_json() {
+        use crate::runtime::AgentRuntimeKind;
+
+        let repo = Arc::new(InMemoryRepository::new());
+        let config = OrchestratorConfig {
+            population_cap: 8,
+            agent_cli_path: test_cli_path(),
+            ..Default::default()
+        };
+
+        let manager = ProcessManager::new(config, repo.clone());
+        let session = Session::new(8);
+        repo.create_session(&session).await.unwrap();
+
+        let agent = Agent::new(AgentRole::Developer, session.id);
+        repo.create_agent(&agent).await.unwrap();
+
+        // Simulate codex JSON output with thread_id
+        let child = Command::new(test_cli_path())
+            .arg(if cfg!(windows) { "/c" } else { "-c" })
+            .arg("echo")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let handle = ProcessManager::<InMemoryRepository>::create_process_handle(child);
+
+        // Inject codex-style output
+        {
+            let mut buf = handle.stdout_buffer.write().await;
+            buf.push_str(r#"{"thread_id": "019c5833-db2e-73d3-8b81-3faa95772466", "status": "active"}"#);
+        }
+
+        manager.processes.write().await.insert(agent.id, handle);
+
+        let session_id = manager.extract_session_id(agent.id, AgentRuntimeKind::Codex).await;
+        assert_eq!(session_id, Some("019c5833-db2e-73d3-8b81-3faa95772466".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_extract_session_id_uses_stored_value() {
+        use crate::runtime::AgentRuntimeKind;
+
+        let repo = Arc::new(InMemoryRepository::new());
+        let config = OrchestratorConfig {
+            population_cap: 8,
+            agent_cli_path: test_cli_path(),
+            ..Default::default()
+        };
+
+        let manager = ProcessManager::new(config, repo.clone());
+        let session = Session::new(8);
+        repo.create_session(&session).await.unwrap();
+
+        let agent = Agent::new(AgentRole::Developer, session.id);
+        repo.create_agent(&agent).await.unwrap();
+
+        let child = Command::new(test_cli_path())
+            .arg(if cfg!(windows) { "/c" } else { "-c" })
+            .arg("echo")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let mut handle = ProcessManager::<InMemoryRepository>::create_process_handle(child);
+
+        // Pre-set a stored session ID
+        handle.cli_session_id = Some("stored-session-123".to_string());
+
+        manager.processes.write().await.insert(agent.id, handle);
+
+        // Should return stored ID without parsing output
+        let session_id = manager.extract_session_id(agent.id, AgentRuntimeKind::Codex).await;
+        assert_eq!(session_id, Some("stored-session-123".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_extract_session_id_fallback_string_search() {
+        use crate::runtime::AgentRuntimeKind;
+
+        let repo = Arc::new(InMemoryRepository::new());
+        let config = OrchestratorConfig {
+            population_cap: 8,
+            agent_cli_path: test_cli_path(),
+            ..Default::default()
+        };
+
+        let manager = ProcessManager::new(config, repo.clone());
+        let session = Session::new(8);
+        repo.create_session(&session).await.unwrap();
+
+        let agent = Agent::new(AgentRole::Developer, session.id);
+        repo.create_agent(&agent).await.unwrap();
+
+        let child = Command::new(test_cli_path())
+            .arg(if cfg!(windows) { "/c" } else { "-c" })
+            .arg("echo")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let handle = ProcessManager::<InMemoryRepository>::create_process_handle(child);
+
+        // Inject partial JSON output (not valid JSON but contains thread_id)
+        {
+            let mut buf = handle.stdout_buffer.write().await;
+            buf.push_str(r#"Some output before "thread_id":"abc-123-def" and after"#);
+        }
+
+        manager.processes.write().await.insert(agent.id, handle);
+
+        let session_id = manager.extract_session_id(agent.id, AgentRuntimeKind::Codex).await;
+        assert_eq!(session_id, Some("abc-123-def".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_build_mcp_prompt_includes_connection_info() {
+        let repo = Arc::new(InMemoryRepository::new());
+        let config = OrchestratorConfig {
+            population_cap: 8,
+            agent_cli_path: test_cli_path(),
+            ..Default::default()
+        };
+
+        let manager = ProcessManager::new(config, repo.clone());
+        let prompt = manager.build_mcp_prompt("Test prompt");
+
+        assert!(prompt.contains("Test prompt"));
+        assert!(prompt.contains("MCP Connection"));
+        assert!(prompt.contains("harness MCP server"));
+        assert!(prompt.contains("```json"));
     }
 }
