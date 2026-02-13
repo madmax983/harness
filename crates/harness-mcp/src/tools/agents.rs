@@ -180,6 +180,43 @@ pub struct CleanupStaleAgentsResponse {
     pub agent_ids: Vec<String>,
 }
 
+/// Request to get process output.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GetProcessOutputRequest {
+    pub agent_id: String,
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
+
+/// Response from get_process_output.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GetProcessOutputResponse {
+    pub agent_id: String,
+    pub stdout: String,
+    pub stderr: String,
+    pub is_running: bool,
+}
+
+/// Request to command an agent with a new prompt.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CommandAgentRequest {
+    pub agent_id: String,
+    pub prompt: String,
+    pub cli_command: String,
+    pub cli_args: Vec<String>,
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
+
+/// Response from command_agent.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CommandAgentResponse {
+    pub success: bool,
+    pub agent_id: String,
+}
+
 /// Response from spawn_agent.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SpawnAgentResponse {

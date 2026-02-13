@@ -241,6 +241,18 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 let resp = self.handle_cleanup_stale_agents(req).await?;
                 Ok(serde_json::to_value(resp).unwrap())
             }
+            "get_process_output" => {
+                let req: tools::GetProcessOutputRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_get_process_output(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "command_agent" => {
+                let req: tools::CommandAgentRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_command_agent(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
 
             // Message tools
             "send_direct_message" => {
@@ -401,11 +413,26 @@ impl<R: Repository + 'static> HiveHandler<R> {
 
     /// Resolve agent ID from optional parameter or session state.
     /// Checks provided agent_id first, falls back to require_agent_id().
+    /// Auto-transitions "starting" agents to "active" on first MCP call.
     async fn resolve_agent_id(&self, provided: Option<&str>) -> HandlerResult<AgentId> {
-        if let Some(aid_str) = provided {
-            return Self::parse_agent_id(aid_str);
+        let agent_id = if let Some(aid_str) = provided {
+            Self::parse_agent_id(aid_str)?
+        } else {
+            self.require_agent_id().await?
+        };
+
+        // Auto-transition "starting" → "active" on first MCP call
+        if let Ok(agent) = self.state.repository().get_agent(agent_id).await {
+            if agent.status == AgentStatus::Starting {
+                let _ = self
+                    .state
+                    .repository()
+                    .update_agent_status(agent_id, AgentStatus::Active)
+                    .await;
+            }
         }
-        self.require_agent_id().await
+
+        Ok(agent_id)
     }
 
     fn parse_agent_id(s: &str) -> HandlerResult<AgentId> {
@@ -2329,6 +2356,46 @@ impl<R: Repository + 'static> HiveHandler<R> {
         Ok(tools::CleanupStaleAgentsResponse {
             cleaned_count: cleaned_ids.len(),
             agent_ids: cleaned_ids,
+        })
+    }
+
+    async fn handle_get_process_output(
+        &self,
+        req: tools::GetProcessOutputRequest,
+    ) -> HandlerResult<tools::GetProcessOutputResponse> {
+        let agent_id = Self::parse_agent_id(&req.agent_id)?;
+
+        let is_running = self.state.process_manager().is_running(agent_id).await;
+        let (stdout, stderr) = self
+            .state
+            .process_manager()
+            .get_output(agent_id)
+            .await
+            .map_err(|e| HandlerError::InternalError(format!("Failed to get output: {}", e)))?;
+
+        Ok(tools::GetProcessOutputResponse {
+            agent_id: agent_id.as_uuid().to_string(),
+            stdout,
+            stderr,
+            is_running,
+        })
+    }
+
+    async fn handle_command_agent(
+        &self,
+        req: tools::CommandAgentRequest,
+    ) -> HandlerResult<tools::CommandAgentResponse> {
+        let agent_id = Self::parse_agent_id(&req.agent_id)?;
+
+        self.state
+            .process_manager()
+            .command_agent(agent_id, &req.cli_command, &req.cli_args, &req.prompt)
+            .await
+            .map_err(|e| HandlerError::InternalError(format!("Failed to command agent: {}", e)))?;
+
+        Ok(tools::CommandAgentResponse {
+            success: true,
+            agent_id: agent_id.as_uuid().to_string(),
         })
     }
 

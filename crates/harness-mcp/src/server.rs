@@ -49,11 +49,12 @@ impl<R: Repository + 'static> HiveMcpServer<R> {
                 tasks: None,
             },
             instructions: Some(
-                "Harness Hive Mind MCP server. Provides 40 tools for multi-agent \
+                "Harness Hive Mind MCP server. Provides 42 tools for multi-agent \
                  coordination: task management, knowledge sharing, agent registration, \
-                 direct messaging, planning (products, projects, plans), and AletheiaDB Nova \
-                 experimental features (temporal paths, semantic navigation, clustering, graph \
-                 layout, activity resonance, temporal snapshots)."
+                 direct messaging, planning (products, projects, plans), process management, \
+                 strategoi-centric agent commanding, and AletheiaDB Nova experimental features \
+                 (temporal paths, semantic navigation, clustering, graph layout, activity resonance, \
+                 temporal snapshots)."
                     .into(),
             ),
             meta: None,
@@ -144,12 +145,71 @@ impl<R: Repository + 'static> ServerHandler for HiveMcpServer<R> {
     }
 }
 
+/// Cleanup zombie agents on daemon startup.
+/// Marks agents with "active" or "starting" status as "killed" if their process isn't running.
+async fn cleanup_zombie_agents<R: Repository + 'static>(state: &HiveState<R>) {
+    use harness_persistence::AgentStatus;
+
+    tracing::info!("Starting zombie agent cleanup...");
+
+    let agents = match state.repository().list_agents(state.session_id()).await {
+        Ok(agents) => agents,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to list agents for cleanup");
+            return;
+        }
+    };
+
+    let mut cleaned_count = 0;
+    for agent in agents {
+        // Only check agents that should be running
+        if !matches!(
+            agent.status,
+            AgentStatus::Active | AgentStatus::Starting
+        ) {
+            continue;
+        }
+
+        let is_running = state.process_manager().is_running(agent.id).await;
+        if !is_running {
+            tracing::info!(
+                agent_id = %agent.id,
+                status = ?agent.status,
+                "Found zombie agent, marking as killed"
+            );
+
+            if let Err(e) = state
+                .repository()
+                .update_agent_status(agent.id, AgentStatus::Killed)
+                .await
+            {
+                tracing::warn!(
+                    agent_id = %agent.id,
+                    error = %e,
+                    "Failed to update zombie agent status"
+                );
+            } else {
+                cleaned_count += 1;
+            }
+        }
+    }
+
+    if cleaned_count > 0 {
+        tracing::info!(count = cleaned_count, "Zombie agent cleanup complete");
+    } else {
+        tracing::info!("No zombie agents found");
+    }
+}
+
 /// Start the MCP server on the given host and port.
 pub async fn start_mcp_server<R: Repository + 'static>(
     state: Arc<HiveState<R>>,
     host: &str,
     port: u16,
 ) -> Result<(), rust_mcp_sdk::error::McpSdkError> {
+    // Cleanup zombie agents from previous crashes/sessions
+    cleanup_zombie_agents(&state).await;
+
     let handler = HiveMcpServer::new(state.clone());
     let server_info = HiveMcpServer::<R>::server_info();
 
@@ -726,6 +786,50 @@ pub fn tool_definitions() -> Vec<Tool> {
             "Cleanup agents stuck in 'starting' status that aren't actually running.",
             vec![],
             with_agent_id(HashMap::new()),
+        ),
+        make_tool(
+            "get_process_output",
+            "Get captured stdout and stderr from a spawned agent process.",
+            vec!["agent_id"],
+            with_agent_id(HashMap::from([(
+                "agent_id".into(),
+                prop("string", "Agent ID whose output to retrieve"),
+            )])),
+        ),
+        make_tool(
+            "command_agent",
+            "Command a spawned agent to continue with a new prompt (strategoi-centric orchestration). Uses CLI-specific resume functionality.",
+            vec!["agent_id", "prompt", "cli_command", "cli_args"],
+            with_agent_id(HashMap::from([
+                (
+                    "agent_id".into(),
+                    prop("string", "Agent ID to command"),
+                ),
+                (
+                    "prompt".into(),
+                    prop("string", "New prompt to send to the agent"),
+                ),
+                (
+                    "cli_command".into(),
+                    prop("string", "CLI command (e.g., 'codex', 'gemini')"),
+                ),
+                (
+                    "cli_args".into(),
+                    {
+                        let mut args_prop = serde_json::Map::new();
+                        args_prop.insert("type".to_string(), serde_json::json!("array"));
+                        args_prop.insert(
+                            "items".to_string(),
+                            serde_json::json!({"type": "string"}),
+                        );
+                        args_prop.insert(
+                            "description".to_string(),
+                            serde_json::json!("CLI arguments array (session resume will be added automatically for codex)"),
+                        );
+                        args_prop
+                    },
+                ),
+            ])),
         ),
         // --- Message tools ---
         make_tool(
