@@ -970,6 +970,40 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 .count(),
         };
 
+        // Populate inbox if agent is registered
+        let inbox = if let Some(agent_id) = *self.agent_id.read().await {
+            let messages = repo.get_direct_messages(agent_id, 10).await?;
+
+            if !messages.is_empty() {
+                let mut recent_messages = Vec::new();
+
+                for msg in &messages {
+                    // Enrich with from_agent info
+                    let from_agent = repo.get_agent(msg.from_agent).await.ok();
+
+                    recent_messages.push(tools::DirectMessageInfo {
+                        id: msg.id.as_uuid().to_string(),
+                        from_agent: msg.from_agent.as_uuid().to_string(),
+                        from_agent_role: from_agent.as_ref().map(|a| format!("{}", a.role)),
+                        from_agent_project: from_agent.as_ref().and_then(|a| a.project_name.clone()),
+                        to_agent: msg.to_agent.as_uuid().to_string(),
+                        content: msg.content.clone(),
+                        task_id: msg.task_id.map(|t| t.as_uuid().to_string()),
+                        created_at: msg.created_at.to_rfc3339(),
+                    });
+                }
+
+                Some(tools::MessageInbox {
+                    recent_messages,
+                    count: messages.len(),
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         Ok(tools::GetHiveStatusResponse {
             agents: agents.iter().map(Self::agent_to_info).collect(),
             task_summary,
@@ -977,8 +1011,8 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 .iter()
                 .map(|k| Self::knowledge_to_result(k, 0.0))
                 .collect(),
-            inbox: None,           // TODO: Populate from message visibility implementation
-            active_threads: None,  // TODO: Populate from message visibility implementation
+            inbox,
+            active_threads: None,  // TODO: Implement thread aggregation
         })
     }
 
