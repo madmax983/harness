@@ -127,6 +127,59 @@ fn default_poll_interval() -> u64 {
     30
 }
 
+/// Request to list running processes.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ListProcessesRequest {
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
+
+/// Process information.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProcessInfo {
+    pub agent_id: String,
+    pub is_running: bool,
+    pub status: String,
+}
+
+/// Response from list_processes.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ListProcessesResponse {
+    pub processes: Vec<ProcessInfo>,
+    pub total_count: usize,
+}
+
+/// Request to kill a process.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct KillProcessRequest {
+    pub agent_id: String,
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
+
+/// Response from kill_process.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct KillProcessResponse {
+    pub success: bool,
+}
+
+/// Request to cleanup stale agents.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CleanupStaleAgentsRequest {
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
+
+/// Response from cleanup_stale_agents.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CleanupStaleAgentsResponse {
+    pub cleaned_count: usize,
+    pub agent_ids: Vec<String>,
+}
+
 /// Response from spawn_agent.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SpawnAgentResponse {

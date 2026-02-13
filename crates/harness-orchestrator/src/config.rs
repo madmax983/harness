@@ -22,7 +22,7 @@ pub struct OrchestratorConfig {
 impl Default for OrchestratorConfig {
     fn default() -> Self {
         Self {
-            population_cap: 8,
+            population_cap: 100,
             agent_cli_path: "claude".into(),
             agent_runtime: AgentRuntimeKind::default(),
             mcp_config: McpServerConfig::default(),

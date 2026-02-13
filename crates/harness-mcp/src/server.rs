@@ -653,16 +653,40 @@ pub fn tool_definitions() -> Vec<Tool> {
         ),
         make_tool(
             "spawn_agent",
-            "Spawn a new agent to work on tasks (strategoi only).",
-            vec!["role", "name"],
+            "Spawn a new agent to work on tasks (strategoi only). Supports multi-CLI orchestration (Claude, Codex, Gemini, etc.).",
+            vec!["role", "name", "cli_command", "cli_args"],
             with_agent_id(HashMap::from([
                 (
                     "role".into(),
-                    prop("string", "Role for spawned agent (developer)"),
+                    prop("string", "Role for spawned agent (e.g., developer, architect, tester)"),
                 ),
                 (
                     "name".into(),
                     prop("string", "Name for the spawned teammate"),
+                ),
+                (
+                    "cli_command".into(),
+                    prop("string", "CLI command to execute (e.g., 'claude', 'codex', 'gemini')"),
+                ),
+                (
+                    "cli_args".into(),
+                    {
+                        let mut m = serde_json::Map::new();
+                        m.insert("type".into(), serde_json::Value::String("array".into()));
+                        m.insert("description".into(), serde_json::Value::String("CLI arguments with {PROMPT} placeholder for system prompt injection".into()));
+                        let mut items = serde_json::Map::new();
+                        items.insert("type".into(), serde_json::Value::String("string".into()));
+                        m.insert("items".into(), serde_json::Value::Object(items));
+                        m
+                    },
+                ),
+                (
+                    "custom_prompt".into(),
+                    prop("string", "Custom instructions to include in the generated system prompt"),
+                ),
+                (
+                    "poll_interval_secs".into(),
+                    prop_with_default("number", "Polling interval in seconds for auto-polling get_messages and get_hive_status", serde_json::Value::Number(30.into())),
                 ),
                 (
                     "initial_task_id".into(),
@@ -681,6 +705,27 @@ pub fn tool_definitions() -> Vec<Tool> {
                     "Optional agent ID to disconnect (defaults to self)",
                 ),
             )])),
+        ),
+        make_tool(
+            "list_processes",
+            "List all spawned agent processes with their running status.",
+            vec![],
+            with_agent_id(HashMap::new()),
+        ),
+        make_tool(
+            "kill_process",
+            "Kill a spawned agent process.",
+            vec!["agent_id"],
+            with_agent_id(HashMap::from([(
+                "agent_id".into(),
+                prop("string", "Agent ID whose process to kill"),
+            )])),
+        ),
+        make_tool(
+            "cleanup_stale_agents",
+            "Cleanup agents stuck in 'starting' status that aren't actually running.",
+            vec![],
+            with_agent_id(HashMap::new()),
         ),
         // --- Message tools ---
         make_tool(
@@ -1015,7 +1060,7 @@ mod tests {
     #[test]
     fn test_tool_definitions_returns_40_tools() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 40);
+        assert_eq!(tools.len(), 43);
     }
 
     #[test]

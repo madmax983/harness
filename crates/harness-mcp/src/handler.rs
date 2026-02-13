@@ -223,6 +223,24 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 let resp = self.handle_disconnect_agent(req).await?;
                 Ok(serde_json::to_value(resp).unwrap())
             }
+            "list_processes" => {
+                let req: tools::ListProcessesRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_list_processes(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "kill_process" => {
+                let req: tools::KillProcessRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_kill_process(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "cleanup_stale_agents" => {
+                let req: tools::CleanupStaleAgentsRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_cleanup_stale_agents(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
 
             // Message tools
             "send_direct_message" => {
@@ -2201,10 +2219,10 @@ impl<R: Repository + 'static> HiveHandler<R> {
             req.poll_interval_secs,
         );
 
-        // Spawn CLI process using ProcessManager
+        // Spawn CLI process using ProcessManager with custom CLI command
         self.state
             .process_manager()
-            .spawn(agent_id, &system_prompt)
+            .spawn_with_cli(agent_id, &req.cli_command, &req.cli_args, &system_prompt)
             .await
             .map_err(|e| HandlerError::InternalError(format!("Failed to spawn process: {}", e)))?;
 
@@ -2237,6 +2255,81 @@ impl<R: Repository + 'static> HiveHandler<R> {
             .await?;
 
         Ok(tools::DisconnectAgentResponse { success: true })
+    }
+
+    async fn handle_list_processes(
+        &self,
+        _req: tools::ListProcessesRequest,
+    ) -> HandlerResult<tools::ListProcessesResponse> {
+        let agents = self
+            .state
+            .repository()
+            .list_agents(self.state.session_id())
+            .await?;
+
+        let mut processes = Vec::new();
+        for agent in agents {
+            let is_running = self.state.process_manager().is_running(agent.id).await;
+            processes.push(tools::ProcessInfo {
+                agent_id: agent.id.as_uuid().to_string(),
+                is_running,
+                status: format!("{:?}", agent.status),
+            });
+        }
+
+        Ok(tools::ListProcessesResponse {
+            total_count: processes.len(),
+            processes,
+        })
+    }
+
+    async fn handle_kill_process(
+        &self,
+        req: tools::KillProcessRequest,
+    ) -> HandlerResult<tools::KillProcessResponse> {
+        let agent_id = Self::parse_agent_id(&req.agent_id)?;
+
+        self.state
+            .process_manager()
+            .kill(agent_id)
+            .await
+            .map_err(|e| HandlerError::InternalError(format!("Failed to kill process: {}", e)))?;
+
+        Ok(tools::KillProcessResponse { success: true })
+    }
+
+    async fn handle_cleanup_stale_agents(
+        &self,
+        _req: tools::CleanupStaleAgentsRequest,
+    ) -> HandlerResult<tools::CleanupStaleAgentsResponse> {
+        let agents = self
+            .state
+            .repository()
+            .list_agents(self.state.session_id())
+            .await?;
+
+        let mut cleaned_ids = Vec::new();
+        for agent in agents {
+            // Kill agents stuck in Starting status that aren't actually running
+            if agent.status == AgentStatus::Starting {
+                let is_running = self.state.process_manager().is_running(agent.id).await;
+                if !is_running {
+                    // Try to kill (will fail if process doesn't exist, that's ok)
+                    let _ = self.state.process_manager().kill(agent.id).await;
+                    // Mark as killed
+                    self.state
+                        .repository()
+                        .update_agent_status(agent.id, AgentStatus::Killed)
+                        .await?;
+                    cleaned_ids.push(agent.id.as_uuid().to_string());
+                }
+            }
+        }
+
+        Ok(tools::CleanupStaleAgentsResponse {
+            cleaned_count: cleaned_ids.len(),
+            agent_ids: cleaned_ids,
+        })
     }
 
     // --- Message handlers ---

@@ -149,6 +149,40 @@ impl<R: Repository + 'static> ProcessManager<R> {
         self.spawn_process(agent_id, prompt).await
     }
 
+    /// Spawn a process with a custom CLI command (multi-CLI orchestration).
+    ///
+    /// Use this when spawning agents from different CLI tools (Codex, Gemini, etc.)
+    /// instead of using the daemon's configured default runtime.
+    pub async fn spawn_with_cli(
+        &self,
+        agent_id: AgentId,
+        cli_command: &str,
+        cli_args: &[String],
+        prompt: &str,
+    ) -> ProcessResult<()> {
+        // Check population cap
+        let agent = self
+            .repository
+            .get_agent(agent_id)
+            .await
+            .map_err(|e| ProcessError::Repository(e.to_string()))?;
+
+        let active_count = self
+            .repository
+            .count_active_agents(agent.session_id)
+            .await
+            .map_err(|e| ProcessError::Repository(e.to_string()))?;
+
+        if active_count >= self.config.population_cap {
+            return Err(ProcessError::CapReached {
+                cap: self.config.population_cap,
+            });
+        }
+
+        self.spawn_process_with_cli(agent_id, cli_command, cli_args, prompt)
+            .await
+    }
+
     /// Internal: spawn an agent process and track it.
     async fn spawn_process(&self, agent_id: AgentId, prompt: &str) -> ProcessResult<()> {
         let spec = self
@@ -163,6 +197,63 @@ impl<R: Repository + 'static> ProcessManager<R> {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| ProcessError::SpawnFailed(e.to_string()))?;
+
+        // Update status to Starting
+        self.repository
+            .update_agent_status(agent_id, AgentStatus::Starting)
+            .await
+            .map_err(|e| ProcessError::Repository(e.to_string()))?;
+
+        // Store process handle
+        self.processes.write().await.insert(agent_id, child);
+
+        Ok(())
+    }
+
+    /// Internal: spawn an agent process with custom CLI command.
+    async fn spawn_process_with_cli(
+        &self,
+        agent_id: AgentId,
+        cli_command: &str,
+        cli_args: &[String],
+        prompt: &str,
+    ) -> ProcessResult<()> {
+        // Build full prompt with MCP connection instructions
+        let mcp_json = self.config.mcp_config.to_json();
+        let full_prompt = format!(
+            "{}\n\n# MCP Connection\nConnect to harness MCP server with this config:\n```json\n{}\n```",
+            prompt, mcp_json
+        );
+
+        // Replace {PROMPT} placeholder in args with actual prompt
+        let mut resolved_args: Vec<String> = cli_args
+            .iter()
+            .map(|arg| arg.replace("{PROMPT}", &full_prompt))
+            .collect();
+
+        // Platform-aware command resolution
+        let (program, args) = if cfg!(windows) && (cli_command.ends_with(".cmd") || cli_command.ends_with(".bat")) {
+            // Windows batch files need cmd.exe wrapper
+            let mut cmd_args = vec!["/c".to_string(), cli_command.to_string()];
+            cmd_args.append(&mut resolved_args);
+            ("cmd.exe".to_string(), cmd_args)
+        } else if cfg!(windows) && !cli_command.contains('\\') && !cli_command.contains('/') && !cli_command.ends_with(".exe") {
+            // Bare command on Windows - might be .cmd in PATH, try cmd.exe wrapper
+            let mut cmd_args = vec!["/c".to_string(), cli_command.to_string()];
+            cmd_args.append(&mut resolved_args);
+            ("cmd.exe".to_string(), cmd_args)
+        } else {
+            // Direct execution (Unix or Windows .exe)
+            (cli_command.to_string(), resolved_args)
+        };
+
+        let child = Command::new(&program)
+            .args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| ProcessError::SpawnFailed(format!("Failed to spawn '{}': {}", program, e)))?;
 
         // Update status to Starting
         self.repository
