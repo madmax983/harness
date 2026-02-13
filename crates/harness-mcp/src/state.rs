@@ -1,9 +1,11 @@
 //! Shared state for the Hive Mind MCP server.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use harness_orchestrator::ProcessManager;
-use harness_persistence::{Repository, Session, SessionId};
+use harness_persistence::{AgentId, Repository, Session, SessionId};
+use tokio::sync::RwLock;
 
 /// Shared state for MCP tool handlers.
 pub struct HiveState<R: Repository> {
@@ -15,6 +17,8 @@ pub struct HiveState<R: Repository> {
     process_manager: Arc<ProcessManager<R>>,
     /// Optional embedding service for semantic search.
     embedding_service: Option<Arc<aletheiadb::embeddings::EmbeddingService>>,
+    /// Maps MCP session ID → registered agent ID (for automatic agent context)
+    session_agents: Arc<RwLock<HashMap<String, AgentId>>>,
 }
 
 impl<R: Repository + 'static> HiveState<R> {
@@ -29,6 +33,7 @@ impl<R: Repository + 'static> HiveState<R> {
             repository,
             process_manager,
             embedding_service: None,
+            session_agents: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -64,6 +69,34 @@ impl<R: Repository + 'static> HiveState<R> {
     /// Get the embedding service, if configured.
     pub fn embedding_service(&self) -> Option<&Arc<aletheiadb::embeddings::EmbeddingService>> {
         self.embedding_service.as_ref()
+    }
+
+    /// Register an agent for an MCP session ID.
+    pub async fn register_session_agent(&self, mcp_session_id: String, agent_id: AgentId) {
+        let mut agents = self.session_agents.write().await;
+        agents.insert(mcp_session_id.clone(), agent_id);
+        tracing::info!(
+            mcp_session_id = %mcp_session_id,
+            agent_id = %agent_id,
+            "Registered agent for MCP session"
+        );
+    }
+
+    /// Get the agent ID for an MCP session (if registered).
+    pub async fn get_session_agent(&self, mcp_session_id: &str) -> Option<AgentId> {
+        let agents = self.session_agents.read().await;
+        agents.get(mcp_session_id).copied()
+    }
+
+    /// Clear session agent registration.
+    pub async fn clear_session_agent(&self, mcp_session_id: &str) {
+        let mut agents = self.session_agents.write().await;
+        if agents.remove(mcp_session_id).is_some() {
+            tracing::info!(
+                mcp_session_id = %mcp_session_id,
+                "Cleared MCP session agent registration"
+            );
+        }
     }
 }
 

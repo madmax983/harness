@@ -9,6 +9,8 @@ pub struct PredictMissingConnectionsRequest {
     #[serde(default = "default_limit")]
     pub limit: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub property_name: Option<String>, // Optional vector property for semantic scoring
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub _agent_id: Option<String>,
 }
 

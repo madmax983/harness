@@ -305,6 +305,9 @@ pub struct Product {
     pub session_id: SessionId,
     /// When the product was created.
     pub created_at: DateTime<Utc>,
+    /// Vector embedding for semantic search (derived from name + description).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<Vec<f32>>,
 }
 
 impl Product {
@@ -321,12 +324,19 @@ impl Product {
             status: ProductStatus::Concept,
             session_id,
             created_at: Utc::now(),
+            embedding: None,
         }
     }
 
     /// Create a product with a specific ID (for restoring from persistence).
     pub fn with_id(mut self, id: ProductId) -> Self {
         self.id = id;
+        self
+    }
+
+    /// Set the vector embedding.
+    pub fn with_embedding(mut self, embedding: Vec<f32>) -> Self {
+        self.embedding = Some(embedding);
         self
     }
 }
@@ -348,6 +358,9 @@ pub struct Project {
     pub session_id: SessionId,
     /// When the project was created.
     pub created_at: DateTime<Utc>,
+    /// Vector embedding for semantic search (derived from name + description).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<Vec<f32>>,
 }
 
 impl Project {
@@ -366,12 +379,19 @@ impl Project {
             product_id,
             session_id,
             created_at: Utc::now(),
+            embedding: None,
         }
     }
 
     /// Create a project with a specific ID (for restoring from persistence).
     pub fn with_id(mut self, id: ProjectId) -> Self {
         self.id = id;
+        self
+    }
+
+    /// Set the vector embedding.
+    pub fn with_embedding(mut self, embedding: Vec<f32>) -> Self {
+        self.embedding = Some(embedding);
         self
     }
 }
@@ -393,6 +413,9 @@ pub struct Plan {
     pub session_id: SessionId,
     /// When the plan was created.
     pub created_at: DateTime<Utc>,
+    /// Vector embedding for semantic search (derived from name + strategy).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<Vec<f32>>,
 }
 
 impl Plan {
@@ -411,12 +434,19 @@ impl Plan {
             project_id,
             session_id,
             created_at: Utc::now(),
+            embedding: None,
         }
     }
 
     /// Create a plan with a specific ID (for restoring from persistence).
     pub fn with_id(mut self, id: PlanId) -> Self {
         self.id = id;
+        self
+    }
+
+    /// Set the vector embedding.
+    pub fn with_embedding(mut self, embedding: Vec<f32>) -> Self {
+        self.embedding = Some(embedding);
         self
     }
 }

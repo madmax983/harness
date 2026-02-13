@@ -22,8 +22,8 @@ use crate::state::HiveState;
 
 /// MCP server handler that wraps a `HiveHandler<R>`.
 ///
-/// Each incoming `call_tool` request creates a fresh `HiveHandler` so that
-/// per-connection agent state (agent_id) stays isolated.
+/// Tracks MCP session → agent_id mappings in HiveState so clients don't need
+/// to pass `_agent_id` on every tool call.
 pub struct HiveMcpServer<R: Repository + 'static> {
     state: Arc<HiveState<R>>,
 }
@@ -88,27 +88,35 @@ impl<R: Repository + 'static> ServerHandler for HiveMcpServer<R> {
     async fn handle_call_tool_request(
         &self,
         params: CallToolRequestParams,
-        _runtime: Arc<dyn McpServer>,
+        runtime: Arc<dyn McpServer>,
     ) -> Result<CallToolResult, CallToolError> {
-        let handler = HiveHandler::new(self.state.clone());
+        // Extract MCP session ID from runtime (may be None for some transports)
+        let session_id_opt = runtime.session_id();
 
-        // Log client info from MCP SDK if available
-        if let Some(client_info) = _runtime.client_info() {
-            tracing::info!("MCP Client connected: {:?}", client_info);
+        // Create handler with MCP session context if available
+        let handler = if let Some(ref session_id) = session_id_opt {
+            let h = HiveHandler::new(self.state.clone()).with_mcp_session(session_id.clone());
+
+            tracing::debug!(
+                session_id = %session_id,
+                tool = %params.name,
+                "MCP tool call received"
+            );
+
+            // Look up registered agent for this MCP session
+            if let Some(agent_id) = self.state.get_session_agent(session_id).await {
+                h.restore_agent_id(agent_id).await;
+                tracing::debug!(
+                    session_id = %session_id,
+                    agent_id = %agent_id,
+                    "Restored agent context from MCP session"
+                );
+            }
+            h
         } else {
-            tracing::debug!("No client_info available from MCP SDK");
-        }
-
-        // Restore agent_id from session if it exists (for MCP client persistence)
-        if let Ok(session) = self
-            .state
-            .repository()
-            .get_session(self.state.session_id())
-            .await
-            && let Some(agent_id) = session.agent_id
-        {
-            handler.restore_agent_id(agent_id).await;
-        }
+            tracing::debug!(tool = %params.name, "MCP tool call received (no session ID)");
+            HiveHandler::new(self.state.clone())
+        };
 
         let arguments = match params.arguments {
             Some(map) => serde_json::Value::Object(map),
@@ -1149,6 +1157,141 @@ pub fn tool_definitions() -> Vec<Tool> {
                         "Max changes to return",
                         serde_json::Value::Number(100.into()),
                     ),
+                ),
+            ])),
+        ),
+        make_tool(
+            "compute_concept_analogy",
+            "Perform vector arithmetic for semantic reasoning: A - B + C = ? (e.g. 'king' - 'man' + 'woman' = 'queen'). Requires nodes with vector embeddings.",
+            vec!["concept_a_id", "concept_b_id", "concept_c_id"],
+            with_agent_id(HashMap::from([
+                (
+                    "concept_a_id".into(),
+                    prop("string", "ID of the first concept node (A in 'A - B + C')"),
+                ),
+                (
+                    "concept_b_id".into(),
+                    prop("string", "ID of the concept to subtract (B in 'A - B + C')"),
+                ),
+                (
+                    "concept_c_id".into(),
+                    prop("string", "ID of the concept to add (C in 'A - B + C')"),
+                ),
+                (
+                    "k".into(),
+                    prop_with_default(
+                        "integer",
+                        "Number of results to return",
+                        serde_json::Value::Number(5.into()),
+                    ),
+                ),
+                (
+                    "property_name".into(),
+                    prop("string", "Optional property name for vector lookup (auto-detected if omitted)"),
+                ),
+            ])),
+        ),
+        make_tool(
+            "predict_missing_connections",
+            "Predict missing connections using Prophet link prediction (topological + semantic analysis). Suggests which entities should be connected based on graph structure and vector similarity.",
+            vec!["entity_type", "entity_id", "limit"],
+            with_agent_id(HashMap::from([
+                (
+                    "entity_type".into(),
+                    prop("string", "Entity type: task | knowledge | agent"),
+                ),
+                (
+                    "entity_id".into(),
+                    prop("string", "UUID of the entity to predict links for"),
+                ),
+                (
+                    "limit".into(),
+                    prop_with_default(
+                        "integer",
+                        "Maximum number of predictions to return",
+                        serde_json::Value::Number(10.into()),
+                    ),
+                ),
+                (
+                    "property_name".into(),
+                    prop("string", "Optional vector property name for semantic scoring"),
+                ),
+            ])),
+        ),
+        make_tool(
+            "analyze_semantic_spectrum",
+            "Decompose a concept into semantic components using Prism spectroscopy. Projects a vector onto multiple axes to understand 'why' it's positioned where it is (e.g., 80% Technical + 20% Business).",
+            vec!["target_id", "axes"],
+            with_agent_id(HashMap::from([
+                (
+                    "target_id".into(),
+                    prop("string", "ID of the entity to analyze"),
+                ),
+                (
+                    "axes".into(),
+                    prop("array", "Array of axis definitions, each with 'name' and 'reference_id' fields"),
+                ),
+                (
+                    "vector_property".into(),
+                    prop("string", "Optional vector property name (auto-detected if omitted)"),
+                ),
+                (
+                    "orthogonalize".into(),
+                    prop_with_default(
+                        "boolean",
+                        "Apply Gram-Schmidt orthogonalization for additive decomposition",
+                        serde_json::Value::Bool(false),
+                    ),
+                ),
+            ])),
+        ),
+        make_tool(
+            "predict_semantic_trajectory",
+            "Predict future semantic evolution using Dreamer temporal analysis. Analyzes historical vector changes to extrapolate where a concept is heading (e.g., 'Apple' moved from Fruit to Tech, where next?).",
+            vec!["entity_type", "entity_id", "property", "history_window_seconds", "future_horizon_seconds"],
+            with_agent_id(HashMap::from([
+                (
+                    "entity_type".into(),
+                    prop("string", "Entity type: task | knowledge | agent"),
+                ),
+                (
+                    "entity_id".into(),
+                    prop("string", "UUID of the entity to analyze"),
+                ),
+                (
+                    "property".into(),
+                    prop("string", "Vector property name to track (e.g., 'embedding')"),
+                ),
+                (
+                    "history_window_seconds".into(),
+                    prop("integer", "Time window in seconds to analyze for trajectory calculation"),
+                ),
+                (
+                    "future_horizon_seconds".into(),
+                    prop("integer", "How far into the future to project (in seconds)"),
+                ),
+                (
+                    "k".into(),
+                    prop_with_default(
+                        "integer",
+                        "Number of semantic neighbors to return",
+                        serde_json::Value::Number(5.into()),
+                    ),
+                ),
+            ])),
+        ),
+        make_tool(
+            "generate_history_narrative",
+            "Generate a human-readable narrative of an entity's temporal history. Creates a story of how the entity evolved over time with version-by-version change descriptions.",
+            vec!["entity_id", "entity_type"],
+            with_agent_id(HashMap::from([
+                (
+                    "entity_id".into(),
+                    prop("string", "ID of the entity to narrate"),
+                ),
+                (
+                    "entity_type".into(),
+                    prop("string", "Entity type: task | knowledge | agent"),
                 ),
             ])),
         ),

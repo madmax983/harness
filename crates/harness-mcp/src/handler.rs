@@ -44,6 +44,8 @@ pub struct HiveHandler<R: Repository> {
     state: Arc<HiveState<R>>,
     /// The agent ID for this connection (set via register_agent).
     agent_id: RwLock<Option<AgentId>>,
+    /// The MCP session ID for this request (set by server).
+    mcp_session_id: Option<String>,
 }
 
 impl<R: Repository + 'static> HiveHandler<R> {
@@ -52,7 +54,14 @@ impl<R: Repository + 'static> HiveHandler<R> {
         Self {
             state,
             agent_id: RwLock::new(None),
+            mcp_session_id: None,
         }
+    }
+
+    /// Set the MCP session ID for this handler.
+    pub fn with_mcp_session(mut self, session_id: String) -> Self {
+        self.mcp_session_id = Some(session_id);
+        self
     }
 
     /// Get a reference to the shared state (for spawning new handlers in tests).
@@ -347,6 +356,36 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 let req: tools::CompareTemporalSnapshotsRequest = serde_json::from_value(arguments)
                     .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
                 let resp = self.handle_compare_temporal_snapshots(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "compute_concept_analogy" => {
+                let req: tools::ComputeConceptAnalogyRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_compute_concept_analogy(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "predict_missing_connections" => {
+                let req: tools::PredictMissingConnectionsRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_predict_missing_connections(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "analyze_semantic_spectrum" => {
+                let req: tools::AnalyzeSemanticSpectrumRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_analyze_semantic_spectrum(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "predict_semantic_trajectory" => {
+                let req: tools::PredictSemanticTrajectoryRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_predict_semantic_trajectory(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "generate_history_narrative" => {
+                let req: tools::GenerateHistoryNarrativeRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_generate_history_narrative(req).await?;
                 Ok(serde_json::to_value(resp).unwrap())
             }
 
@@ -2045,6 +2084,13 @@ impl<R: Repository + 'static> HiveHandler<R> {
             .set_session_agent(self.state.session_id(), aid)
             .await?;
 
+        // Register MCP session → agent mapping for automatic context
+        if let Some(ref mcp_session_id) = self.mcp_session_id {
+            self.state
+                .register_session_agent(mcp_session_id.clone(), aid)
+                .await;
+        }
+
         *self.agent_id.write().await = Some(aid);
 
         Ok(tools::RegisterAgentResponse {
@@ -3130,6 +3176,347 @@ impl<R: Repository + 'static> HiveHandler<R> {
             changes,
             summary,
             description,
+        })
+    }
+
+    async fn handle_compute_concept_analogy(
+        &self,
+        req: tools::ComputeConceptAnalogyRequest,
+    ) -> HandlerResult<tools::ComputeConceptAnalogyResponse> {
+        use aletheiadb::core::id::NodeId;
+        use aletheiadb::experimental::concept_algebra::ConceptAlgebra;
+
+        let repo = self.state.repository();
+        let db = repo.get_raw_db()?;
+
+        // Parse node IDs
+        let parse_node_id = |id_str: &str| -> HandlerResult<NodeId> {
+            // Try parsing as "node-123" or just "123"
+            let id_part = id_str.strip_prefix("node-").unwrap_or(id_str);
+            let id_u64: u64 = id_part
+                .parse()
+                .map_err(|_| HandlerError::InvalidArgs(format!("Invalid node ID: {}", id_str)))?;
+            NodeId::new(id_u64)
+                .map_err(|_| HandlerError::InvalidArgs(format!("Invalid node ID: {}", id_str)))
+        };
+
+        let a = parse_node_id(&req.concept_a_id)?;
+        let b = parse_node_id(&req.concept_b_id)?;
+        let c = parse_node_id(&req.concept_c_id)?;
+
+        // Create ConceptAlgebra instance
+        let mut algebra = ConceptAlgebra::new(db);
+        if let Some(ref prop) = req.property_name {
+            algebra = algebra.with_property(prop);
+        }
+
+        // Perform analogy: A - B + C = ?
+        let results = algebra
+            .analogy(a, b, c, req.k)
+            .map_err(|e| HandlerError::Repository(RepositoryError::Database(e.to_string())))?;
+
+        // Convert results
+        let analogy_results: Vec<tools::ConceptAnalogyResult> = results
+            .into_iter()
+            .map(|(node_id, score)| tools::ConceptAnalogyResult {
+                entity_id: format!("node-{}", node_id.as_u64()),
+                score,
+                label: None, // Could fetch node labels if needed
+            })
+            .collect();
+
+        let description = format!(
+            "Analogy: {} - {} + {} = ? (found {} results)",
+            req.concept_a_id,
+            req.concept_b_id,
+            req.concept_c_id,
+            analogy_results.len()
+        );
+
+        Ok(tools::ComputeConceptAnalogyResponse {
+            results: analogy_results,
+            analogy_description: description,
+        })
+    }
+
+    async fn handle_predict_missing_connections(
+        &self,
+        req: tools::PredictMissingConnectionsRequest,
+    ) -> HandlerResult<tools::PredictMissingConnectionsResponse> {
+        use aletheiadb::experimental::prophet::Prophet;
+
+        let repo = self.state.repository();
+        let db = repo.get_raw_db()?;
+
+        // Parse entity ID based on type
+        let entity_uuid = uuid::Uuid::parse_str(&req.entity_id)
+            .map_err(|e| HandlerError::InvalidArgs(format!("Invalid entity_id: {}", e)))?;
+
+        let node_id = match req.entity_type.as_str() {
+            "task" => {
+                let task_id = harness_persistence::TaskId::from_uuid(entity_uuid);
+                repo.get_node_id_for_task(task_id)?
+            }
+            "knowledge" => {
+                let knowledge_id = harness_persistence::KnowledgeId::from_uuid(entity_uuid);
+                repo.get_node_id_for_knowledge(knowledge_id)?
+            }
+            _ => {
+                return Err(HandlerError::InvalidArgs(format!(
+                    "Invalid entity_type: {}",
+                    req.entity_type
+                )));
+            }
+        };
+
+        // Create Prophet instance
+        let mut prophet = Prophet::new(db);
+        if let Some(ref prop) = req.property_name {
+            prophet = prophet.with_property(prop);
+        }
+
+        // Predict missing links
+        let results = prophet
+            .predict_links(node_id, req.limit)
+            .map_err(|e| HandlerError::Repository(RepositoryError::Database(e.to_string())))?;
+
+        // Convert results to response format
+        let predictions: Vec<tools::LinkPrediction> = results
+            .into_iter()
+            .map(|(node_id, score)| tools::LinkPrediction {
+                target_entity_id: format!("node-{}", node_id.as_u64()),
+                target_entity_type: req.entity_type.clone(),
+                score,
+                reason: format!(
+                    "Predicted based on topological structure and semantic similarity (score: {:.3})",
+                    score
+                ),
+            })
+            .collect();
+
+        Ok(tools::PredictMissingConnectionsResponse {
+            predictions,
+            source_entity_id: req.entity_id,
+            source_entity_type: req.entity_type,
+        })
+    }
+
+    async fn handle_analyze_semantic_spectrum(
+        &self,
+        req: tools::AnalyzeSemanticSpectrumRequest,
+    ) -> HandlerResult<tools::AnalyzeSemanticSpectrumResponse> {
+        use aletheiadb::core::id::NodeId;
+        use aletheiadb::experimental::prism::Prism;
+
+        let repo = self.state.repository();
+        let db = repo.get_raw_db()?;
+
+        // Parse node ID helper
+        let parse_node_id = |id_str: &str| -> HandlerResult<NodeId> {
+            let id_part = id_str.strip_prefix("node-").unwrap_or(id_str);
+            let id_u64: u64 = id_part
+                .parse()
+                .map_err(|_| HandlerError::InvalidArgs(format!("Invalid node ID: {}", id_str)))?;
+            NodeId::new(id_u64).map_err(|_| {
+                HandlerError::InvalidArgs(format!("Invalid node ID: {}", id_str))
+            })
+        };
+
+        let target_id = parse_node_id(&req.target_id)?;
+
+        // Create Prism instance
+        let mut prism = Prism::new(db);
+        if let Some(ref prop) = req.vector_property {
+            prism = prism.with_vector_property(prop);
+        }
+
+        // Add axes
+        for axis_def in &req.axes {
+            let axis_node_id = parse_node_id(&axis_def.reference_id)?;
+            prism
+                .add_axis_from_node(&axis_def.name, axis_node_id)
+                .map_err(|e| HandlerError::Repository(RepositoryError::Database(e.to_string())))?;
+        }
+
+        // Orthogonalize if requested
+        if req.orthogonalize {
+            prism.orthogonalize();
+        }
+
+        // Analyze target
+        let spectrum = prism
+            .analyze_node(target_id)
+            .map_err(|e| HandlerError::Repository(RepositoryError::Database(e.to_string())))?;
+
+        // Generate explanation
+        let mut axis_scores: Vec<(String, f32)> = spectrum.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        axis_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        let explanation = if axis_scores.is_empty() {
+            "No axes defined for analysis".to_string()
+        } else {
+            let top_axis = &axis_scores[0];
+            format!(
+                "Target decomposes primarily along '{}' axis (score: {:.3}). Full spectrum: {}",
+                top_axis.0,
+                top_axis.1,
+                axis_scores
+                    .iter()
+                    .map(|(name, score)| format!("{}: {:.3}", name, score))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+
+        Ok(tools::AnalyzeSemanticSpectrumResponse {
+            spectrum,
+            explanation,
+        })
+    }
+
+    async fn handle_predict_semantic_trajectory(
+        &self,
+        req: tools::PredictSemanticTrajectoryRequest,
+    ) -> HandlerResult<tools::PredictSemanticTrajectoryResponse> {
+        use aletheiadb::core::hlc::HybridTimestamp;
+        use aletheiadb::core::temporal::{time, TimeRange};
+        use aletheiadb::experimental::dreamer::Dreamer;
+        use std::time::Duration;
+
+        let repo = self.state.repository();
+        let db = repo.get_raw_db()?;
+
+        // Parse entity ID
+        let entity_uuid = uuid::Uuid::parse_str(&req.entity_id)
+            .map_err(|e| HandlerError::InvalidArgs(format!("Invalid entity_id: {}", e)))?;
+
+        let node_id = match req.entity_type.as_str() {
+            "task" => {
+                let task_id = harness_persistence::TaskId::from_uuid(entity_uuid);
+                repo.get_node_id_for_task(task_id)?
+            }
+            "knowledge" => {
+                let knowledge_id = harness_persistence::KnowledgeId::from_uuid(entity_uuid);
+                repo.get_node_id_for_knowledge(knowledge_id)?
+            }
+            _ => {
+                return Err(HandlerError::InvalidArgs(format!(
+                    "Invalid entity_type: {}",
+                    req.entity_type
+                )));
+            }
+        };
+
+        // Create Dreamer instance
+        let dreamer = Dreamer::new(db);
+
+        // Define time window for history
+        let now = time::now();
+        let history_start_wallclock =
+            now.wallclock().saturating_sub(req.history_window_seconds as i64 * 1_000_000);
+        let history_start = HybridTimestamp::new(history_start_wallclock, 0)
+            .map_err(|e| HandlerError::Repository(RepositoryError::Database(e.to_string())))?;
+        let history_window = TimeRange::new(history_start, now)
+            .map_err(|e| HandlerError::Repository(RepositoryError::Database(e.to_string())))?;
+
+        let future_horizon = Duration::from_secs(req.future_horizon_seconds);
+
+        // Predict future trajectory
+        let results = dreamer
+            .predict_future(node_id, &req.property, history_window, future_horizon, req.k)
+            .map_err(|e| HandlerError::Repository(RepositoryError::Database(e.to_string())))?;
+
+        // Convert results
+        let predictions: Vec<tools::TrajectoryPrediction> = results
+            .into_iter()
+            .map(|(node_id, score)| tools::TrajectoryPrediction {
+                entity_id: format!("node-{}", node_id.as_u64()),
+                entity_type: req.entity_type.clone(),
+                similarity_score: score,
+            })
+            .collect();
+
+        let description = format!(
+            "Analyzed {}-second history window, projected {} seconds forward. Found {} semantically similar entities.",
+            req.history_window_seconds, req.future_horizon_seconds, predictions.len()
+        );
+
+        Ok(tools::PredictSemanticTrajectoryResponse {
+            predictions,
+            entity_id: req.entity_id,
+            entity_type: req.entity_type,
+            description,
+        })
+    }
+
+    async fn handle_generate_history_narrative(
+        &self,
+        req: tools::GenerateHistoryNarrativeRequest,
+    ) -> HandlerResult<tools::GenerateHistoryNarrativeResponse> {
+        use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
+
+        let repo = self.state.repository();
+        let db = repo.get_raw_db()?;
+
+        // Parse entity ID
+        let entity_uuid = uuid::Uuid::parse_str(&req.entity_id)
+            .map_err(|e| HandlerError::InvalidArgs(format!("Invalid entity_id: {}", e)))?;
+
+        let node_id = match req.entity_type.as_str() {
+            "task" => {
+                let task_id = harness_persistence::TaskId::from_uuid(entity_uuid);
+                repo.get_node_id_for_task(task_id)?
+            }
+            "knowledge" => {
+                let knowledge_id = harness_persistence::KnowledgeId::from_uuid(entity_uuid);
+                repo.get_node_id_for_knowledge(knowledge_id)?
+            }
+            _ => {
+                return Err(HandlerError::InvalidArgs(format!(
+                    "Invalid entity_type: {}",
+                    req.entity_type
+                )));
+            }
+        };
+
+        // Create narrative generator
+        let generator = NarrativeGenerator::new(db);
+
+        // Generate narrative
+        let events = generator
+            .generate_node_narrative(node_id)
+            .map_err(|e| HandlerError::Repository(RepositoryError::Database(e.to_string())))?;
+
+        // Convert events to response format
+        let narrative_events: Vec<tools::NarrativeEvent> = events
+            .into_iter()
+            .map(|event| tools::NarrativeEvent {
+                timestamp: event.timestamp,
+                version_number: event.version_number,
+                description: event.description,
+                changes: event.changes,
+            })
+            .collect();
+
+        // Generate summary
+        let narrative_summary = if narrative_events.is_empty() {
+            format!("No history found for {} {}", req.entity_type, req.entity_id)
+        } else {
+            format!(
+                "{} {} evolved through {} versions from {} to {}",
+                req.entity_type.chars().next().unwrap().to_uppercase().to_string() + &req.entity_type[1..],
+                req.entity_id,
+                narrative_events.len(),
+                narrative_events.first().unwrap().timestamp,
+                narrative_events.last().unwrap().timestamp
+            )
+        };
+
+        Ok(tools::GenerateHistoryNarrativeResponse {
+            entity_id: req.entity_id,
+            entity_type: req.entity_type,
+            events: narrative_events,
+            narrative_summary,
         })
     }
 }

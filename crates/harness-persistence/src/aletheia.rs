@@ -25,7 +25,8 @@ use aletheiadb::core::Node;
 use aletheiadb::core::id::NodeId;
 use aletheiadb::core::property::PropertyMapBuilder;
 use aletheiadb::index::VectorIndex;
-use aletheiadb::index::vector::{DistanceMetric, HnswIndex, HnswIndexBuilder};
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig, HnswIndex, HnswIndexBuilder};
+use aletheiadb::index::vector::temporal::TemporalVectorConfig;
 use aletheiadb::{AletheiaDB, ReadOps, WriteOps};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -97,7 +98,12 @@ impl AletheiaRepository {
     }
 
     /// Configure with an HNSW vector index for semantic knowledge search.
+    ///
+    /// This enables BOTH:
+    /// 1. Harness's external HNSW index (for ask_hive semantic search)
+    /// 2. AletheiaDB's built-in vector index (for Nova experimental features)
     pub fn with_vector_index(mut self, dimensions: usize) -> Result<Self, RepositoryError> {
+        // 1. Create external HNSW index for ask_hive()
         let index = HnswIndexBuilder::new(dimensions, DistanceMetric::Cosine)
             .m(16)
             .ef_construction(200)
@@ -105,7 +111,22 @@ impl AletheiaRepository {
             .build()
             .map_err(|e| RepositoryError::Database(format!("HNSW index creation failed: {e}")))?;
         self.vector_index = Some(Arc::new(index));
+
+        // 2. Enable AletheiaDB's built-in vector index for Nova features (Dreamer, Prophet, etc.)
+        self.db
+            .vector_index("embedding")
+            .hnsw(HnswConfig::new(dimensions, DistanceMetric::Cosine))
+            .temporal(TemporalVectorConfig::default())
+            .enable()
+            .map_err(|e| RepositoryError::Database(format!("AletheiaDB vector index enable failed: {e}")))?;
+
         Ok(self)
+    }
+
+    /// Get a reference to the underlying AletheiaDB instance.
+    /// Useful for accessing experimental features like ConceptAlgebra.
+    pub fn db(&self) -> &Arc<AletheiaDB> {
+        &self.db
     }
 
     // --- DB helpers: force E = RepositoryError to avoid type inference ambiguity ---
@@ -408,6 +429,12 @@ impl AletheiaRepository {
             .filter(|s| !s.is_empty())
     }
 
+    fn opt_vec(n: &Node, k: &str) -> Option<Vec<f32>> {
+        n.get_property(k)
+            .and_then(|v| v.as_vector())
+            .map(|v| v.to_vec())
+    }
+
     // --- Node → Entity converters ---
 
     fn node_to_session(n: &Node) -> RepositoryResult<Session> {
@@ -460,7 +487,7 @@ impl AletheiaRepository {
                 .map(Self::ts_to_dt),
             summary: Self::opt_str(n, "summary").map(String::from),
             session_id: SessionId::from_uuid(Self::parse_uuid(Self::pstr(n, "session_id")?)?),
-            embedding: None, // Embeddings are not stored in node properties, only in vector index
+            embedding: Self::opt_vec(n, "embedding"),
         })
     }
 
@@ -473,7 +500,7 @@ impl AletheiaRepository {
             task_id: Self::opt_str(n, "task_id")
                 .and_then(|s| Self::parse_uuid(s).ok())
                 .map(TaskId::from_uuid),
-            embedding: None, // TODO: load from vector index
+            embedding: Self::opt_vec(n, "embedding"),
             created_at: Self::ts_to_dt(Self::pint(n, "created_at")?),
             session_id: SessionId::from_uuid(Self::parse_uuid(Self::pstr(n, "session_id")?)?),
         })
@@ -501,6 +528,7 @@ impl AletheiaRepository {
             status: Self::parse_product_status(Self::pstr(n, "status")?)?,
             session_id: SessionId::from_uuid(Self::parse_uuid(Self::pstr(n, "session_id")?)?),
             created_at: Self::ts_to_dt(Self::pint(n, "created_at")?),
+            embedding: Self::opt_vec(n, "embedding"),
         })
     }
 
@@ -513,6 +541,7 @@ impl AletheiaRepository {
             product_id: ProductId::from_uuid(Self::parse_uuid(Self::pstr(n, "product_id")?)?),
             session_id: SessionId::from_uuid(Self::parse_uuid(Self::pstr(n, "session_id")?)?),
             created_at: Self::ts_to_dt(Self::pint(n, "created_at")?),
+            embedding: Self::opt_vec(n, "embedding"),
         })
     }
 
@@ -525,6 +554,7 @@ impl AletheiaRepository {
             project_id: ProjectId::from_uuid(Self::parse_uuid(Self::pstr(n, "project_id")?)?),
             session_id: SessionId::from_uuid(Self::parse_uuid(Self::pstr(n, "session_id")?)?),
             created_at: Self::ts_to_dt(Self::pint(n, "created_at")?),
+            embedding: Self::opt_vec(n, "embedding"),
         })
     }
 
@@ -892,6 +922,11 @@ impl Repository for AletheiaRepository {
                 props = props.insert("parent_task", s.as_str());
             }
 
+            // Insert embedding as node property for graph-based semantic features
+            if let Some(ref embedding) = task.embedding {
+                props = props.insert_vector("embedding", embedding);
+            }
+
             let tn = tx.create_node(LABEL_TASK, props.build())?;
             tx.create_edge(
                 session_node,
@@ -1240,6 +1275,11 @@ impl Repository for AletheiaRepository {
                 props = props.insert("task_id", s.as_str());
             }
 
+            // Insert embedding as node property for graph-based semantic features
+            if let Some(ref embedding) = knowledge.embedding {
+                props = props.insert_vector("embedding", embedding);
+            }
+
             let kn = tx.create_node(LABEL_KNOWLEDGE, props.build())?;
             tx.create_edge(
                 agent_node,
@@ -1431,15 +1471,20 @@ impl Repository for AletheiaRepository {
         let session_node = self.index_get(&Self::session_key(product.session_id))?;
 
         let node_id = self.db_write(|tx| {
-            let props = PropertyMapBuilder::new()
+            let mut props = PropertyMapBuilder::new()
                 .insert("id", id_str.as_str())
                 .insert("name", product.name.as_str())
                 .insert("description", product.description.as_str())
                 .insert("status", status_str.as_str())
                 .insert("session_id", session_id_str.as_str())
-                .insert("created_at", created_at)
-                .build();
-            let pn = tx.create_node(LABEL_PRODUCT, props)?;
+                .insert("created_at", created_at);
+
+            // Insert embedding as node property for graph-based semantic features
+            if let Some(ref embedding) = product.embedding {
+                props = props.insert_vector("embedding", embedding);
+            }
+
+            let pn = tx.create_node(LABEL_PRODUCT, props.build())?;
             tx.create_edge(
                 session_node,
                 pn,
@@ -1482,16 +1527,21 @@ impl Repository for AletheiaRepository {
         let session_node = self.index_get(&Self::session_key(project.session_id))?;
 
         let node_id = self.db_write(|tx| {
-            let props = PropertyMapBuilder::new()
+            let mut props = PropertyMapBuilder::new()
                 .insert("id", id_str.as_str())
                 .insert("name", project.name.as_str())
                 .insert("description", project.description.as_str())
                 .insert("status", status_str.as_str())
                 .insert("product_id", product_id_str.as_str())
                 .insert("session_id", session_id_str.as_str())
-                .insert("created_at", created_at)
-                .build();
-            let pn = tx.create_node(LABEL_PROJECT, props)?;
+                .insert("created_at", created_at);
+
+            // Insert embedding as node property for graph-based semantic features
+            if let Some(ref embedding) = project.embedding {
+                props = props.insert_vector("embedding", embedding);
+            }
+
+            let pn = tx.create_node(LABEL_PROJECT, props.build())?;
             tx.create_edge(
                 session_node,
                 pn,
@@ -1540,16 +1590,21 @@ impl Repository for AletheiaRepository {
         let session_node = self.index_get(&Self::session_key(plan.session_id))?;
 
         let node_id = self.db_write(|tx| {
-            let props = PropertyMapBuilder::new()
+            let mut props = PropertyMapBuilder::new()
                 .insert("id", id_str.as_str())
                 .insert("name", plan.name.as_str())
                 .insert("strategy", plan.strategy.as_str())
                 .insert("status", status_str.as_str())
                 .insert("project_id", project_id_str.as_str())
                 .insert("session_id", session_id_str.as_str())
-                .insert("created_at", created_at)
-                .build();
-            let pn = tx.create_node(LABEL_PLAN, props)?;
+                .insert("created_at", created_at);
+
+            // Insert embedding as node property for graph-based semantic features
+            if let Some(ref embedding) = plan.embedding {
+                props = props.insert_vector("embedding", embedding);
+            }
+
+            let pn = tx.create_node(LABEL_PLAN, props.build())?;
             tx.create_edge(
                 session_node,
                 pn,
