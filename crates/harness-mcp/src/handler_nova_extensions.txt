@@ -1,0 +1,605 @@
+// Handler implementations for Nova experimental features (Tasks 2.1-2.3, 3.1-3.3)
+// These will be added to handler.rs after other agents complete their work
+
+    async fn handle_find_temporal_path(
+        &self,
+        req: tools::FindTemporalPathRequest,
+    ) -> HandlerResult<tools::FindTemporalPathResponse> {
+        use aletheiadb::experimental::chronos::Chronos;
+
+        let repo = self.state.repository();
+        let db = repo.get_raw_db()?;
+
+        // Parse timestamps
+        let valid_time = chrono::DateTime::parse_from_rfc3339(&req.valid_time)
+            .map_err(|e| HandlerError::InvalidArgs(format!("Invalid valid_time: {}", e)))?
+            .timestamp_micros();
+        let tx_time = chrono::DateTime::parse_from_rfc3339(&req.tx_time)
+            .map_err(|e| HandlerError::InvalidArgs(format!("Invalid tx_time: {}", e)))?
+            .timestamp_micros();
+
+        // Parse entity IDs
+        let start_uuid = uuid::Uuid::parse_str(&req.start_entity_id)
+            .map_err(|e| HandlerError::InvalidArgs(format!("Invalid start_entity_id: {}", e)))?;
+        let end_uuid = uuid::Uuid::parse_str(&req.end_entity_id)
+            .map_err(|e| HandlerError::InvalidArgs(format!("Invalid end_entity_id: {}", e)))?;
+
+        // Get NodeIds based on entity type
+        let (start_node_id, end_node_id) = match req.entity_type.as_str() {
+            "task" => {
+                let start_task_id = harness_persistence::models::TaskId::from(start_uuid);
+                let end_task_id = harness_persistence::models::TaskId::from(end_uuid);
+                (
+                    repo.get_node_id_for_task(start_task_id)?,
+                    repo.get_node_id_for_task(end_task_id)?,
+                )
+            }
+            "knowledge" => {
+                let start_knowledge_id = harness_persistence::models::KnowledgeId::from(start_uuid);
+                let end_knowledge_id = harness_persistence::models::KnowledgeId::from(end_uuid);
+                (
+                    repo.get_node_id_for_knowledge(start_knowledge_id)?,
+                    repo.get_node_id_for_knowledge(end_knowledge_id)?,
+                )
+            }
+            _ => {
+                return Err(HandlerError::InvalidArgs(format!(
+                    "Invalid entity_type: {}",
+                    req.entity_type
+                )))
+            }
+        };
+
+        // Create Chronos instance and find path
+        let chronos = Chronos::new(db);
+        let valid_ts = aletheiadb::core::temporal::Timestamp::from(valid_time as u64);
+        let tx_ts = aletheiadb::core::temporal::Timestamp::from(tx_time as u64);
+
+        let path_result = chronos.find_path_at_time(start_node_id, end_node_id, valid_ts, tx_ts)?;
+
+        // Convert NodeIds back to entity UUIDs if path exists
+        let (path_option, description) = if let Some(node_path) = path_result {
+            let path: Vec<String> = node_path
+                .iter()
+                .map(|&node_id| format!("node-{}", node_id.as_u64()))
+                .collect();
+
+            let desc = format!(
+                "Path found with {} hops from {} to {} at valid_time={}",
+                path.len() - 1,
+                req.start_entity_id,
+                req.end_entity_id,
+                req.valid_time
+            );
+            (Some(path), desc)
+        } else {
+            let desc = format!(
+                "No path found from {} to {} at valid_time={}",
+                req.start_entity_id, req.end_entity_id, req.valid_time
+            );
+            (None, desc)
+        };
+
+        Ok(tools::FindTemporalPathResponse {
+            path: path_option.clone(),
+            path_length: path_option.as_ref().map_or(0, |p| p.len()),
+            valid_time: req.valid_time,
+            tx_time: req.tx_time,
+            description,
+        })
+    }
+
+    async fn handle_navigate_semantic_graph(
+        &self,
+        req: tools::NavigateSemanticGraphRequest,
+    ) -> HandlerResult<tools::NavigateSemanticGraphResponse> {
+        use aletheiadb::experimental::semantic_navigator::SemanticNavigator;
+
+        let repo = self.state.repository();
+        let db = repo.get_raw_db()?;
+
+        // Parse entity IDs
+        let start_uuid = uuid::Uuid::parse_str(&req.start_entity_id)
+            .map_err(|e| HandlerError::InvalidArgs(format!("Invalid start_entity_id: {}", e)))?;
+        let end_uuid = uuid::Uuid::parse_str(&req.end_entity_id)
+            .map_err(|e| HandlerError::InvalidArgs(format!("Invalid end_entity_id: {}", e)))?;
+
+        // Get NodeIds based on entity type
+        let (start_node_id, end_node_id) = match req.entity_type.as_str() {
+            "task" => {
+                let start_task_id = harness_persistence::models::TaskId::from(start_uuid);
+                let end_task_id = harness_persistence::models::TaskId::from(end_uuid);
+                (
+                    repo.get_node_id_for_task(start_task_id)?,
+                    repo.get_node_id_for_task(end_task_id)?,
+                )
+            }
+            "knowledge" => {
+                let start_knowledge_id = harness_persistence::models::KnowledgeId::from(start_uuid);
+                let end_knowledge_id = harness_persistence::models::KnowledgeId::from(end_uuid);
+                (
+                    repo.get_node_id_for_knowledge(start_knowledge_id)?,
+                    repo.get_node_id_for_knowledge(end_knowledge_id)?,
+                )
+            }
+            _ => {
+                return Err(HandlerError::InvalidArgs(format!(
+                    "Invalid entity_type: {}",
+                    req.entity_type
+                )))
+            }
+        };
+
+        // Create SemanticNavigator and find path
+        let navigator = SemanticNavigator::new(db);
+        let node_path = navigator
+            .find_path(start_node_id, end_node_id, &req.vector_property)
+            .map_err(|e| HandlerError::Repository(RepositoryError::Other(e.to_string())))?;
+
+        // Calculate total semantic cost
+        let mut total_cost = 0.0f32;
+        for i in 0..node_path.len().saturating_sub(1) {
+            let current_id = node_path[i];
+            let next_id = node_path[i + 1];
+
+            // Get vectors and calculate similarity
+            if let (Ok(current_node), Ok(next_node)) = (db.get_node(current_id), db.get_node(next_id)) {
+                if let (Some(v1), Some(v2)) = (
+                    current_node.properties.get(&req.vector_property).and_then(|v| v.as_arc_vector()),
+                    next_node.properties.get(&req.vector_property).and_then(|v| v.as_arc_vector()),
+                ) {
+                    if let Ok(sim) = aletheiadb::core::vector::cosine_similarity(&v1, &v2) {
+                        total_cost += 1.0 - sim;
+                    }
+                }
+            }
+        }
+
+        // Convert path to entity IDs
+        let path: Vec<String> = node_path
+            .iter()
+            .map(|&node_id| format!("node-{}", node_id.as_u64()))
+            .collect();
+
+        let description = format!(
+            "Semantic path from {} to {} with {} hops and total cost {:.3}",
+            req.start_entity_id,
+            req.end_entity_id,
+            path.len() - 1,
+            total_cost
+        );
+
+        Ok(tools::NavigateSemanticGraphResponse {
+            path,
+            path_length: node_path.len(),
+            total_cost,
+            description,
+        })
+    }
+
+    async fn handle_discover_semantic_clusters(
+        &self,
+        req: tools::DiscoverSemanticClustersRequest,
+    ) -> HandlerResult<tools::DiscoverSemanticClustersResponse> {
+        use aletheiadb::experimental::cartographer::Cartographer;
+        use std::collections::HashMap;
+
+        let repo = self.state.repository();
+        let db = repo.get_raw_db()?;
+
+        // Create Cartographer and analyze
+        let cartographer = Cartographer::new(db);
+        let clustering = cartographer
+            .analyze(&req.vector_property, req.num_clusters)
+            .map_err(|e| HandlerError::Repository(RepositoryError::Other(e.to_string())))?;
+
+        // Build cluster info
+        let mut cluster_map: HashMap<usize, Vec<String>> = HashMap::new();
+        for (node_id, cluster_id) in &clustering.assignments {
+            cluster_map
+                .entry(*cluster_id)
+                .or_default()
+                .push(format!("node-{}", node_id.as_u64()));
+        }
+
+        let clusters: Vec<tools::ClusterInfo> = clustering
+            .centroids
+            .iter()
+            .enumerate()
+            .map(|(cluster_id, centroid)| {
+                let member_ids = cluster_map.get(&cluster_id).cloned().unwrap_or_default();
+                let size = member_ids.len();
+                tools::ClusterInfo {
+                    cluster_id,
+                    centroid: centroid.clone(),
+                    member_ids,
+                    size,
+                }
+            })
+            .collect();
+
+        // Reify if requested
+        let reified_regions = if req.reify {
+            let region_ids = cartographer
+                .reify(&clustering)
+                .map_err(|e| HandlerError::Repository(RepositoryError::Other(e.to_string())))?;
+
+            Some(
+                region_ids
+                    .iter()
+                    .map(|node_id| format!("region-{}", node_id.as_u64()))
+                    .collect(),
+            )
+        } else {
+            None
+        };
+
+        let description = format!(
+            "Found {} semantic clusters with {} total entities (reified: {})",
+            clusters.len(),
+            clustering.assignments.len(),
+            req.reify
+        );
+
+        Ok(tools::DiscoverSemanticClustersResponse {
+            clusters,
+            reified_regions,
+            description,
+        })
+    }
+
+    async fn handle_generate_graph_layout(
+        &self,
+        req: tools::GenerateGraphLayoutRequest,
+    ) -> HandlerResult<tools::GenerateGraphLayoutResponse> {
+        use aletheiadb::experimental::kaleidoscope::{LayoutConfig, LayoutEngine};
+
+        let repo = self.state.repository();
+        let db = repo.get_raw_db()?;
+
+        // Get nodes based on entity type
+        let node_ids: Vec<aletheiadb::core::id::NodeId> = match req.entity_type.as_str() {
+            "task" => {
+                let tasks = repo.list_tasks(self.state.session_id(), None).await?;
+                tasks
+                    .iter()
+                    .filter_map(|t| repo.get_node_id_for_task(t.id).ok())
+                    .collect()
+            }
+            "knowledge" => {
+                let knowledge = repo.get_recent_knowledge(self.state.session_id(), 1000).await?;
+                knowledge
+                    .iter()
+                    .filter_map(|k| repo.get_node_id_for_knowledge(k.id).ok())
+                    .collect()
+            }
+            _ => {
+                return Err(HandlerError::InvalidArgs(format!(
+                    "Invalid entity_type: {}",
+                    req.entity_type
+                )))
+            }
+        };
+
+        // Create layout engine
+        let config = LayoutConfig {
+            iterations: req.iterations,
+            width: req.width,
+            height: req.height,
+            ..LayoutConfig::default()
+        };
+        let mut engine = LayoutEngine::new(config);
+
+        // Add nodes and edges
+        for &node_id in &node_ids {
+            engine.add_node(node_id);
+
+            // Add topological edges
+            for edge_id in db.get_outgoing_edges(node_id) {
+                if let Ok(target_id) = db.get_edge_target(edge_id) {
+                    engine.add_edge(node_id, target_id);
+                }
+            }
+        }
+
+        // Add semantic links if vector property specified
+        if let Some(ref vector_prop) = req.vector_property {
+            for i in 0..node_ids.len() {
+                for j in (i + 1)..node_ids.len() {
+                    let node_a = node_ids[i];
+                    let node_b = node_ids[j];
+
+                    if let (Ok(na), Ok(nb)) = (db.get_node(node_a), db.get_node(node_b)) {
+                        if let (Some(va), Some(vb)) = (
+                            na.properties.get(vector_prop).and_then(|v| v.as_arc_vector()),
+                            nb.properties.get(vector_prop).and_then(|v| v.as_arc_vector()),
+                        ) {
+                            if let Ok(sim) = aletheiadb::core::vector::cosine_similarity(&va, &vb) {
+                                if sim > 0.5 {
+                                    // Only add strong semantic links
+                                    engine.add_semantic_link(node_a, node_b, sim);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Run simulation
+        engine.run();
+
+        // Get positions
+        let positions_map = engine.get_positions();
+        let mut positions: Vec<tools::NodePosition> = positions_map
+            .iter()
+            .map(|(&node_id, &pos)| tools::NodePosition {
+                entity_id: format!("node-{}", node_id.as_u64()),
+                x: pos.x,
+                y: pos.y,
+            })
+            .collect();
+
+        positions.sort_by(|a, b| a.entity_id.cmp(&b.entity_id));
+
+        // Calculate bounds
+        let mut min_x = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut min_y = f32::MAX;
+        let mut max_y = f32::MIN;
+
+        for pos in positions_map.values() {
+            min_x = min_x.min(pos.x);
+            max_x = max_x.max(pos.x);
+            min_y = min_y.min(pos.y);
+            max_y = max_y.max(pos.y);
+        }
+
+        let bounds = tools::LayoutBounds {
+            min_x,
+            max_x,
+            min_y,
+            max_y,
+        };
+
+        let description = format!(
+            "Generated layout for {} nodes using {} iterations (bounds: {:.1}x{:.1} to {:.1}x{:.1})",
+            positions.len(),
+            req.iterations,
+            min_x,
+            min_y,
+            max_x,
+            max_y
+        );
+
+        Ok(tools::GenerateGraphLayoutResponse {
+            positions,
+            bounds,
+            description,
+        })
+    }
+
+    async fn handle_find_activity_resonance(
+        &self,
+        req: tools::FindActivityResonanceRequest,
+    ) -> HandlerResult<tools::FindActivityResonanceResponse> {
+        use aletheiadb::experimental::echo::{ActivityDensityResonator, EchoChamber};
+
+        let repo = self.state.repository();
+        let db = repo.get_raw_db()?;
+
+        // Parse target entity ID
+        let target_uuid = uuid::Uuid::parse_str(&req.target_entity_id)
+            .map_err(|e| HandlerError::InvalidArgs(format!("Invalid target_entity_id: {}", e)))?;
+
+        // Get target NodeId
+        let target_node_id = match req.entity_type.as_str() {
+            "task" => {
+                let task_id = harness_persistence::models::TaskId::from(target_uuid);
+                repo.get_node_id_for_task(task_id)?
+            }
+            "knowledge" => {
+                let knowledge_id = harness_persistence::models::KnowledgeId::from(target_uuid);
+                repo.get_node_id_for_knowledge(knowledge_id)?
+            }
+            _ => {
+                return Err(HandlerError::InvalidArgs(format!(
+                    "Invalid entity_type: {}",
+                    req.entity_type
+                )))
+            }
+        };
+
+        // Get candidate nodes
+        let candidate_ids: Vec<aletheiadb::core::id::NodeId> = match req.entity_type.as_str() {
+            "task" => {
+                let tasks = repo.list_tasks(self.state.session_id(), None).await?;
+                tasks
+                    .iter()
+                    .filter_map(|t| repo.get_node_id_for_task(t.id).ok())
+                    .collect()
+            }
+            "knowledge" => {
+                let knowledge = repo.get_recent_knowledge(self.state.session_id(), 1000).await?;
+                knowledge
+                    .iter()
+                    .filter_map(|k| repo.get_node_id_for_knowledge(k.id).ok())
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+
+        // Create EchoChamber with custom resonator
+        let resonator = ActivityDensityResonator {
+            window_size_us: (req.window_seconds * 1_000_000) as i64,
+            num_bins: req.num_bins,
+        };
+        let chamber = EchoChamber::new(db).with_resonator(resonator);
+
+        // Find echoes
+        let echoes = chamber
+            .find_echoes(target_node_id, &candidate_ids)
+            .map_err(|e| HandlerError::Repository(RepositoryError::Other(e.to_string())))?;
+
+        // Get target fingerprint
+        let target_history = db
+            .get_node_history(target_node_id)
+            .map_err(|e| HandlerError::Repository(RepositoryError::Other(e.to_string())))?;
+        let target_resonator = ActivityDensityResonator {
+            window_size_us: (req.window_seconds * 1_000_000) as i64,
+            num_bins: req.num_bins,
+        };
+        let target_fp = target_resonator.resonate(&target_history);
+
+        // Build response
+        let resonant_entities: Vec<tools::ResonantEntity> = echoes
+            .iter()
+            .filter(|(_, score)| *score >= req.min_similarity)
+            .take(req.limit)
+            .map(|&(node_id, score)| {
+                // Get fingerprint for this node
+                let history = db.get_node_history(node_id).ok();
+                let fp = history.map(|h| target_resonator.resonate(&h));
+
+                tools::ResonantEntity {
+                    entity_id: format!("node-{}", node_id.as_u64()),
+                    similarity_score: score,
+                    fingerprint: tools::TemporalFingerprint {
+                        bins: fp.as_ref().map_or(vec![], |f| f.bins.clone()),
+                        resolution_us: fp.as_ref().map_or(0, |f| f.resolution_us),
+                    },
+                }
+            })
+            .collect();
+
+        let description = format!(
+            "Found {} resonant entities for {} within {}-second window ({} bins)",
+            resonant_entities.len(),
+            req.target_entity_id,
+            req.window_seconds,
+            req.num_bins
+        );
+
+        Ok(tools::FindActivityResonanceResponse {
+            resonant_entities,
+            target_fingerprint: tools::TemporalFingerprint {
+                bins: target_fp.bins,
+                resolution_us: target_fp.resolution_us,
+            },
+            description,
+        })
+    }
+
+    async fn handle_compare_temporal_snapshots(
+        &self,
+        req: tools::CompareTemporalSnapshotsRequest,
+    ) -> HandlerResult<tools::CompareTemporalSnapshotsResponse> {
+        use aletheiadb::experimental::temporal_diff::TemporalDiff;
+
+        let repo = self.state.repository();
+        let db = repo.get_raw_db()?;
+
+        // Parse timestamps
+        let t1_micros = chrono::DateTime::parse_from_rfc3339(&req.t1)
+            .map_err(|e| HandlerError::InvalidArgs(format!("Invalid t1: {}", e)))?
+            .timestamp_micros();
+        let t2_micros = chrono::DateTime::parse_from_rfc3339(&req.t2)
+            .map_err(|e| HandlerError::InvalidArgs(format!("Invalid t2: {}", e)))?
+            .timestamp_micros();
+
+        let t1 = aletheiadb::core::temporal::Timestamp::from(t1_micros as u64);
+        let t2 = aletheiadb::core::temporal::Timestamp::from(t2_micros as u64);
+
+        // Create TemporalDiff engine and compute diff
+        let diff_engine = TemporalDiff::new(db);
+        let report = diff_engine
+            .compute_diff(t1, t2, req.limit)
+            .map_err(|e| HandlerError::Repository(RepositoryError::Other(e.to_string())))?;
+
+        // Convert changes to response format
+        let mut added = 0;
+        let mut removed = 0;
+        let mut modified = 0;
+
+        let changes: Vec<tools::EntityChange> = report
+            .changes
+            .iter()
+            .map(|change| {
+                use aletheiadb::experimental::temporal_diff::{ChangeType, EntityChange as AletheiaChange};
+
+                let (entity_id, entity_type, change_type, property_diff) = match change {
+                    AletheiaChange::Node { id, change } => {
+                        let eid = format!("node-{}", id.as_u64());
+                        match change {
+                            ChangeType::Added => {
+                                added += 1;
+                                (eid, "node".to_string(), "added".to_string(), None)
+                            }
+                            ChangeType::Removed => {
+                                removed += 1;
+                                (eid, "node".to_string(), "removed".to_string(), None)
+                            }
+                            ChangeType::Modified { diff } => {
+                                modified += 1;
+                                let pdiff = tools::PropertyDiff {
+                                    added: diff.added.clone(),
+                                    removed: diff.removed.clone(),
+                                    changed: diff.changed.clone(),
+                                };
+                                (eid, "node".to_string(), "modified".to_string(), Some(pdiff))
+                            }
+                        }
+                    }
+                    AletheiaChange::Edge { id, change } => {
+                        let eid = format!("edge-{}", id.as_u64());
+                        match change {
+                            ChangeType::Added => {
+                                added += 1;
+                                (eid, "edge".to_string(), "added".to_string(), None)
+                            }
+                            ChangeType::Removed => {
+                                removed += 1;
+                                (eid, "edge".to_string(), "removed".to_string(), None)
+                            }
+                            ChangeType::Modified { diff } => {
+                                modified += 1;
+                                let pdiff = tools::PropertyDiff {
+                                    added: diff.added.clone(),
+                                    removed: diff.removed.clone(),
+                                    changed: diff.changed.clone(),
+                                };
+                                (eid, "edge".to_string(), "modified".to_string(), Some(pdiff))
+                            }
+                        }
+                    }
+                };
+
+                tools::EntityChange {
+                    entity_id,
+                    entity_type,
+                    change_type,
+                    property_diff,
+                }
+            })
+            .collect();
+
+        let summary = tools::ChangeSummary {
+            total_changes: changes.len(),
+            added,
+            removed,
+            modified,
+        };
+
+        let description = format!(
+            "Compared snapshots {} vs {}: {} changes ({} added, {} removed, {} modified)",
+            req.t1, req.t2, summary.total_changes, added, removed, modified
+        );
+
+        Ok(tools::CompareTemporalSnapshotsResponse {
+            t1: req.t1,
+            t2: req.t2,
+            changes,
+            summary,
+            description,
+        })
+    }

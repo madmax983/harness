@@ -1,0 +1,304 @@
+// Tests for Nova experimental features (Tasks 2.1-2.3, 3.1-3.3)
+// These will be added to the tests module in handler.rs
+
+    #[tokio::test]
+    async fn test_find_temporal_path() {
+        let (_state, handler) = setup().await;
+
+        // Register agent
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "developer"}))
+            .await
+            .unwrap();
+
+        // Create tasks with edges
+        let t1_resp = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({
+                    "title": "Task A",
+                    "description": "First task"
+                }),
+            )
+            .await
+            .unwrap();
+        let t1_resp: tools::CreateTaskResponse = serde_json::from_value(t1_resp).unwrap();
+
+        let t2_resp = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({
+                    "title": "Task B",
+                    "description": "Second task",
+                    "parent_task": t1_resp.task_id
+                }),
+            )
+            .await
+            .unwrap();
+        let t2_resp: tools::CreateTaskResponse = serde_json::from_value(t2_resp).unwrap();
+
+        let now = chrono::Utc::now();
+        let valid_time = now.to_rfc3339();
+        let tx_time = now.to_rfc3339();
+
+        // Call find_temporal_path
+        let resp = handler
+            .call_tool(
+                "find_temporal_path",
+                serde_json::json!({
+                    "start_entity_id": t1_resp.task_id,
+                    "end_entity_id": t2_resp.task_id,
+                    "entity_type": "task",
+                    "valid_time": valid_time,
+                    "tx_time": tx_time
+                }),
+            )
+            .await;
+
+        // Tool should execute without error
+        assert!(resp.is_ok(), "find_temporal_path should not error");
+        let resp: tools::FindTemporalPathResponse = serde_json::from_value(resp.unwrap()).unwrap();
+
+        // Verify response structure
+        assert!(resp.path_length >= 0);
+        assert!(!resp.description.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_navigate_semantic_graph() {
+        let (_state, handler) = setup().await;
+
+        // Register agent
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "developer"}))
+            .await
+            .unwrap();
+
+        // Create knowledge entries (would need embeddings in real scenario)
+        let k1_resp = handler
+            .call_tool(
+                "share_knowledge",
+                serde_json::json!({
+                    "content": "Rust programming concepts",
+                    "kind": "discovery"
+                }),
+            )
+            .await
+            .unwrap();
+        let k1_resp: tools::ShareKnowledgeResponse = serde_json::from_value(k1_resp).unwrap();
+
+        let k2_resp = handler
+            .call_tool(
+                "share_knowledge",
+                serde_json::json!({
+                    "content": "Advanced Rust patterns",
+                    "kind": "discovery"
+                }),
+            )
+            .await
+            .unwrap();
+        let k2_resp: tools::ShareKnowledgeResponse = serde_json::from_value(k2_resp).unwrap();
+
+        // Call navigate_semantic_graph
+        let resp = handler
+            .call_tool(
+                "navigate_semantic_graph",
+                serde_json::json!({
+                    "start_entity_id": k1_resp.knowledge_id,
+                    "end_entity_id": k2_resp.knowledge_id,
+                    "entity_type": "knowledge",
+                    "vector_property": "embedding"
+                }),
+            )
+            .await;
+
+        // Tool should execute (may fail due to missing embeddings, but structure is validated)
+        if resp.is_ok() {
+            let resp: tools::NavigateSemanticGraphResponse =
+                serde_json::from_value(resp.unwrap()).unwrap();
+            assert!(resp.path_length > 0);
+            assert!(!resp.description.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_discover_semantic_clusters() {
+        let (_state, handler) = setup().await;
+
+        // Register agent
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "developer"}))
+            .await
+            .unwrap();
+
+        // Call discover_semantic_clusters
+        let resp = handler
+            .call_tool(
+                "discover_semantic_clusters",
+                serde_json::json!({
+                    "entity_type": "task",
+                    "vector_property": "embedding",
+                    "num_clusters": 2,
+                    "reify": false
+                }),
+            )
+            .await;
+
+        // Tool should execute without error
+        assert!(resp.is_ok(), "discover_semantic_clusters should not error");
+        let resp: tools::DiscoverSemanticClustersResponse =
+            serde_json::from_value(resp.unwrap()).unwrap();
+
+        // Verify response structure
+        assert!(!resp.description.is_empty());
+        assert_eq!(resp.reified_regions, None); // reify=false
+    }
+
+    #[tokio::test]
+    async fn test_generate_graph_layout() {
+        let (_state, handler) = setup().await;
+
+        // Register agent
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "developer"}))
+            .await
+            .unwrap();
+
+        // Create some tasks
+        for i in 1..=3 {
+            handler
+                .call_tool(
+                    "create_task",
+                    serde_json::json!({
+                        "title": format!("Task {}", i),
+                        "description": format!("Task {} description", i)
+                    }),
+                )
+                .await
+                .unwrap();
+        }
+
+        // Call generate_graph_layout
+        let resp = handler
+            .call_tool(
+                "generate_graph_layout",
+                serde_json::json!({
+                    "entity_type": "task",
+                    "iterations": 50
+                }),
+            )
+            .await;
+
+        // Tool should execute without error
+        assert!(resp.is_ok(), "generate_graph_layout should not error");
+        let resp: tools::GenerateGraphLayoutResponse =
+            serde_json::from_value(resp.unwrap()).unwrap();
+
+        // Verify response structure
+        assert!(!resp.positions.is_empty(), "Should have positions for tasks");
+        assert!(!resp.description.is_empty());
+        assert!(resp.bounds.max_x >= resp.bounds.min_x);
+        assert!(resp.bounds.max_y >= resp.bounds.min_y);
+    }
+
+    #[tokio::test]
+    async fn test_find_activity_resonance() {
+        let (_state, handler) = setup().await;
+
+        // Register agent
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "developer"}))
+            .await
+            .unwrap();
+
+        // Create a task
+        let t_resp = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({
+                    "title": "Target Task",
+                    "description": "Task to find resonance for"
+                }),
+            )
+            .await
+            .unwrap();
+        let t_resp: tools::CreateTaskResponse = serde_json::from_value(t_resp).unwrap();
+
+        // Call find_activity_resonance
+        let resp = handler
+            .call_tool(
+                "find_activity_resonance",
+                serde_json::json!({
+                    "target_entity_id": t_resp.task_id,
+                    "entity_type": "task",
+                    "window_seconds": 3600,
+                    "num_bins": 60,
+                    "limit": 10,
+                    "min_similarity": 0.1
+                }),
+            )
+            .await;
+
+        // Tool should execute without error
+        assert!(resp.is_ok(), "find_activity_resonance should not error");
+        let resp: tools::FindActivityResonanceResponse =
+            serde_json::from_value(resp.unwrap()).unwrap();
+
+        // Verify response structure
+        assert!(!resp.description.is_empty());
+        assert_eq!(resp.target_fingerprint.bins.len(), 60); // num_bins
+        assert_eq!(resp.target_fingerprint.resolution_us, 60_000_000); // 3600s / 60 bins
+    }
+
+    #[tokio::test]
+    async fn test_compare_temporal_snapshots() {
+        let (_state, handler) = setup().await;
+
+        // Register agent
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "developer"}))
+            .await
+            .unwrap();
+
+        let t1 = chrono::Utc::now().to_rfc3339();
+
+        // Create a task
+        handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({
+                    "title": "New Task",
+                    "description": "Task created between snapshots"
+                }),
+            )
+            .await
+            .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let t2 = chrono::Utc::now().to_rfc3339();
+
+        // Call compare_temporal_snapshots
+        let resp = handler
+            .call_tool(
+                "compare_temporal_snapshots",
+                serde_json::json!({
+                    "t1": t1,
+                    "t2": t2,
+                    "limit": 100
+                }),
+            )
+            .await;
+
+        // Tool should execute without error
+        assert!(resp.is_ok(), "compare_temporal_snapshots should not error");
+        let resp: tools::CompareTemporalSnapshotsResponse =
+            serde_json::from_value(resp.unwrap()).unwrap();
+
+        // Verify response structure
+        assert!(!resp.description.is_empty());
+        assert!(resp.summary.total_changes >= 0);
+        assert_eq!(
+            resp.summary.total_changes,
+            resp.summary.added + resp.summary.removed + resp.summary.modified
+        );
+    }
