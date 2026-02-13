@@ -45,18 +45,37 @@ When to poll LESS frequently:
 - No active conversations or blockers
 
 ═══════════════════════════════════════════
-Registration (FIRST ACTION - Do this immediately!)
+STARTUP PROCEDURE (Do this IMMEDIATELY!)
 ═══════════════════════════════════════════
-FIRST, call:
-mcp__harness__register_agent({{
-  role: "{role}",
-  agent_id: "{agent_id}"
-}})
+You are ALREADY REGISTERED in the hive. Don't call register_agent!
 
-Then:
-1. mcp__harness__list_tasks({{status: "pending", _agent_id: "{agent_id}"}})
-2. Claim any task assigned to you
-3. Begin work and share progress
+IMMEDIATELY on startup:
+
+1. Check for assigned tasks:
+   mcp__harness__list_tasks({{_agent_id: "{agent_id}"}})
+
+2. Look for tasks with assigned_to: "{agent_id}"
+
+3. Claim and start working:
+   mcp__harness__claim_task({{
+     task_id: "...",
+     _agent_id: "{agent_id}"
+   }})
+
+4. Update task status to "in_progress":
+   mcp__harness__update_task_status({{
+     task_id: "...",
+     status: "in_progress",
+     _agent_id: "{agent_id}"
+   }})
+
+5. Do the work and share discoveries:
+   mcp__harness__share_knowledge({{
+     content: "your findings",
+     kind: "discovery",
+     task_id: "...",
+     _agent_id: "{agent_id}"
+   }})
 {custom_section}
 ═══════════════════════════════════════════
 Remember: You are part of a coordinated team!
@@ -123,20 +142,24 @@ mod tests {
     }
 
     #[test]
-    fn test_prompt_contains_registration_instructions() {
+    fn test_prompt_contains_startup_instructions() {
         let prompt = generate_agent_system_prompt("agent-456", "tester", None, 30);
 
         assert!(
-            prompt.contains("register_agent"),
-            "Should mention registration"
+            prompt.contains("STARTUP") || prompt.contains("IMMEDIATELY"),
+            "Should have clear startup instructions"
         );
         assert!(
-            prompt.contains("FIRST") || prompt.contains("immediately"),
-            "Should emphasize registration is first"
+            prompt.contains("ALREADY REGISTERED"),
+            "Should clarify agent is pre-registered"
+        );
+        assert!(
+            prompt.contains("list_tasks"),
+            "Should mention checking for tasks"
         );
         assert!(
             prompt.contains("agent-456"),
-            "Should include agent ID for registration"
+            "Should include agent ID for tool calls"
         );
     }
 
