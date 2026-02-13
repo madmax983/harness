@@ -1,0 +1,45 @@
+{
+  "name": "harness",
+  "version": "0.1.0",
+  "description": "Seamless integration with harness hive mind for multi-agent coordination, task tracking, and knowledge sharing",
+  "author": "Mark Morgan",
+  "components": {
+    "commands": ["commands/*.md"],
+    "hooks": ["hooks/*.sh"],
+    "skills": ["skills/*.md"],
+    "agents": ["agents/*.md"]
+  },
+  "mcp": {
+    "servers": {
+      "harness": {
+        "command": "cargo",
+        "args": ["run", "--bin", "harness-mcpd", "--", "--port", "3000"],
+        "env": {
+          "RUST_LOG": "info"
+        }
+      }
+    }
+  },
+  "settings": {
+    "auto_register": {
+      "type": "boolean",
+      "default": true,
+      "description": "Automatically register as strategoi agent on session start"
+    },
+    "auto_parse_tasks": {
+      "type": "boolean",
+      "default": true,
+      "description": "Automatically create tasks from user requests like 'implement X' or 'add Y'"
+    },
+    "auto_share_knowledge": {
+      "type": "boolean",
+      "default": true,
+      "description": "Automatically share knowledge after completing tasks or making commits"
+    },
+    "show_hive_in_status": {
+      "type": "boolean",
+      "default": false,
+      "description": "Show active task count in status line"
+    }
+  }
+}

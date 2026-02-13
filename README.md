@@ -1,0 +1,227 @@
+# Harness
+
+Multi-agent AI orchestration platform with persistent hive mind coordination.
+
+## Overview
+
+Harness enables multiple AI agents to collaborate on complex tasks through:
+- **Task tracking** with hierarchical organization (Product → Project → Plan → Task)
+- **Knowledge sharing** with semantic search and associative memory
+- **Agent coordination** via direct messaging and role-based assignment
+- **Persistent storage** using AletheiaDB bi-temporal graph database
+- **MCP integration** for seamless LLM tool access
+
+## Architecture
+
+Harness consists of three main components:
+
+### 1. Orchestrator (`harness-orchestrator`)
+Manages agent lifecycle, terminal multiplexing, and swarm coordination. Supports both TUI and headless modes.
+
+### 2. Persistence Layer (`harness-persistence`)
+Provides repository abstraction over:
+- **InMemoryRepository**: Fast in-memory storage for testing
+- **AletheiaRepository**: Production graph database with bi-temporal storage
+
+Entity hierarchy:
+- **Session**: Hive instance with population cap
+- **Product**: Top-level container (e.g., "AletheiaDB", "Harness", "Thorp")
+- **Project**: Major initiatives within products
+- **Plan**: Structured execution strategies
+- **Task**: Individual work items with status tracking
+- **Agent**: AI workers with roles (strategoi, architect, developer, tester, etc.)
+- **Knowledge**: Shared discoveries, decisions, blockers, and activities
+- **DirectMessage**: Agent-to-agent communication
+
+### 3. MCP Server (`harness-mcp`)
+Model Context Protocol server exposing 21 tools for LLM integration:
+
+**Task Management:**
+- `create_task`, `list_tasks`, `claim_task`, `update_task_status`, `assign_task`, `get_task_context`
+
+**Agent Coordination:**
+- `register_agent`, `list_agents`, `send_direct_message`, `get_messages`, `get_thread_messages`
+
+**Knowledge Sharing:**
+- `share_knowledge`, `ask_hive` (semantic search), `fish_knowledge` (associative memory)
+
+**Product/Project/Plan:**
+- `create_product`, `list_products`, `create_project`, `list_projects`, `create_plan`, `list_plans`
+
+**Hive Status:**
+- `get_hive_status`
+
+## Quick Start
+
+### Running the Full Orchestrator
+
+```bash
+# TUI mode
+cargo run -- --port 3000 --embedding-model nomic-embed-text
+
+# Headless mode
+cargo run -- --port 3000 --headless
+```
+
+### Running MCP Server Only
+
+For integration with Claude Desktop, Codex, or other MCP clients:
+
+```bash
+cargo run --bin harness-mcpd -- --port 3000
+```
+
+MCP endpoint: `http://localhost:3000/sse`
+
+### Claude Desktop Configuration
+
+Add to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "harness": {
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "mcp-remote", "http://localhost:3000/sse"]
+    }
+  }
+}
+```
+
+## Claude Code Plugin
+
+For enhanced harness integration in Claude Code, install the official plugin:
+
+```bash
+# User-level (available in all projects)
+cp -r plugins/harness ~/.claude/plugins/harness
+
+# Project-level (only for this project)
+cp -r plugins/harness .claude/plugins/harness
+```
+
+**Features:**
+- 🤖 Auto-registers as strategoi agent on session start
+- 📋 Smart task detection from user requests
+- 💡 Knowledge sharing prompts after completions
+- ⚡ Quick commands: `/hive`, `/task`, `/agents`
+- 🎯 Multi-agent workflow skill for coordinating teams
+
+See `plugins/README.md` for full documentation.
+
+## Command-Line Options
+
+```bash
+Options:
+  -p, --port <PORT>              MCP server port (default: 3000)
+      --headless                 Run without TUI
+  -e, --embedding-model <MODEL>  Ollama model for semantic search
+      --ollama-url <URL>         Ollama base URL (default: http://localhost:11434)
+      --agent-cli <CLI>          Agent CLI executable (default: "claude")
+      --agent-runtime <RUNTIME>  Runtime adapter: claude, codex, gemini, claude_compatible
+```
+
+## Multi-Agent Workflow
+
+1. **Create hierarchical structure:**
+   ```bash
+   create_product("Harness", "Multi-agent orchestration")
+   create_project("MCP Server", "Implement MCP tools", product_id)
+   create_plan("Phase 1", "Core tools first", project_id)
+   ```
+
+2. **Create tasks:**
+   ```bash
+   create_task("Design architecture", "Define entity schemas", priority="critical")
+   create_task("Implement Product entity", "Add types and repository", priority="high")
+   ```
+
+3. **Spawn specialized team:**
+   ```bash
+   register_agent(role="architect")
+   register_agent(role="developer")
+   register_agent(role="tester")
+   ```
+
+4. **Coordinate work:**
+   ```bash
+   assign_task(task_id, agent_id)
+   # Agents claim, work, and update status
+   # Share knowledge as they discover insights
+   ```
+
+5. **Monitor progress:**
+   ```bash
+   get_hive_status()  # See agents, tasks, recent knowledge
+   ask_hive("How do we handle errors?")  # Search shared knowledge
+   ```
+
+## Example: Using Harness to Build Harness
+
+This codebase practices what it preaches! The Product/Project/Plan feature was built using harness itself:
+
+- **Architect** agent designed the entity schemas
+- **3 Developer** agents implemented Product, Project, and Plan entities in parallel
+- **Tools Developer** built the MCP API layer
+- All coordinated through task tracking and knowledge sharing
+- **Result:** 109 tests passing, 21 MCP tools, production-ready code
+
+Meta-level dogfooding achieved! 🐕🍲
+
+## Development
+
+### Running Tests
+
+```bash
+# Persistence layer (109 tests)
+cargo test -p harness-persistence
+
+# MCP server (19 tests)
+cargo test -p harness-mcp
+
+# All tests
+cargo test --all
+```
+
+### Project Structure
+
+```
+harness/
+├── crates/
+│   ├── harness-orchestrator/   # Agent lifecycle, TUI, swarm coordination
+│   ├── harness-persistence/    # Repository abstraction, entities
+│   └── harness-mcp/             # MCP server, tool handlers
+├── plugins/
+│   └── harness/                 # Claude Code plugin
+├── docs/
+│   └── usage.md                 # Detailed usage documentation
+└── src/
+    └── main.rs                  # CLI entry point
+```
+
+## Dependencies
+
+- **Runtime:** Tokio async runtime
+- **Database:** AletheiaDB (bi-temporal graph database)
+- **Embeddings:** Ollama (optional, for semantic search)
+- **MCP:** Model Context Protocol for LLM integration
+
+## Contributing
+
+Harness is built using harness! To contribute:
+
+1. Install the Claude Code plugin
+2. Use `/task create` to track your work
+3. Share knowledge with `share_knowledge` as you go
+4. Coordinate with `/agents` if working on complex features
+5. Submit PR with comprehensive tests
+
+## License
+
+[Add your license here]
+
+## Meta
+
+Built with ❤️ using harness itself for multi-agent coordination.
+
+"Harness eating its own dog food since 2026" 🐕🍲
