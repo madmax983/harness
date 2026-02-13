@@ -105,6 +105,16 @@ pub struct SpawnAgentRequest {
     pub role: String,
     /// Name for the spawned teammate.
     pub name: String,
+    /// CLI command to execute (e.g., "claude", "codex", "gemini").
+    pub cli_command: String,
+    /// CLI arguments with {PROMPT} placeholder for system prompt injection.
+    pub cli_args: Vec<String>,
+    /// Custom instructions to include in the generated system prompt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_prompt: Option<String>,
+    /// Polling interval in seconds for auto-polling get_messages and get_hive_status.
+    #[serde(default = "default_poll_interval")]
+    pub poll_interval_secs: u64,
     /// Optional task to assign immediately after spawn.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub initial_task_id: Option<String>,
@@ -113,12 +123,22 @@ pub struct SpawnAgentRequest {
     pub _agent_id: Option<String>,
 }
 
+fn default_poll_interval() -> u64 {
+    30
+}
+
 /// Response from spawn_agent.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SpawnAgentResponse {
     /// Harness agent ID.
     pub agent_id: String,
-    /// Claude Code teammate ID (from Task tool).
+    /// Process ID of spawned CLI agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_id: Option<u32>,
+    /// CLI command that was executed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cli_command: Option<String>,
+    /// Claude Code teammate ID (from Task tool) - DEPRECATED.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub teammate_id: Option<String>,
 }

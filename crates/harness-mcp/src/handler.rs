@@ -2203,6 +2203,8 @@ impl<R: Repository + 'static> HiveHandler<R> {
 
         Ok(tools::SpawnAgentResponse {
             agent_id: agent_id_str,
+            process_id: None,  // TODO: Implement in GREEN phase
+            cli_command: None, // TODO: Implement in GREEN phase
             teammate_id: Some(format!(
                 "Use Task tool with description: 'Spawn developer agent {}' and prompt:\n{}",
                 req.name, spawn_prompt

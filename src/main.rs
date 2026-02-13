@@ -224,7 +224,8 @@ async fn main() -> Result<()> {
     let process_manager = Arc::new(ProcessManager::new(config, repository.clone()));
 
     // 5. Create HiveState with optional embedding service
-    let mut hive_state = HiveState::new(session.clone(), repository.clone(), process_manager.clone());
+    let mut hive_state =
+        HiveState::new(session.clone(), repository.clone(), process_manager.clone());
 
     if let Some(model) = &args.embedding_model {
         tracing::info!(model = %model, "Configuring Ollama embeddings");
