@@ -6,9 +6,9 @@
 use std::sync::Arc;
 
 use harness_persistence::{
-    Agent, AgentId, AgentRole, DirectMessage, Knowledge, KnowledgeKind, Plan, PlanId, PlanStatus,
-    Priority, Product, ProductId, ProductStatus, Project, ProjectId, ProjectStatus, Repository,
-    RepositoryError, Task, TaskId, TaskStatus,
+    Agent, AgentId, AgentRole, AgentStatus, DirectMessage, Knowledge, KnowledgeKind, Plan, PlanId,
+    PlanStatus, Priority, Product, ProductId, ProductStatus, Project, ProjectId, ProjectStatus,
+    Repository, RepositoryError, Task, TaskId, TaskStatus,
 };
 use tokio::sync::RwLock;
 
@@ -154,6 +154,12 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 let resp = self.handle_get_hive_status().await?;
                 Ok(serde_json::to_value(resp).unwrap())
             }
+            "disconnect_agent" => {
+                let req: tools::DisconnectAgentRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_disconnect_agent(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
 
             // Message tools
             "send_direct_message" => {
@@ -234,6 +240,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
             "register_agent",
             "list_agents",
             "get_hive_status",
+            "disconnect_agent",
             "send_direct_message",
             "get_messages",
             "get_thread_messages",
@@ -924,6 +931,26 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 .map(|k| Self::knowledge_to_result(k, 0.0))
                 .collect(),
         })
+    }
+
+    async fn handle_disconnect_agent(
+        &self,
+        req: tools::DisconnectAgentRequest,
+    ) -> HandlerResult<tools::DisconnectAgentResponse> {
+        let agent_id = if let Some(ref id_str) = req.agent_id {
+            // Disconnect specified agent (strategoi can disconnect others)
+            Self::parse_agent_id(id_str)?
+        } else {
+            // Self-disconnect
+            self.require_agent_id().await?
+        };
+
+        self.state
+            .repository()
+            .update_agent_status(agent_id, AgentStatus::Finished)
+            .await?;
+
+        Ok(tools::DisconnectAgentResponse { success: true })
     }
 
     // --- Message handlers ---

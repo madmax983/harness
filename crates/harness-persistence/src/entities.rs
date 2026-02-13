@@ -56,12 +56,14 @@ pub struct Agent {
 
 impl Agent {
     /// Create a new agent with the given BMAD role.
+    /// Agents are created as Active for immediate use (self-registering strategoi).
+    /// Spawned agents can use with_status() to set Starting if needed.
     pub fn new(role: AgentRole, session_id: SessionId) -> Self {
         let is_strategoi = role == AgentRole::Strategoi;
         Self {
             id: AgentId::new(),
             role,
-            status: AgentStatus::Pending,
+            status: AgentStatus::Active,
             current_task: None,
             is_strategoi,
             session_id,

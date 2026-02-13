@@ -64,3 +64,16 @@ pub struct GetHiveStatusResponse {
     pub task_summary: TaskSummary,
     pub recent_knowledge: Vec<super::knowledge::KnowledgeResult>,
 }
+
+/// Request to disconnect an agent.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DisconnectAgentRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+}
+
+/// Response from disconnect_agent.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DisconnectAgentResponse {
+    pub success: bool,
+}
