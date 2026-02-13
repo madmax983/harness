@@ -970,11 +970,11 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 .count(),
         };
 
-        // Populate inbox if agent is registered
-        let inbox = if let Some(agent_id) = *self.agent_id.read().await {
+        // Populate inbox and threads if agent is registered
+        let (inbox, active_threads) = if let Some(agent_id) = *self.agent_id.read().await {
             let messages = repo.get_direct_messages(agent_id, 10).await?;
 
-            if !messages.is_empty() {
+            let inbox = if !messages.is_empty() {
                 let mut recent_messages = Vec::new();
 
                 for msg in &messages {
@@ -999,9 +999,64 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 })
             } else {
                 None
-            }
+            };
+
+            // Aggregate threads by task_id
+            let threads = if !messages.is_empty() {
+                use std::collections::HashMap;
+
+                let mut threads_map: HashMap<Option<TaskId>, Vec<&DirectMessage>> = HashMap::new();
+                for msg in &messages {
+                    threads_map.entry(msg.task_id).or_insert_with(Vec::new).push(msg);
+                }
+
+                let mut threads = Vec::new();
+                for (task_id_opt, thread_msgs) in threads_map {
+                    if thread_msgs.is_empty() {
+                        continue;
+                    }
+
+                    // Get unique participants
+                    let mut participant_ids = std::collections::HashSet::new();
+                    for msg in &thread_msgs {
+                        participant_ids.insert(msg.from_agent);
+                        participant_ids.insert(msg.to_agent);
+                    }
+
+                    // Get last message
+                    let last_msg = thread_msgs.iter().max_by_key(|m| m.created_at).unwrap();
+                    let preview = if last_msg.content.len() > 100 {
+                        format!("{}...", &last_msg.content[..97])
+                    } else {
+                        last_msg.content.clone()
+                    };
+
+                    // Get task title if available
+                    let (task_id_str, task_title) = if let Some(tid) = task_id_opt {
+                        let title = repo.get_task(tid).await.ok().map(|t| t.title);
+                        (Some(tid.as_uuid().to_string()), title)
+                    } else {
+                        (None, None)
+                    };
+
+                    threads.push(tools::ActiveThread {
+                        task_id: task_id_str,
+                        task_title,
+                        participants: participant_ids.iter().map(|id| id.as_uuid().to_string()).collect(),
+                        message_count: thread_msgs.len(),
+                        last_message_at: last_msg.created_at.to_rfc3339(),
+                        last_message_preview: preview,
+                    });
+                }
+
+                Some(threads)
+            } else {
+                None
+            };
+
+            (inbox, threads)
         } else {
-            None
+            (None, None)
         };
 
         Ok(tools::GetHiveStatusResponse {
@@ -1012,7 +1067,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 .map(|k| Self::knowledge_to_result(k, 0.0))
                 .collect(),
             inbox,
-            active_threads: None,  // TODO: Implement thread aggregation
+            active_threads,
         })
     }
 
