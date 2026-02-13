@@ -425,6 +425,8 @@ impl AletheiaRepository {
                 .map(TaskId::from_uuid),
             is_strategoi: Self::pbool(n, "is_strategoi")?,
             session_id: SessionId::from_uuid(Self::parse_uuid(Self::pstr(n, "session_id")?)?),
+            project_name: Self::opt_str(n, "project_name").map(|s| s.to_string()),
+            project_path: Self::opt_str(n, "project_path").map(|s| s.to_string()),
             created_at: Self::ts_to_dt(Self::pint(n, "created_at")?),
         })
     }
@@ -726,6 +728,14 @@ impl Repository for AletheiaRepository {
             if let Some(tid) = agent.current_task {
                 let s = tid.as_uuid().to_string();
                 props = props.insert("current_task", s.as_str());
+            }
+
+            if let Some(ref name) = agent.project_name {
+                props = props.insert("project_name", name.as_str());
+            }
+
+            if let Some(ref path) = agent.project_path {
+                props = props.insert("project_path", path.as_str());
             }
 
             let an = tx.create_node(LABEL_AGENT, props.build())?;

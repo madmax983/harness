@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RegisterAgentRequest {
     pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_path: Option<String>,
 }
 
 /// Response from register_agent.
@@ -27,6 +31,10 @@ pub struct AgentInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_task: Option<String>,
     pub is_strategoi: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_path: Option<String>,
 }
 
 /// Response from list_agents.

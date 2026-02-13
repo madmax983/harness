@@ -394,6 +394,8 @@ impl<R: Repository + 'static> HiveHandler<R> {
             status: format!("{:?}", a.status).to_lowercase(),
             current_task: a.current_task.map(|t| t.as_uuid().to_string()),
             is_strategoi: a.is_strategoi,
+            project_name: a.project_name.clone(),
+            project_path: a.project_path.clone(),
         }
     }
 
@@ -847,7 +849,13 @@ impl<R: Repository + 'static> HiveHandler<R> {
         req: tools::RegisterAgentRequest,
     ) -> HandlerResult<tools::RegisterAgentResponse> {
         let role = Self::parse_role(&req.role)?;
-        let agent = Agent::new(role, self.state.session_id());
+        let mut agent = Agent::new(role, self.state.session_id());
+
+        // Add project context if provided
+        if let (Some(name), Some(path)) = (req.project_name, req.project_path) {
+            agent = agent.with_project(name, path);
+        }
+
         let aid = agent.id;
 
         self.state.repository().create_agent(&agent).await?;

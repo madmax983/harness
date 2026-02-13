@@ -44,6 +44,12 @@ pub struct Agent {
     pub is_strategoi: bool,
     /// Session this agent belongs to.
     pub session_id: SessionId,
+    /// Project name this agent is working on (e.g., "arthropod", "harness").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
+    /// Project directory path (e.g., "C:/Users/markm/arthropod").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_path: Option<String>,
     /// When the agent was created.
     pub created_at: DateTime<Utc>,
 }
@@ -59,6 +65,8 @@ impl Agent {
             current_task: None,
             is_strategoi,
             session_id,
+            project_name: None,
+            project_path: None,
             created_at: Utc::now(),
         }
     }
@@ -66,6 +74,13 @@ impl Agent {
     /// Create a new agent with a specific ID (for restoring from persistence).
     pub fn with_id(mut self, id: AgentId) -> Self {
         self.id = id;
+        self
+    }
+
+    /// Set the project context for this agent.
+    pub fn with_project(mut self, name: impl Into<String>, path: impl Into<String>) -> Self {
+        self.project_name = Some(name.into());
+        self.project_path = Some(path.into());
         self
     }
 }
