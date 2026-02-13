@@ -271,6 +271,15 @@ impl<R: Repository + 'static> HiveHandler<R> {
         ))
     }
 
+    /// Resolve agent ID from optional parameter or session state.
+    /// Checks provided agent_id first, falls back to require_agent_id().
+    async fn resolve_agent_id(&self, provided: Option<&str>) -> HandlerResult<AgentId> {
+        if let Some(aid_str) = provided {
+            return Self::parse_agent_id(aid_str);
+        }
+        self.require_agent_id().await
+    }
+
     fn parse_agent_id(s: &str) -> HandlerResult<AgentId> {
         let uuid = uuid::Uuid::parse_str(s)
             .map_err(|_| HandlerError::Parse(format!("Invalid agent ID: {s}")))?;
@@ -519,7 +528,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
         req: tools::ClaimTaskRequest,
     ) -> HandlerResult<tools::ClaimTaskResponse> {
         let task_id = Self::parse_task_id(&req.task_id)?;
-        let agent_id = self.require_agent_id().await?;
+        let agent_id = self.resolve_agent_id(req._agent_id.as_deref()).await?;
 
         match self.state.repository().claim_task(task_id, agent_id).await {
             Ok(()) => Ok(tools::ClaimTaskResponse {
@@ -645,7 +654,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
         &self,
         req: tools::ShareKnowledgeRequest,
     ) -> HandlerResult<tools::ShareKnowledgeResponse> {
-        let agent_id = self.require_agent_id().await?;
+        let agent_id = self.resolve_agent_id(req._agent_id.as_deref()).await?;
         let kind = Self::parse_kind(&req.kind)?;
 
         let mut knowledge = Knowledge::new(&req.content, kind, agent_id, self.state.session_id());
@@ -1076,7 +1085,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
         req: tools::SpawnAgentRequest,
     ) -> HandlerResult<tools::SpawnAgentResponse> {
         // Validate caller is strategoi
-        let caller_id = self.require_agent_id().await?;
+        let caller_id = self.resolve_agent_id(req._agent_id.as_deref()).await?;
         let caller = self.state.repository().get_agent(caller_id).await?;
         if !caller.is_strategoi {
             return Err(HandlerError::InvalidArgs(
@@ -1137,7 +1146,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
             Self::parse_agent_id(id_str)?
         } else {
             // Self-disconnect
-            self.require_agent_id().await?
+            self.resolve_agent_id(req._agent_id.as_deref()).await?
         };
 
         self.state
@@ -1154,7 +1163,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
         &self,
         req: tools::SendDirectMessageRequest,
     ) -> HandlerResult<tools::SendDirectMessageResponse> {
-        let from_agent = self.require_agent_id().await?;
+        let from_agent = self.resolve_agent_id(req._agent_id.as_deref()).await?;
         let to_agent = Self::parse_agent_id(&req.to_agent)?;
 
         let mut dm =
@@ -1174,7 +1183,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
         &self,
         req: tools::GetMessagesRequest,
     ) -> HandlerResult<tools::GetMessagesResponse> {
-        let agent_id = self.require_agent_id().await?;
+        let agent_id = self.resolve_agent_id(req._agent_id.as_deref()).await?;
         let messages = self
             .state
             .repository()

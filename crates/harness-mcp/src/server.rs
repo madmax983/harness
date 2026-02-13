@@ -89,6 +89,13 @@ impl<R: Repository + 'static> ServerHandler for HiveMcpServer<R> {
     ) -> Result<CallToolResult, CallToolError> {
         let handler = HiveHandler::new(self.state.clone());
 
+        // Log client info from MCP SDK if available
+        if let Some(client_info) = _runtime.client_info() {
+            tracing::info!("MCP Client connected: {:?}", client_info);
+        } else {
+            tracing::debug!("No client_info available from MCP SDK");
+        }
+
         // Restore agent_id from session if it exists (for MCP client persistence)
         if let Ok(session) = self
             .state
@@ -142,7 +149,7 @@ pub async fn start_mcp_server<R: Repository + 'static>(
     host: &str,
     port: u16,
 ) -> Result<(), rust_mcp_sdk::error::McpSdkError> {
-    let handler = HiveMcpServer::new(state);
+    let handler = HiveMcpServer::new(state.clone());
     let server_info = HiveMcpServer::<R>::server_info();
 
     let options = HyperServerOptions {
@@ -157,7 +164,52 @@ pub async fn start_mcp_server<R: Repository + 'static>(
         options,
     );
 
-    server.start().await
+    // Set up graceful shutdown signal handler
+    let shutdown_signal = async {
+        #[cfg(unix)]
+        {
+            let mut sigterm = tokio::signal::unix::signal(
+                tokio::signal::unix::SignalKind::terminate()
+            ).expect("failed to install SIGTERM handler");
+            let mut sigint = tokio::signal::unix::signal(
+                tokio::signal::unix::SignalKind::interrupt()
+            ).expect("failed to install SIGINT handler");
+
+            tokio::select! {
+                _ = sigterm.recv() => tracing::info!("Received SIGTERM"),
+                _ = sigint.recv() => tracing::info!("Received SIGINT"),
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("failed to install Ctrl+C handler");
+            tracing::info!("Received Ctrl+C");
+        }
+    };
+
+    // Run server with graceful shutdown
+    tracing::info!("MCP server starting, press Ctrl+C to shutdown gracefully");
+
+    tokio::select! {
+        result = server.start() => {
+            result
+        }
+        _ = shutdown_signal => {
+            tracing::info!("Shutdown signal received, stopping server gracefully...");
+
+            // Give pending operations a moment to complete
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+            tracing::info!(
+                session_id = %state.session_id(),
+                "Graceful shutdown complete - session state persisted via WAL"
+            );
+            Ok(())
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -209,6 +261,17 @@ fn make_tool(
     }
 }
 
+/// Helper to add _agent_id parameter to tool properties.
+fn with_agent_id(
+    mut props: HashMap<String, serde_json::Map<String, serde_json::Value>>,
+) -> HashMap<String, serde_json::Map<String, serde_json::Value>> {
+    props.insert(
+        "_agent_id".into(),
+        prop("string", "Optional agent ID for multi-client support"),
+    );
+    props
+}
+
 /// Returns the full list of 14 tool definitions with JSON Schema input schemas.
 pub fn tool_definitions() -> Vec<Tool> {
     vec![
@@ -217,7 +280,7 @@ pub fn tool_definitions() -> Vec<Tool> {
             "create_task",
             "Create a new task in the hive.",
             vec!["title", "description"],
-            HashMap::from([
+            with_agent_id(HashMap::from([
                 ("title".into(), prop("string", "Title of the task")),
                 (
                     "description".into(),
@@ -235,31 +298,31 @@ pub fn tool_definitions() -> Vec<Tool> {
                     "parent_task".into(),
                     prop("string", "Optional parent task ID"),
                 ),
-            ]),
+            ])),
         ),
         make_tool(
             "list_tasks",
             "List tasks in the current session, optionally filtered by status.",
             vec![],
-            HashMap::from([(
+            with_agent_id(HashMap::from([(
                 "status".into(),
                 prop(
                     "string",
                     "Filter by status: pending, claimed, in_progress, completed, failed",
                 ),
-            )]),
+            )])),
         ),
         make_tool(
             "claim_task",
             "Claim an unassigned task for the current agent.",
             vec!["task_id"],
-            HashMap::from([("task_id".into(), prop("string", "ID of the task to claim"))]),
+            with_agent_id(HashMap::from([("task_id".into(), prop("string", "ID of the task to claim"))])),
         ),
         make_tool(
             "update_task_status",
             "Update the status of a task.",
             vec!["task_id", "status"],
-            HashMap::from([
+            with_agent_id(HashMap::from([
                 ("task_id".into(), prop("string", "ID of the task to update")),
                 (
                     "status".into(),
@@ -272,35 +335,35 @@ pub fn tool_definitions() -> Vec<Tool> {
                     "summary".into(),
                     prop("string", "Optional completion summary"),
                 ),
-            ]),
+            ])),
         ),
         make_tool(
             "assign_task",
             "Assign a task to a specific agent.",
             vec!["task_id", "agent_id"],
-            HashMap::from([
+            with_agent_id(HashMap::from([
                 ("task_id".into(), prop("string", "ID of the task to assign")),
                 (
                     "agent_id".into(),
                     prop("string", "ID of the agent to assign to"),
                 ),
-            ]),
+            ])),
         ),
         make_tool(
             "get_task_context",
             "Get full context for a task including knowledge and subtasks.",
             vec!["task_id"],
-            HashMap::from([(
+            with_agent_id(HashMap::from([(
                 "task_id".into(),
                 prop("string", "ID of the task to get context for"),
-            )]),
+            )])),
         ),
         // --- Knowledge tools ---
         make_tool(
             "share_knowledge",
             "Share a piece of knowledge with the hive.",
             vec!["content", "kind"],
-            HashMap::from([
+            with_agent_id(HashMap::from([
                 (
                     "content".into(),
                     prop("string", "The knowledge content to share"),
@@ -316,13 +379,13 @@ pub fn tool_definitions() -> Vec<Tool> {
                     "task_id".into(),
                     prop("string", "Optional task ID to associate with"),
                 ),
-            ]),
+            ])),
         ),
         make_tool(
             "ask_hive",
             "Search the hive's collective knowledge.",
             vec!["query"],
-            HashMap::from([
+            with_agent_id(HashMap::from([
                 (
                     "query".into(),
                     prop("string", "Search query for the hive knowledge"),
@@ -335,13 +398,13 @@ pub fn tool_definitions() -> Vec<Tool> {
                         serde_json::Value::Number(10.into()),
                     ),
                 ),
-            ]),
+            ])),
         ),
         make_tool(
             "fish_knowledge",
             "Retrieve knowledge through associative memory retrieval (vector + graph connections).",
             vec!["knowledge_id"],
-            HashMap::from([
+            with_agent_id(HashMap::from([
                 (
                     "knowledge_id".into(),
                     prop("string", "ID of the knowledge entry to fish from"),
@@ -354,14 +417,14 @@ pub fn tool_definitions() -> Vec<Tool> {
                         serde_json::Value::Number(15.into()),
                     ),
                 ),
-            ]),
+            ])),
         ),
         // --- Agent tools ---
         make_tool(
             "register_agent",
             "Register a new agent in the hive with the given role.",
             vec!["role"],
-            HashMap::from([
+            with_agent_id(HashMap::from([
                 (
                     "role".into(),
                     prop(
@@ -381,25 +444,25 @@ pub fn tool_definitions() -> Vec<Tool> {
                     "agent_id".into(),
                     prop("string", "For spawned agents: pre-created agent ID to activate"),
                 ),
-            ]),
+            ])),
         ),
         make_tool(
             "list_agents",
             "List all agents in the current session.",
             vec![],
-            HashMap::new(),
+            with_agent_id(HashMap::new()),
         ),
         make_tool(
             "get_hive_status",
             "Get comprehensive status of the hive including agents, task summary, and recent knowledge.",
             vec![],
-            HashMap::new(),
+            with_agent_id(HashMap::new()),
         ),
         make_tool(
             "spawn_agent",
             "Spawn a new agent to work on tasks (strategoi only).",
             vec!["role", "name"],
-            HashMap::from([
+            with_agent_id(HashMap::from([
                 (
                     "role".into(),
                     prop("string", "Role for spawned agent (developer)"),
@@ -409,23 +472,23 @@ pub fn tool_definitions() -> Vec<Tool> {
                     "initial_task_id".into(),
                     prop("string", "Optional task to assign immediately"),
                 ),
-            ]),
+            ])),
         ),
         make_tool(
             "disconnect_agent",
             "Disconnect an agent from the hive.",
             vec![],
-            HashMap::from([(
+            with_agent_id(HashMap::from([(
                 "agent_id".into(),
                 prop("string", "Optional agent ID to disconnect (defaults to self)"),
-            )]),
+            )])),
         ),
         // --- Message tools ---
         make_tool(
             "send_direct_message",
             "Send a direct message to another agent.",
             vec!["to_agent", "content"],
-            HashMap::from([
+            with_agent_id(HashMap::from([
                 (
                     "to_agent".into(),
                     prop("string", "ID of the recipient agent"),
@@ -435,26 +498,26 @@ pub fn tool_definitions() -> Vec<Tool> {
                     "task_id".into(),
                     prop("string", "Optional task ID to thread the message under"),
                 ),
-            ]),
+            ])),
         ),
         make_tool(
             "get_messages",
             "Get recent direct messages for the current agent.",
             vec![],
-            HashMap::from([(
+            with_agent_id(HashMap::from([(
                 "limit".into(),
                 prop_with_default(
                     "integer",
                     "Maximum number of messages to return",
                     serde_json::Value::Number(20.into()),
                 ),
-            )]),
+            )])),
         ),
         make_tool(
             "get_thread_messages",
             "Get messages in a task thread.",
             vec!["task_id"],
-            HashMap::from([
+            with_agent_id(HashMap::from([
                 (
                     "task_id".into(),
                     prop("string", "ID of the task thread to get messages for"),
@@ -467,48 +530,48 @@ pub fn tool_definitions() -> Vec<Tool> {
                         serde_json::Value::Number(20.into()),
                     ),
                 ),
-            ]),
+            ])),
         ),
         // --- Planning tools ---
         make_tool(
             "create_product",
             "Create a new product.",
             vec!["name", "description"],
-            HashMap::from([
+            with_agent_id(HashMap::from([
                 ("name".into(), prop("string", "Name of the product")),
                 (
                     "description".into(),
                     prop("string", "Detailed description of the product"),
                 ),
-            ]),
+            ])),
         ),
         make_tool(
             "list_products",
             "List products in the current session, optionally filtered by status.",
             vec![],
-            HashMap::from([(
+            with_agent_id(HashMap::from([(
                 "status".into(),
                 prop("string", "Filter by status: concept, active, maintenance, archived"),
-            )]),
+            )])),
         ),
         make_tool(
             "create_project",
             "Create a new project within a product.",
             vec!["product_id", "name", "description"],
-            HashMap::from([
+            with_agent_id(HashMap::from([
                 ("product_id".into(), prop("string", "ID of the parent product")),
                 ("name".into(), prop("string", "Name of the project")),
                 (
                     "description".into(),
                     prop("string", "Detailed description of the project"),
                 ),
-            ]),
+            ])),
         ),
         make_tool(
             "list_projects",
             "List projects in the current session, optionally filtered by product and/or status.",
             vec![],
-            HashMap::from([
+            with_agent_id(HashMap::from([
                 (
                     "product_id".into(),
                     prop("string", "Filter by parent product ID"),
@@ -520,26 +583,26 @@ pub fn tool_definitions() -> Vec<Tool> {
                         "Filter by status: planning, active, on_hold, completed, archived",
                     ),
                 ),
-            ]),
+            ])),
         ),
         make_tool(
             "create_plan",
             "Create a new plan within a project.",
             vec!["project_id", "name", "strategy"],
-            HashMap::from([
+            with_agent_id(HashMap::from([
                 ("project_id".into(), prop("string", "ID of the parent project")),
                 ("name".into(), prop("string", "Name of the plan")),
                 (
                     "strategy".into(),
                     prop("string", "Strategic approach or execution strategy"),
                 ),
-            ]),
+            ])),
         ),
         make_tool(
             "list_plans",
             "List plans in the current session, optionally filtered by project and/or status.",
             vec![],
-            HashMap::from([
+            with_agent_id(HashMap::from([
                 (
                     "project_id".into(),
                     prop("string", "Filter by parent project ID"),
@@ -551,7 +614,7 @@ pub fn tool_definitions() -> Vec<Tool> {
                         "Filter by status: draft, approved, in_execution, paused, completed, abandoned",
                     ),
                 ),
-            ]),
+            ])),
         ),
     ]
 }

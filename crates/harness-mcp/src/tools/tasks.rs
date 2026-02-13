@@ -11,6 +11,9 @@ pub struct CreateTaskRequest {
     pub priority: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_task: Option<String>,
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
 }
 
 fn default_priority() -> String {
@@ -28,6 +31,9 @@ pub struct CreateTaskResponse {
 pub struct ListTasksRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
 }
 
 /// Task info in list response.
@@ -58,6 +64,9 @@ pub struct ListTasksResponse {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ClaimTaskRequest {
     pub task_id: String,
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
 }
 
 /// Response from claim_task.
@@ -75,6 +84,9 @@ pub struct UpdateTaskStatusRequest {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
 }
 
 /// Response from update_task_status.
@@ -88,6 +100,9 @@ pub struct UpdateTaskStatusResponse {
 pub struct AssignTaskRequest {
     pub task_id: String,
     pub agent_id: String,
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
 }
 
 /// Response from assign_task.
@@ -100,6 +115,9 @@ pub struct AssignTaskResponse {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GetTaskContextRequest {
     pub task_id: String,
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
 }
 
 /// Response from get_task_context.
@@ -118,6 +136,9 @@ pub struct GetTaskContextResponse {
 pub struct AddTaskDependencyRequest {
     pub task_id: String,
     pub blocked_task_id: String,
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
 }
 
 /// Response from add_task_dependency.
@@ -131,6 +152,9 @@ pub struct AddTaskDependencyResponse {
 pub struct RemoveTaskDependencyRequest {
     pub task_id: String,
     pub blocked_task_id: String,
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
 }
 
 /// Response from remove_task_dependency.

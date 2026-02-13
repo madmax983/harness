@@ -23,7 +23,11 @@ pub struct RegisterAgentResponse {
 
 /// Request to list agents.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ListAgentsRequest {}
+pub struct ListAgentsRequest {
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
 
 /// Agent info in list response.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -48,7 +52,11 @@ pub struct ListAgentsResponse {
 
 /// Request to get full hive status.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct GetHiveStatusRequest {}
+pub struct GetHiveStatusRequest {
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
 
 /// Task summary counts.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -79,6 +87,9 @@ pub struct GetHiveStatusResponse {
 pub struct DisconnectAgentRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
 }
 
 /// Response from disconnect_agent.
@@ -97,6 +108,9 @@ pub struct SpawnAgentRequest {
     /// Optional task to assign immediately after spawn.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub initial_task_id: Option<String>,
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
 }
 
 /// Response from spawn_agent.

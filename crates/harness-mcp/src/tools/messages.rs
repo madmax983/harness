@@ -9,6 +9,9 @@ pub struct SendDirectMessageRequest {
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
 }
 
 /// Response from send_direct_message.
@@ -22,6 +25,9 @@ pub struct SendDirectMessageResponse {
 pub struct GetMessagesRequest {
     #[serde(default = "default_limit")]
     pub limit: usize,
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
 }
 
 fn default_limit() -> usize {
@@ -52,6 +58,9 @@ pub struct GetThreadMessagesRequest {
     pub task_id: String,
     #[serde(default = "default_limit")]
     pub limit: usize,
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
 }
 
 /// Response from get_thread_messages.

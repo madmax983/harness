@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 pub struct CreateProductRequest {
     pub name: String,
     pub description: String,
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
 }
 
 /// Response from create_product.
@@ -34,6 +37,9 @@ pub struct ProductInfo {
 pub struct ListProductsRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
 }
 
 /// Response from list_products.
@@ -52,6 +58,9 @@ pub struct CreateProjectRequest {
     pub product_id: String,
     pub name: String,
     pub description: String,
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
 }
 
 /// Response from create_project.
@@ -78,6 +87,9 @@ pub struct ListProjectsRequest {
     pub product_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
 }
 
 /// Response from list_projects.
@@ -96,6 +108,9 @@ pub struct CreatePlanRequest {
     pub project_id: String,
     pub name: String,
     pub strategy: String,
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
 }
 
 /// Response from create_plan.
@@ -122,6 +137,9 @@ pub struct ListPlansRequest {
     pub project_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
 }
 
 /// Response from list_plans.

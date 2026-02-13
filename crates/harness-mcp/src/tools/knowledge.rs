@@ -9,6 +9,9 @@ pub struct ShareKnowledgeRequest {
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
 }
 
 /// Response from share_knowledge.
@@ -23,6 +26,9 @@ pub struct AskHiveRequest {
     pub query: String,
     #[serde(default = "default_limit")]
     pub limit: usize,
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
 }
 
 fn default_limit() -> usize {
@@ -55,6 +61,9 @@ pub struct FishKnowledgeRequest {
     pub knowledge_id: String,
     #[serde(default = "default_fish_limit")]
     pub limit: usize,
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
 }
 
 fn default_fish_limit() -> usize {
