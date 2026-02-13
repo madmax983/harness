@@ -1009,6 +1009,7 @@ pub fn tool_definitions() -> Vec<Tool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use harness_orchestrator::{OrchestratorConfig, ProcessManager};
     use harness_persistence::{InMemoryRepository, Session};
 
     #[test]
@@ -1068,7 +1069,9 @@ mod tests {
         // Verify HiveMcpServer can be instantiated with InMemoryRepository explicitly.
         let repo = Arc::new(InMemoryRepository::new());
         let session = harness_persistence::Session::new(4);
-        let state = Arc::new(HiveState::new(session, repo));
+        let config = OrchestratorConfig::default();
+        let process_manager = Arc::new(ProcessManager::new(config, repo.clone()));
+        let state = Arc::new(HiveState::new(session, repo, process_manager));
         let _server: HiveMcpServer<InMemoryRepository> = HiveMcpServer::new(state);
     }
 
@@ -1078,7 +1081,10 @@ mod tests {
         let session = Session::new(8);
         repo.create_session(&session).await.expect("session");
 
-        let state = Arc::new(HiveState::new(session, repo));
+        let config = OrchestratorConfig::default();
+        let process_manager = Arc::new(ProcessManager::new(config, repo.clone()));
+
+        let state = Arc::new(HiveState::new(session, repo, process_manager));
         let _server = HiveMcpServer::new(state.clone());
 
         // Verify tool dispatch works via the underlying HiveHandler

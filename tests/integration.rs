@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use harness_mcp::{HiveHandler, HiveState};
+use harness_orchestrator::{OrchestratorConfig, ProcessManager};
 use harness_persistence::{InMemoryRepository, Repository, Session};
 
 async fn setup_hive() -> (
@@ -15,7 +16,10 @@ async fn setup_hive() -> (
     let session = Session::new(8);
     repo.create_session(&session).await.unwrap();
 
-    let state = Arc::new(HiveState::new(session, repo));
+    let config = OrchestratorConfig::default();
+    let process_manager = Arc::new(ProcessManager::new(config, repo.clone()));
+
+    let state = Arc::new(HiveState::new(session, repo, process_manager));
     let handler = HiveHandler::new(state.clone());
     (state, handler)
 }
@@ -530,8 +534,13 @@ async fn test_embedding_service_integration() {
     repo.create_session(&session).await.unwrap();
 
     // Create HiveState with embedding service
-    let state =
-        Arc::new(HiveState::new(session, repo).with_embedding_service(embedding_service.clone()));
+    let config = OrchestratorConfig::default();
+    let process_manager = Arc::new(ProcessManager::new(config, repo.clone()));
+
+    let state = Arc::new(
+        HiveState::new(session, repo, process_manager)
+            .with_embedding_service(embedding_service.clone()),
+    );
     let handler = HiveHandler::new(state.clone());
 
     // Register agent

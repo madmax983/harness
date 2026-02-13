@@ -2968,6 +2968,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use harness_orchestrator::{OrchestratorConfig, ProcessManager};
     use harness_persistence::{InMemoryRepository, Session};
 
     async fn setup() -> (
@@ -2978,7 +2979,10 @@ mod tests {
         let session = Session::new(8);
         repo.create_session(&session).await.unwrap();
 
-        let state = Arc::new(HiveState::new(session, repo));
+        let config = OrchestratorConfig::default();
+        let process_manager = Arc::new(ProcessManager::new(config, repo.clone()));
+
+        let state = Arc::new(HiveState::new(session, repo, process_manager));
         let handler = HiveHandler::new(state.clone());
         (state, handler)
     }

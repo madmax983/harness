@@ -12,6 +12,7 @@ use aletheiadb::storage::index_persistence::PersistenceConfig;
 use aletheiadb::{AletheiaDB, AletheiaDBConfig};
 use anyhow::{Context, Result, anyhow, bail};
 use harness_mcp::{HiveState, start_mcp_server};
+use harness_orchestrator::{OrchestratorConfig, ProcessManager};
 use harness_persistence::{AletheiaRepository, Repository, Session, SessionId};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -270,7 +271,22 @@ async fn main() -> Result<()> {
     let repository = Arc::new(repository);
     let session = ensure_session(&repository, &args.session_file, args.population_cap).await?;
 
-    let mut hive_state = HiveState::new(session.clone(), repository);
+    // Initialize ProcessManager
+    let cli_path = if cfg!(windows) {
+        std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string())
+    } else {
+        "sh".to_string()
+    };
+
+    let orchestrator_config = OrchestratorConfig {
+        population_cap: args.population_cap,
+        agent_cli_path: cli_path,
+        ..Default::default()
+    };
+
+    let process_manager = Arc::new(ProcessManager::new(orchestrator_config, repository.clone()));
+
+    let mut hive_state = HiveState::new(session.clone(), repository, process_manager);
     if let Some(model) = args.embedding_model.as_deref() {
         let svc = create_ollama_embedding_service(model, args.ollama_url.as_deref())?;
         hive_state = hive_state.with_embedding_service(Arc::new(svc));

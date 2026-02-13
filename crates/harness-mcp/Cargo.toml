@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 harness-persistence = { path = "../harness-persistence" }
+harness-orchestrator = { path = "../harness-orchestrator" }
 aletheiadb.workspace = true
 rust-mcp-sdk.workspace = true
 rust-mcp-schema.workspace = true
