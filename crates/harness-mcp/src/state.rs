@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use harness_orchestrator::ProcessManager;
 use harness_persistence::{Repository, Session, SessionId};
 
 /// Shared state for MCP tool handlers.
@@ -10,16 +11,23 @@ pub struct HiveState<R: Repository> {
     session: Session,
     /// Repository for persistence.
     repository: Arc<R>,
+    /// Manager for agent processes.
+    process_manager: Arc<ProcessManager<R>>,
     /// Optional embedding service for semantic search.
     embedding_service: Option<Arc<aletheiadb::embeddings::EmbeddingService>>,
 }
 
 impl<R: Repository + 'static> HiveState<R> {
     /// Create a new hive state.
-    pub fn new(session: Session, repository: Arc<R>) -> Self {
+    pub fn new(
+        session: Session,
+        repository: Arc<R>,
+        process_manager: Arc<ProcessManager<R>>,
+    ) -> Self {
         Self {
             session,
             repository,
+            process_manager,
             embedding_service: None,
         }
     }
@@ -48,6 +56,11 @@ impl<R: Repository + 'static> HiveState<R> {
         &self.repository
     }
 
+    /// Get the process manager.
+    pub fn process_manager(&self) -> &Arc<ProcessManager<R>> {
+        &self.process_manager
+    }
+
     /// Get the embedding service, if configured.
     pub fn embedding_service(&self) -> Option<&Arc<aletheiadb::embeddings::EmbeddingService>> {
         self.embedding_service.as_ref()
@@ -57,15 +70,21 @@ impl<R: Repository + 'static> HiveState<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use harness_persistence::InMemoryRepository;
+    use aletheiadb::AletheiaDB;
+    use harness_orchestrator::OrchestratorConfig;
+    use harness_persistence::AletheiaRepository;
 
     #[tokio::test]
     async fn test_hive_state_creation() {
-        let repo = Arc::new(InMemoryRepository::new());
+        let db = Arc::new(AletheiaDB::new().unwrap());
+        let repo = Arc::new(AletheiaRepository::new_anon(db));
         let session = Session::new(8);
         repo.create_session(&session).await.unwrap();
 
-        let state = HiveState::new(session, repo);
+        let config = OrchestratorConfig::default();
+        let process_manager = Arc::new(ProcessManager::new(config, repo.clone()));
+
+        let state = HiveState::new(session, repo, process_manager);
         assert_eq!(state.population_cap(), 8);
         assert!(state.embedding_service().is_none());
     }

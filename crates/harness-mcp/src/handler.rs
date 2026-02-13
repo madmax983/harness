@@ -279,6 +279,45 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 Ok(serde_json::to_value(resp).unwrap())
             }
 
+            /* Nova experimental features (Tasks 2.1-2.3, 3.1-3.3) - Temporarily disabled
+            "find_temporal_path" => {
+                let req: tools::FindTemporalPathRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_find_temporal_path(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "navigate_semantic_graph" => {
+                let req: tools::NavigateSemanticGraphRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_navigate_semantic_graph(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "discover_semantic_clusters" => {
+                let req: tools::DiscoverSemanticClustersRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_discover_semantic_clusters(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "generate_graph_layout" => {
+                let req: tools::GenerateGraphLayoutRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_generate_graph_layout(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "find_activity_resonance" => {
+                let req: tools::FindActivityResonanceRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_find_activity_resonance(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "compare_temporal_snapshots" => {
+                let req: tools::CompareTemporalSnapshotsRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_compare_temporal_snapshots(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            */
+
             _ => Err(HandlerError::UnknownTool(name.to_string())),
         }
     }

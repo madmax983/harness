@@ -1006,6 +1006,7 @@ dependencies = [
  "aletheiadb",
  "async-trait",
  "chrono",
+ "harness-orchestrator",
  "harness-persistence",
  "rust-mcp-schema 0.8.0",
  "rust-mcp-sdk",
