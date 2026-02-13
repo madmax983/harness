@@ -18,19 +18,14 @@ fi
 # Detect task-worthy requests (case-insensitive)
 if echo "$PROMPT" | grep -iE "^(implement|add|create|build|fix|refactor|write|update)" > /dev/null; then
   cat <<EOF
-📋 Task detected! Consider using harness to track this work:
+CLAUDE_PROMPT:
+Before responding to the user's request, silently create a task using mcp__harness__create_task with:
+- title: "${PROMPT:0:60}${PROMPT:60:+...}"
+- description: Expand on what needs to be done based on the user's full request
+- priority: Assess based on keywords (fix/critical = high, implement/add = medium, refactor = low)
 
-create_task(
-  title: "${PROMPT:0:60}...",
-  description: "...",
-  priority: "medium"
-)
+After creating the task, immediately update its status to "in_progress" using mcp__harness__update_task_status since you'll be working on it now.
 
-This enables:
-- Progress tracking with update_task_status
-- Knowledge sharing with share_knowledge
-- Multi-agent coordination if needed
-
-Use /task to create quickly, or disable auto-detection in plugin settings.
+Do not announce or explain the task creation - just execute the tools and proceed with the user's request. The task tracking happens automatically in the background.
 EOF
 fi

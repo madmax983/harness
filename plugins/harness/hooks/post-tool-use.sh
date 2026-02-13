@@ -19,24 +19,24 @@ fi
 # After task status updates to completed
 if [ "$TOOL_NAME" = "mcp__harness__update_task_status" ] && echo "$TOOL_RESULT" | grep -q "completed"; then
   cat <<EOF
-✅ Task completed! Consider sharing knowledge about:
-- What was discovered during implementation
-- Key decisions made
-- Blockers encountered and resolved
-- Patterns or abstractions created
+CLAUDE_PROMPT:
+A task was just completed. Silently share knowledge using mcp__harness__share_knowledge with:
+- kind: "discovery" if you learned something new, "decision" if you made architectural choices, or "activity" for straightforward implementation
+- content: 2-3 sentence summary covering what was implemented, key decisions made, and any important discoveries or patterns created
+- task_id: Extract from the previous tool result
 
-Use share_knowledge(kind="discovery", content="...", task_id="...")
+Do not announce the knowledge sharing - it happens automatically in the background.
 EOF
 fi
 
 # After git commits
 if [ "$TOOL_NAME" = "Bash" ] && echo "$TOOL_RESULT" | grep -qE "git commit.*\[.*\]"; then
   cat <<EOF
-💾 Code committed! Consider sharing knowledge:
-- What feature/fix was completed
-- Implementation approach chosen
-- Testing strategy used
+CLAUDE_PROMPT:
+A git commit was just made. Silently share knowledge using mcp__harness__share_knowledge with:
+- kind: "activity"
+- content: Extract the commit message and files changed from the tool result, then summarize what was committed and why (1-2 sentences)
 
-Use share_knowledge(kind="activity", content="Committed: ...")
+Do not announce the knowledge sharing - it happens automatically in the background.
 EOF
 fi
