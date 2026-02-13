@@ -3,15 +3,18 @@
 //! # Graph Model
 //!
 //! ```text
-//! (Session)─[:CONTAINS_AGENT]──►(Agent)
-//! (Session)─[:CONTAINS_TASK]───►(Task)
-//! (Agent)──[:CLAIMS]────────────►(Task)
-//! (Agent)──[:SHARED]────────────►(Knowledge)
-//! (Knowledge)─[:ABOUT]─────────►(Task)
-//! (Task)──[:SUBTASK_OF]─────────►(Task)
-//! (Agent)──[:SENT_DM]──────────►(DirectMessage)
-//! (DirectMessage)─[:DM_TO]─────►(Agent)
-//! (DirectMessage)─[:DM_THREAD]─►(Task)
+//! (Session)─[:CONTAINS_AGENT]────►(Agent)
+//! (Session)─[:CONTAINS_TASK]─────►(Task)
+//! (Session)─[:CONTAINS_PRODUCT]──►(Product)
+//! (Session)─[:CONTAINS_PROJECT]──►(Project)
+//! (Session)─[:CONTAINS_PLAN]─────►(Plan)
+//! (Agent)──[:CLAIMS]──────────────►(Task)
+//! (Agent)──[:SHARED]──────────────►(Knowledge)
+//! (Knowledge)─[:ABOUT]───────────►(Task)
+//! (Task)──[:SUBTASK_OF]───────────►(Task)
+//! (Agent)──[:SENT_DM]────────────►(DirectMessage)
+//! (DirectMessage)─[:DM_TO]───────►(Agent)
+//! (DirectMessage)─[:DM_THREAD]───►(Task)
 //! ```
 
 use std::sync::Arc;
@@ -46,6 +49,9 @@ const LABEL_INDEX: &str = "HarnessIndex";
 
 const EDGE_CONTAINS_AGENT: &str = "CONTAINS_AGENT";
 const EDGE_CONTAINS_TASK: &str = "CONTAINS_TASK";
+const EDGE_CONTAINS_PRODUCT: &str = "CONTAINS_PRODUCT";
+const EDGE_CONTAINS_PROJECT: &str = "CONTAINS_PROJECT";
+const EDGE_CONTAINS_PLAN: &str = "CONTAINS_PLAN";
 const EDGE_CLAIMS: &str = "CLAIMS";
 const EDGE_SHARED: &str = "SHARED";
 const EDGE_ABOUT: &str = "ABOUT";
@@ -545,6 +551,63 @@ impl AletheiaRepository {
                 let edge = tx.get_edge(eid)?;
                 let node = tx.get_node(edge.target)?;
                 if let Ok(item) = Self::node_to_task(&node) {
+                    result.push(item);
+                }
+            }
+            Ok(result)
+        })
+    }
+
+    fn collect_targets_product(
+        &self,
+        source: NodeId,
+        edge_label: &str,
+    ) -> RepositoryResult<Vec<Product>> {
+        self.db_read(|tx| {
+            let edge_ids = tx.get_outgoing_edges_with_label(source, edge_label);
+            let mut result = Vec::new();
+            for eid in edge_ids {
+                let edge = tx.get_edge(eid)?;
+                let node = tx.get_node(edge.target)?;
+                if let Ok(item) = Self::node_to_product(&node) {
+                    result.push(item);
+                }
+            }
+            Ok(result)
+        })
+    }
+
+    fn collect_targets_project(
+        &self,
+        source: NodeId,
+        edge_label: &str,
+    ) -> RepositoryResult<Vec<Project>> {
+        self.db_read(|tx| {
+            let edge_ids = tx.get_outgoing_edges_with_label(source, edge_label);
+            let mut result = Vec::new();
+            for eid in edge_ids {
+                let edge = tx.get_edge(eid)?;
+                let node = tx.get_node(edge.target)?;
+                if let Ok(item) = Self::node_to_project(&node) {
+                    result.push(item);
+                }
+            }
+            Ok(result)
+        })
+    }
+
+    fn collect_targets_plan(
+        &self,
+        source: NodeId,
+        edge_label: &str,
+    ) -> RepositoryResult<Vec<Plan>> {
+        self.db_read(|tx| {
+            let edge_ids = tx.get_outgoing_edges_with_label(source, edge_label);
+            let mut result = Vec::new();
+            for eid in edge_ids {
+                let edge = tx.get_edge(eid)?;
+                let node = tx.get_node(edge.target)?;
+                if let Ok(item) = Self::node_to_plan(&node) {
                     result.push(item);
                 }
             }
@@ -1084,6 +1147,7 @@ impl Repository for AletheiaRepository {
         let status_str = format!("{:?}", product.status).to_lowercase();
         let session_id_str = product.session_id.as_uuid().to_string();
         let created_at = Self::dt_to_ts(product.created_at);
+        let session_node = self.index_get(&Self::session_key(product.session_id))?;
 
         let node_id = self.db_write(|tx| {
             let props = PropertyMapBuilder::new()
@@ -1094,7 +1158,14 @@ impl Repository for AletheiaRepository {
                 .insert("session_id", session_id_str.as_str())
                 .insert("created_at", created_at)
                 .build();
-            Ok(tx.create_node(LABEL_PRODUCT, props)?)
+            let pn = tx.create_node(LABEL_PRODUCT, props)?;
+            tx.create_edge(
+                session_node,
+                pn,
+                EDGE_CONTAINS_PRODUCT,
+                PropertyMapBuilder::new().build(),
+            )?;
+            Ok(pn)
         })?;
 
         self.index_set(&format!("Product:{}", product.id.as_uuid()), node_id)
@@ -1108,11 +1179,15 @@ impl Repository for AletheiaRepository {
 
     async fn list_products(
         &self,
-        _session_id: SessionId,
-        _status: Option<ProductStatus>,
+        session_id: SessionId,
+        status: Option<ProductStatus>,
     ) -> RepositoryResult<Vec<Product>> {
-        // Stub: return empty for now (would scan with status filter)
-        Ok(Vec::new())
+        let sn = self.index_get(&Self::session_key(session_id))?;
+        let all = self.collect_targets_product(sn, EDGE_CONTAINS_PRODUCT)?;
+        Ok(match status {
+            Some(s) => all.into_iter().filter(|p| p.status == s).collect(),
+            None => all,
+        })
     }
 
     // === Project operations ===
@@ -1123,6 +1198,7 @@ impl Repository for AletheiaRepository {
         let product_id_str = project.product_id.as_uuid().to_string();
         let session_id_str = project.session_id.as_uuid().to_string();
         let created_at = Self::dt_to_ts(project.created_at);
+        let session_node = self.index_get(&Self::session_key(project.session_id))?;
 
         let node_id = self.db_write(|tx| {
             let props = PropertyMapBuilder::new()
@@ -1134,7 +1210,14 @@ impl Repository for AletheiaRepository {
                 .insert("session_id", session_id_str.as_str())
                 .insert("created_at", created_at)
                 .build();
-            Ok(tx.create_node(LABEL_PROJECT, props)?)
+            let pn = tx.create_node(LABEL_PROJECT, props)?;
+            tx.create_edge(
+                session_node,
+                pn,
+                EDGE_CONTAINS_PROJECT,
+                PropertyMapBuilder::new().build(),
+            )?;
+            Ok(pn)
         })?;
 
         self.index_set(&format!("Project:{}", project.id.as_uuid()), node_id)
@@ -1148,12 +1231,21 @@ impl Repository for AletheiaRepository {
 
     async fn list_projects(
         &self,
-        _session_id: SessionId,
-        _product_id: Option<ProductId>,
-        _status: Option<ProjectStatus>,
+        session_id: SessionId,
+        product_id: Option<ProductId>,
+        status: Option<ProjectStatus>,
     ) -> RepositoryResult<Vec<Project>> {
-        // Stub: return empty for now (would scan with product_id and status filter)
-        Ok(Vec::new())
+        let sn = self.index_get(&Self::session_key(session_id))?;
+        let mut all = self.collect_targets_project(sn, EDGE_CONTAINS_PROJECT)?;
+
+        if let Some(pid) = product_id {
+            all = all.into_iter().filter(|p| p.product_id == pid).collect();
+        }
+        if let Some(s) = status {
+            all = all.into_iter().filter(|p| p.status == s).collect();
+        }
+
+        Ok(all)
     }
 
     // === Plan operations ===
@@ -1164,6 +1256,7 @@ impl Repository for AletheiaRepository {
         let project_id_str = plan.project_id.as_uuid().to_string();
         let session_id_str = plan.session_id.as_uuid().to_string();
         let created_at = Self::dt_to_ts(plan.created_at);
+        let session_node = self.index_get(&Self::session_key(plan.session_id))?;
 
         let node_id = self.db_write(|tx| {
             let props = PropertyMapBuilder::new()
@@ -1175,7 +1268,14 @@ impl Repository for AletheiaRepository {
                 .insert("session_id", session_id_str.as_str())
                 .insert("created_at", created_at)
                 .build();
-            Ok(tx.create_node(LABEL_PLAN, props)?)
+            let pn = tx.create_node(LABEL_PLAN, props)?;
+            tx.create_edge(
+                session_node,
+                pn,
+                EDGE_CONTAINS_PLAN,
+                PropertyMapBuilder::new().build(),
+            )?;
+            Ok(pn)
         })?;
 
         self.index_set(&format!("Plan:{}", plan.id.as_uuid()), node_id)
@@ -1189,12 +1289,21 @@ impl Repository for AletheiaRepository {
 
     async fn list_plans(
         &self,
-        _session_id: SessionId,
-        _project_id: Option<ProjectId>,
-        _status: Option<PlanStatus>,
+        session_id: SessionId,
+        project_id: Option<ProjectId>,
+        status: Option<PlanStatus>,
     ) -> RepositoryResult<Vec<Plan>> {
-        // Stub: return empty for now (would scan with project_id and status filter)
-        Ok(Vec::new())
+        let sn = self.index_get(&Self::session_key(session_id))?;
+        let mut all = self.collect_targets_plan(sn, EDGE_CONTAINS_PLAN)?;
+
+        if let Some(pid) = project_id {
+            all = all.into_iter().filter(|p| p.project_id == pid).collect();
+        }
+        if let Some(s) = status {
+            all = all.into_iter().filter(|p| p.status == s).collect();
+        }
+
+        Ok(all)
     }
 }
 
