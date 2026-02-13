@@ -253,6 +253,15 @@ mod tests {
         repo.create_agent(&agent1).await.unwrap();
         repo.create_agent(&agent2).await.unwrap();
 
+        // Set agents to Pending to test spawn cap enforcement
+        // (agents auto-activate on creation, so we need to reset them)
+        repo.update_agent_status(agent1.id, AgentStatus::Pending)
+            .await
+            .unwrap();
+        repo.update_agent_status(agent2.id, AgentStatus::Pending)
+            .await
+            .unwrap();
+
         // First spawn should succeed
         manager.spawn(agent1.id, "test prompt").await.unwrap();
 

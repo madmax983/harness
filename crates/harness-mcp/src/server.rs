@@ -49,7 +49,7 @@ impl<R: Repository + 'static> HiveMcpServer<R> {
                 tasks: None,
             },
             instructions: Some(
-                "Harness Hive Mind MCP server. Provides 21 tools for multi-agent \
+                "Harness Hive Mind MCP server. Provides 34 tools for multi-agent \
                  coordination: task management, knowledge sharing, agent registration, \
                  direct messaging, and planning (products, projects, plans)."
                     .into(),
@@ -102,10 +102,9 @@ impl<R: Repository + 'static> ServerHandler for HiveMcpServer<R> {
             .repository()
             .get_session(self.state.session_id())
             .await
+            && let Some(agent_id) = session.agent_id
         {
-            if let Some(agent_id) = session.agent_id {
-                handler.restore_agent_id(agent_id).await;
-            }
+            handler.restore_agent_id(agent_id).await;
         }
 
         let arguments = match params.arguments {
@@ -168,12 +167,12 @@ pub async fn start_mcp_server<R: Repository + 'static>(
     let shutdown_signal = async {
         #[cfg(unix)]
         {
-            let mut sigterm = tokio::signal::unix::signal(
-                tokio::signal::unix::SignalKind::terminate()
-            ).expect("failed to install SIGTERM handler");
-            let mut sigint = tokio::signal::unix::signal(
-                tokio::signal::unix::SignalKind::interrupt()
-            ).expect("failed to install SIGINT handler");
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("failed to install SIGTERM handler");
+            let mut sigint =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                    .expect("failed to install SIGINT handler");
 
             tokio::select! {
                 _ = sigterm.recv() => tracing::info!("Received SIGTERM"),
@@ -272,7 +271,7 @@ fn with_agent_id(
     props
 }
 
-/// Returns the full list of 14 tool definitions with JSON Schema input schemas.
+/// Returns the full list of 34 tool definitions with JSON Schema input schemas.
 pub fn tool_definitions() -> Vec<Tool> {
     vec![
         // --- Task tools ---
@@ -316,7 +315,10 @@ pub fn tool_definitions() -> Vec<Tool> {
             "claim_task",
             "Claim an unassigned task for the current agent.",
             vec!["task_id"],
-            with_agent_id(HashMap::from([("task_id".into(), prop("string", "ID of the task to claim"))])),
+            with_agent_id(HashMap::from([(
+                "task_id".into(),
+                prop("string", "ID of the task to claim"),
+            )])),
         ),
         make_tool(
             "update_task_status",
@@ -357,6 +359,166 @@ pub fn tool_definitions() -> Vec<Tool> {
                 "task_id".into(),
                 prop("string", "ID of the task to get context for"),
             )])),
+        ),
+        make_tool(
+            "task_statistics",
+            "Get task statistics for analytics dashboard including status counts, priority distribution, and completion metrics.",
+            vec![],
+            with_agent_id(HashMap::new()),
+        ),
+        make_tool(
+            "cold_storage_query",
+            "Query cold storage statistics and historical data availability from AletheiaDB's disk-based storage tier.",
+            vec![],
+            with_agent_id(HashMap::new()),
+        ),
+        make_tool(
+            "export_project_graph",
+            "Export the project graph for visualization in Graphviz DOT or JSON format, including tasks, agents, and knowledge connections.",
+            vec![],
+            with_agent_id(HashMap::from([
+                (
+                    "format".into(),
+                    prop_with_default(
+                        "string",
+                        "Export format: 'dot' (Graphviz) or 'json'",
+                        serde_json::Value::String("dot".into()),
+                    ),
+                ),
+                (
+                    "include_tasks".into(),
+                    prop_with_default(
+                        "boolean",
+                        "Include task dependencies in the graph",
+                        serde_json::Value::Bool(true),
+                    ),
+                ),
+                (
+                    "include_agents".into(),
+                    prop_with_default(
+                        "boolean",
+                        "Include agent relationships in the graph",
+                        serde_json::Value::Bool(true),
+                    ),
+                ),
+                (
+                    "include_knowledge".into(),
+                    prop_with_default(
+                        "boolean",
+                        "Include knowledge graph connections",
+                        serde_json::Value::Bool(false),
+                    ),
+                ),
+            ])),
+        ),
+        make_tool(
+            "add_task_dependency",
+            "Add a blocking dependency between tasks: task_id blocks blocked_task_id from starting.",
+            vec!["task_id", "blocked_task_id"],
+            with_agent_id(HashMap::from([
+                ("task_id".into(), prop("string", "ID of the blocking task")),
+                (
+                    "blocked_task_id".into(),
+                    prop("string", "ID of the task being blocked"),
+                ),
+            ])),
+        ),
+        make_tool(
+            "remove_task_dependency",
+            "Remove a blocking dependency between tasks.",
+            vec!["task_id", "blocked_task_id"],
+            with_agent_id(HashMap::from([
+                ("task_id".into(), prop("string", "ID of the blocking task")),
+                (
+                    "blocked_task_id".into(),
+                    prop("string", "ID of the task being blocked"),
+                ),
+            ])),
+        ),
+        make_tool(
+            "find_path",
+            "Find a path between two tasks in the dependency graph using breadth-first search.",
+            vec!["from_task_id", "to_task_id"],
+            with_agent_id(HashMap::from([
+                ("from_task_id".into(), prop("string", "Starting task ID")),
+                ("to_task_id".into(), prop("string", "Target task ID")),
+                (
+                    "max_depth".into(),
+                    prop_with_default(
+                        "number",
+                        "Maximum search depth to prevent infinite loops",
+                        serde_json::Value::Number(10.into()),
+                    ),
+                ),
+            ])),
+        ),
+        make_tool(
+            "get_task_history",
+            "Get the complete version history of a task showing all changes over time.",
+            vec!["task_id"],
+            with_agent_id(HashMap::from([(
+                "task_id".into(),
+                prop("string", "ID of the task to get history for"),
+            )])),
+        ),
+        make_tool(
+            "semantic_search_tasks",
+            "Search tasks using semantic vector similarity based on title and description.",
+            vec!["query"],
+            with_agent_id(HashMap::from([
+                (
+                    "query".into(),
+                    prop("string", "Search query for finding similar tasks"),
+                ),
+                (
+                    "limit".into(),
+                    prop_with_default(
+                        "integer",
+                        "Maximum number of results to return",
+                        serde_json::Value::Number(10.into()),
+                    ),
+                ),
+            ])),
+        ),
+        make_tool(
+            "get_task_tree",
+            "Get hierarchical task tree structure showing parent-child relationships.",
+            vec![],
+            with_agent_id(HashMap::from([
+                (
+                    "root_task_id".into(),
+                    prop(
+                        "string",
+                        "Optional root task ID. If provided, returns tree rooted at this task. If not provided, returns all top-level tasks.",
+                    ),
+                ),
+                (
+                    "max_depth".into(),
+                    prop("integer", "Maximum depth to traverse (default: unlimited)"),
+                ),
+            ])),
+        ),
+        make_tool(
+            "get_task_as_of",
+            "Retrieve task state at a specific point in bi-temporal time (time-travel query).",
+            vec!["task_id", "valid_time"],
+            with_agent_id(HashMap::from([
+                ("task_id".into(), prop("string", "ID of the task to query")),
+                (
+                    "valid_time".into(),
+                    prop(
+                        "string",
+                        "Valid time (when the fact was true) in RFC3339 format",
+                    ),
+                ),
+                (
+                    "transaction_time".into(),
+                    prop(
+                        "string",
+                        "Transaction time (when recorded) in RFC3339 format, defaults to current time",
+                    ),
+                ),
+            ])),
         ),
         // --- Knowledge tools ---
         make_tool(
@@ -419,6 +581,29 @@ pub fn tool_definitions() -> Vec<Tool> {
                 ),
             ])),
         ),
+        make_tool(
+            "knowledge_clusters",
+            "Auto-cluster related knowledge entries using vector similarity to discover natural groupings.",
+            vec![],
+            with_agent_id(HashMap::from([
+                (
+                    "similarity_threshold".into(),
+                    prop_with_default(
+                        "number",
+                        "Minimum similarity (0.0-1.0) for clustering",
+                        serde_json::Value::Number(serde_json::Number::from_f64(0.7).unwrap()),
+                    ),
+                ),
+                (
+                    "min_cluster_size".into(),
+                    prop_with_default(
+                        "integer",
+                        "Minimum number of members to form a cluster",
+                        serde_json::Value::Number(2.into()),
+                    ),
+                ),
+            ])),
+        ),
         // --- Agent tools ---
         make_tool(
             "register_agent",
@@ -434,7 +619,10 @@ pub fn tool_definitions() -> Vec<Tool> {
                 ),
                 (
                     "project_name".into(),
-                    prop("string", "Optional project name (e.g., 'harness', 'arthropod')"),
+                    prop(
+                        "string",
+                        "Optional project name (e.g., 'harness', 'arthropod')",
+                    ),
                 ),
                 (
                     "project_path".into(),
@@ -442,7 +630,10 @@ pub fn tool_definitions() -> Vec<Tool> {
                 ),
                 (
                     "agent_id".into(),
-                    prop("string", "For spawned agents: pre-created agent ID to activate"),
+                    prop(
+                        "string",
+                        "For spawned agents: pre-created agent ID to activate",
+                    ),
                 ),
             ])),
         ),
@@ -467,7 +658,10 @@ pub fn tool_definitions() -> Vec<Tool> {
                     "role".into(),
                     prop("string", "Role for spawned agent (developer)"),
                 ),
-                ("name".into(), prop("string", "Name for the spawned teammate")),
+                (
+                    "name".into(),
+                    prop("string", "Name for the spawned teammate"),
+                ),
                 (
                     "initial_task_id".into(),
                     prop("string", "Optional task to assign immediately"),
@@ -480,7 +674,10 @@ pub fn tool_definitions() -> Vec<Tool> {
             vec![],
             with_agent_id(HashMap::from([(
                 "agent_id".into(),
-                prop("string", "Optional agent ID to disconnect (defaults to self)"),
+                prop(
+                    "string",
+                    "Optional agent ID to disconnect (defaults to self)",
+                ),
             )])),
         ),
         // --- Message tools ---
@@ -551,7 +748,10 @@ pub fn tool_definitions() -> Vec<Tool> {
             vec![],
             with_agent_id(HashMap::from([(
                 "status".into(),
-                prop("string", "Filter by status: concept, active, maintenance, archived"),
+                prop(
+                    "string",
+                    "Filter by status: concept, active, maintenance, archived",
+                ),
             )])),
         ),
         make_tool(
@@ -559,7 +759,10 @@ pub fn tool_definitions() -> Vec<Tool> {
             "Create a new project within a product.",
             vec!["product_id", "name", "description"],
             with_agent_id(HashMap::from([
-                ("product_id".into(), prop("string", "ID of the parent product")),
+                (
+                    "product_id".into(),
+                    prop("string", "ID of the parent product"),
+                ),
                 ("name".into(), prop("string", "Name of the project")),
                 (
                     "description".into(),
@@ -590,7 +793,10 @@ pub fn tool_definitions() -> Vec<Tool> {
             "Create a new plan within a project.",
             vec!["project_id", "name", "strategy"],
             with_agent_id(HashMap::from([
-                ("project_id".into(), prop("string", "ID of the parent project")),
+                (
+                    "project_id".into(),
+                    prop("string", "ID of the parent project"),
+                ),
                 ("name".into(), prop("string", "Name of the plan")),
                 (
                     "strategy".into(),
@@ -627,7 +833,7 @@ mod tests {
     #[test]
     fn test_tool_definitions_returns_21_tools() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 21);
+        assert_eq!(tools.len(), 34);
     }
 
     #[test]
@@ -723,7 +929,9 @@ mod tests {
         let list_agents = tools.iter().find(|t| t.name == "list_agents").unwrap();
         assert!(list_agents.input_schema.required.is_empty());
         let props = list_agents.input_schema.properties.as_ref().unwrap();
-        assert!(props.is_empty());
+        // list_agents only has optional _agent_id parameter
+        assert_eq!(props.len(), 1);
+        assert!(props.contains_key("_agent_id"));
     }
 
     #[test]

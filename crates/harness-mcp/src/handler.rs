@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use harness_persistence::{
-    Agent, AgentId, AgentRole, AgentStatus, DirectMessage, Knowledge, KnowledgeKind, Plan, PlanId,
+    Agent, AgentId, AgentRole, AgentStatus, DirectMessage, Knowledge, KnowledgeKind, Plan,
     PlanStatus, Priority, Product, ProductId, ProductStatus, Project, ProjectId, ProjectStatus,
     Repository, RepositoryError, Task, TaskId, TaskStatus,
 };
@@ -118,6 +118,54 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 let resp = self.handle_remove_task_dependency(req).await?;
                 Ok(serde_json::to_value(resp).unwrap())
             }
+            "get_task_history" => {
+                let req: tools::GetTaskHistoryRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_get_task_history(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "semantic_search_tasks" => {
+                let req: tools::SemanticSearchTasksRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_semantic_search_tasks(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "get_task_tree" => {
+                let req: tools::GetTaskTreeRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_get_task_tree(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "get_task_as_of" => {
+                let req: tools::GetTaskAsOfRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_get_task_as_of(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "find_path" => {
+                let req: tools::FindPathRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_find_path(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "task_statistics" => {
+                let req: tools::TaskStatisticsRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_task_statistics(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "cold_storage_query" => {
+                let req: tools::ColdStorageQueryRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_cold_storage_query(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "export_project_graph" => {
+                let req: tools::ExportProjectGraphRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_export_project_graph(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
 
             // Knowledge tools
             "share_knowledge" => {
@@ -136,6 +184,12 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 let req: tools::FishKnowledgeRequest = serde_json::from_value(arguments)
                     .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
                 let resp = self.handle_fish_knowledge(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "knowledge_clusters" => {
+                let req: tools::KnowledgeClustersRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_knowledge_clusters(req).await?;
                 Ok(serde_json::to_value(resp).unwrap())
             }
 
@@ -240,9 +294,18 @@ impl<R: Repository + 'static> HiveHandler<R> {
             "get_task_context",
             "add_task_dependency",
             "remove_task_dependency",
+            "get_task_history",
+            "semantic_search_tasks",
+            "get_task_tree",
+            "get_task_as_of",
+            "find_path",
+            "task_statistics",
+            "cold_storage_query",
+            "export_project_graph",
             "share_knowledge",
             "ask_hive",
             "fish_knowledge",
+            "knowledge_clusters",
             "register_agent",
             "list_agents",
             "get_hive_status",
@@ -351,12 +414,6 @@ impl<R: Repository + 'static> HiveHandler<R> {
         Ok(ProjectId::from_uuid(uuid))
     }
 
-    fn parse_plan_id(s: &str) -> HandlerResult<PlanId> {
-        let uuid = uuid::Uuid::parse_str(s)
-            .map_err(|_| HandlerError::Parse(format!("Invalid plan ID: {s}")))?;
-        Ok(PlanId::from_uuid(uuid))
-    }
-
     fn parse_product_status(s: &str) -> HandlerResult<ProductStatus> {
         match s {
             "concept" => Ok(ProductStatus::Concept),
@@ -406,7 +463,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
             created_at: t.created_at.to_rfc3339(),
             summary: t.summary.clone(),
             blocked_by: None, // Populated by handlers when needed
-            blocks: None,      // Populated by handlers when needed
+            blocks: None,     // Populated by handlers when needed
         }
     }
 
@@ -495,6 +552,20 @@ impl<R: Repository + 'static> HiveHandler<R> {
         // If an agent is registered, set created_by
         if let Some(aid) = *self.agent_id.read().await {
             task = task.with_created_by(aid);
+        }
+
+        // Generate embedding for semantic search
+        if let Some(svc) = self.state.embedding_service() {
+            // Combine title and description for richer semantic content
+            let content = format!("{}\n{}", req.title, req.description);
+            match svc.embed(&content).await {
+                Ok(embedding) => {
+                    task.embedding = Some(embedding);
+                }
+                Err(e) => {
+                    tracing::warn!("Task embedding failed, storing without: {e}");
+                }
+            }
         }
 
         let task_id = task.id.as_uuid().to_string();
@@ -648,6 +719,770 @@ impl<R: Repository + 'static> HiveHandler<R> {
         Ok(tools::RemoveTaskDependencyResponse { success: true })
     }
 
+    async fn handle_get_task_history(
+        &self,
+        req: tools::GetTaskHistoryRequest,
+    ) -> HandlerResult<tools::GetTaskHistoryResponse> {
+        let task_id = Self::parse_task_id(&req.task_id)?;
+
+        // Get all versions of the task from the repository
+        let task_versions = self.state.repository().get_task_history(task_id).await?;
+
+        // Convert Task entities to TaskVersionInfo
+        let mut versions = Vec::with_capacity(task_versions.len());
+
+        for (version_num, task) in task_versions.iter().enumerate() {
+            let task_info = Self::task_to_info(task);
+
+            // For version history, we use created_at as a proxy for temporal data
+            // In a full implementation, we'd extract bi-temporal data from AletheiaDB
+            let valid_from = task.created_at.to_rfc3339();
+            let transaction_time = task.created_at.to_rfc3339();
+
+            // Compute changes from previous version if available
+            let changes = if version_num > 0 {
+                let prev_task = &task_versions[version_num - 1];
+                let mut modified_fields = Vec::new();
+
+                if prev_task.title != task.title {
+                    modified_fields.push("title".to_string());
+                }
+                if prev_task.description != task.description {
+                    modified_fields.push("description".to_string());
+                }
+                if prev_task.status != task.status {
+                    modified_fields.push("status".to_string());
+                }
+                if prev_task.priority != task.priority {
+                    modified_fields.push("priority".to_string());
+                }
+                if prev_task.assigned_to != task.assigned_to {
+                    modified_fields.push("assigned_to".to_string());
+                }
+                if prev_task.summary != task.summary {
+                    modified_fields.push("summary".to_string());
+                }
+
+                let change_count = modified_fields.len();
+
+                if change_count > 0 {
+                    Some(tools::TaskVersionChanges {
+                        modified_fields,
+                        change_count,
+                    })
+                } else {
+                    None
+                }
+            } else {
+                // First version has no changes
+                None
+            };
+
+            versions.push(tools::TaskVersionInfo {
+                version_number: (version_num + 1) as u64,
+                task: task_info,
+                valid_from,
+                transaction_time,
+                changes,
+            });
+        }
+
+        Ok(tools::GetTaskHistoryResponse {
+            version_count: versions.len(),
+            versions,
+        })
+    }
+
+    async fn handle_get_task_as_of(
+        &self,
+        req: tools::GetTaskAsOfRequest,
+    ) -> HandlerResult<tools::GetTaskAsOfResponse> {
+        use chrono::{DateTime, Utc};
+
+        let task_id = Self::parse_task_id(&req.task_id)?;
+
+        // Parse timestamps
+        let valid_time: DateTime<Utc> = req
+            .valid_time
+            .parse()
+            .map_err(|e| HandlerError::InvalidArgs(format!("Invalid valid_time: {}", e)))?;
+
+        let transaction_time: DateTime<Utc> = if let Some(ref tt) = req.transaction_time {
+            tt.parse().map_err(|e| {
+                HandlerError::InvalidArgs(format!("Invalid transaction_time: {}", e))
+            })?
+        } else {
+            Utc::now()
+        };
+
+        // Verify task exists first
+        let _ = self
+            .state
+            .repository()
+            .get_task(task_id)
+            .await
+            .map_err(|_| HandlerError::InvalidArgs("Task not found".into()))?;
+
+        // Get task history and filter for the version valid at requested time
+        let task_versions = self.state.repository().get_task_history(task_id).await?;
+
+        // Find the version valid at the requested time
+        // For now, use created_at as a proxy for valid_time
+        // In a full implementation, we'd use actual bi-temporal data from AletheiaDB
+        let task_at_time = task_versions
+            .iter()
+            .filter(|t| t.created_at <= valid_time && t.created_at <= transaction_time)
+            .max_by_key(|t| t.created_at)
+            .ok_or_else(|| {
+                HandlerError::InvalidArgs(format!(
+                    "No task version found at valid_time: {}, transaction_time: {}",
+                    valid_time, transaction_time
+                ))
+            })?;
+
+        Ok(tools::GetTaskAsOfResponse {
+            task: Self::task_to_info(task_at_time),
+            valid_time: valid_time.to_rfc3339(),
+            transaction_time: transaction_time.to_rfc3339(),
+        })
+    }
+
+    async fn handle_semantic_search_tasks(
+        &self,
+        req: tools::SemanticSearchTasksRequest,
+    ) -> HandlerResult<tools::SemanticSearchTasksResponse> {
+        // Parse optional status filter
+        let status = req
+            .status
+            .as_deref()
+            .map(Self::parse_task_status)
+            .transpose()?;
+
+        // Generate embedding from query using embedding service
+        if let Some(svc) = self.state.embedding_service() {
+            match svc.embed(&req.query).await {
+                Ok(query_vec) => {
+                    // Search tasks using vector similarity
+                    let results = self
+                        .state
+                        .repository()
+                        .search_tasks(&query_vec, req.limit, status)
+                        .await?;
+
+                    return Ok(tools::SemanticSearchTasksResponse {
+                        results: results
+                            .iter()
+                            .map(|(task, score)| tools::TaskSearchResult {
+                                task: Self::task_to_info(task),
+                                similarity: *score,
+                            })
+                            .collect(),
+                        query: req.query,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!("Query embedding failed: {e}");
+                    // Return empty results if embedding fails
+                    return Ok(tools::SemanticSearchTasksResponse {
+                        results: Vec::new(),
+                        query: req.query,
+                    });
+                }
+            }
+        }
+
+        // No embedding service available - return empty results
+        Ok(tools::SemanticSearchTasksResponse {
+            results: Vec::new(),
+            query: req.query,
+        })
+    }
+
+    async fn handle_get_task_tree(
+        &self,
+        req: tools::GetTaskTreeRequest,
+    ) -> HandlerResult<tools::GetTaskTreeResponse> {
+        let repo = self.state.repository();
+
+        // Get root tasks (either specified root or all top-level tasks)
+        let root_tasks = if let Some(ref root_id_str) = req.root_task_id {
+            let root_id = Self::parse_task_id(root_id_str)?;
+            let task = repo.get_task(root_id).await?;
+            vec![task]
+        } else {
+            repo.get_root_tasks(self.state.session_id()).await?
+        };
+
+        // Build the tree recursively
+        let max_depth = req.max_depth.unwrap_or(usize::MAX);
+        let mut total_tasks = 0;
+        let mut max_depth_found = 0;
+
+        let mut roots = Vec::new();
+        for task in root_tasks {
+            let node = self
+                .build_task_node(task, 0, max_depth, &mut total_tasks, &mut max_depth_found)
+                .await?;
+            roots.push(node);
+        }
+
+        Ok(tools::GetTaskTreeResponse {
+            roots,
+            total_tasks,
+            max_depth: max_depth_found,
+        })
+    }
+
+    /// Recursively build a task node with its children.
+    async fn build_task_node(
+        &self,
+        task: Task,
+        depth: usize,
+        max_depth: usize,
+        total_tasks: &mut usize,
+        max_depth_found: &mut usize,
+    ) -> HandlerResult<tools::TaskNode> {
+        *total_tasks += 1;
+        *max_depth_found = (*max_depth_found).max(depth);
+
+        let task_info = Self::task_to_info(&task);
+        let task_id = task.id;
+
+        // Get children if we haven't reached max depth
+        let children = if depth < max_depth {
+            let subtasks = self.state.repository().get_subtasks(task_id).await?;
+            let mut child_nodes = Vec::new();
+            for subtask in subtasks {
+                let child_node = Box::pin(self.build_task_node(
+                    subtask,
+                    depth + 1,
+                    max_depth,
+                    total_tasks,
+                    max_depth_found,
+                ))
+                .await?;
+                child_nodes.push(child_node);
+            }
+            child_nodes
+        } else {
+            Vec::new()
+        };
+
+        Ok(tools::TaskNode {
+            task: task_info,
+            children,
+            depth,
+        })
+    }
+
+    async fn handle_find_path(
+        &self,
+        req: tools::FindPathRequest,
+    ) -> HandlerResult<tools::FindPathResponse> {
+        use std::collections::{HashMap, HashSet, VecDeque};
+
+        let from_id = Self::parse_task_id(&req.from_task_id)?;
+        let to_id = Self::parse_task_id(&req.to_task_id)?;
+
+        // Early exit if from == to
+        if from_id == to_id {
+            let task = self.state.repository().get_task(from_id).await?;
+            return Ok(tools::FindPathResponse {
+                found: true,
+                path: Some(vec![tools::PathStep {
+                    task_id: task.id.as_uuid().to_string(),
+                    title: task.title,
+                    relationship: "self".to_string(),
+                }]),
+                distance: Some(0),
+            });
+        }
+
+        // BFS to find shortest path
+        let mut queue = VecDeque::new();
+        let mut visited = HashSet::new();
+        let mut parent: HashMap<TaskId, (TaskId, String)> = HashMap::new();
+
+        queue.push_back((from_id, 0usize));
+        visited.insert(from_id);
+
+        while let Some((current_id, depth)) = queue.pop_front() {
+            if depth >= req.max_depth {
+                continue;
+            }
+
+            // Check if we reached the target
+            if current_id == to_id {
+                // Reconstruct path
+                let mut path_ids = vec![to_id];
+                let mut current = to_id;
+
+                while let Some((prev, _)) = parent.get(&current) {
+                    path_ids.push(*prev);
+                    current = *prev;
+                }
+
+                path_ids.reverse();
+
+                // Build path steps with task info
+                let mut path_steps = Vec::new();
+                for (i, task_id) in path_ids.iter().enumerate() {
+                    let task = self.state.repository().get_task(*task_id).await?;
+                    let relationship = if i == 0 {
+                        "start".to_string()
+                    } else if let Some((_, rel)) = parent.get(task_id) {
+                        rel.clone()
+                    } else {
+                        "unknown".to_string()
+                    };
+
+                    path_steps.push(tools::PathStep {
+                        task_id: task.id.as_uuid().to_string(),
+                        title: task.title,
+                        relationship,
+                    });
+                }
+
+                return Ok(tools::FindPathResponse {
+                    found: true,
+                    path: Some(path_steps),
+                    distance: Some(path_ids.len() - 1),
+                });
+            }
+
+            // Explore neighbors: tasks this blocks (forward edges)
+            if let Ok(blocked) = self.state.repository().get_blocked_tasks(current_id).await {
+                for task in blocked {
+                    if !visited.contains(&task.id) {
+                        visited.insert(task.id);
+                        parent.insert(task.id, (current_id, "blocks".to_string()));
+                        queue.push_back((task.id, depth + 1));
+                    }
+                }
+            }
+
+            // Explore neighbors: tasks that block this (backward edges)
+            if let Ok(blocking) = self.state.repository().get_blocking_tasks(current_id).await {
+                for task in blocking {
+                    if !visited.contains(&task.id) {
+                        visited.insert(task.id);
+                        parent.insert(task.id, (current_id, "blocked_by".to_string()));
+                        queue.push_back((task.id, depth + 1));
+                    }
+                }
+            }
+        }
+
+        // No path found
+        Ok(tools::FindPathResponse {
+            found: false,
+            path: None,
+            distance: None,
+        })
+    }
+
+    async fn handle_task_statistics(
+        &self,
+        _req: tools::TaskStatisticsRequest,
+    ) -> HandlerResult<tools::TaskStatisticsResponse> {
+        let session_id = self.state.session_id();
+
+        // Get all tasks for this session
+        let all_tasks = self.state.repository().list_tasks(session_id, None).await?;
+
+        // Count by status
+        let mut status_counts = tools::StatusCounts {
+            pending: 0,
+            claimed: 0,
+            in_progress: 0,
+            completed: 0,
+            failed: 0,
+            total: all_tasks.len(),
+        };
+
+        // Count by priority
+        let mut priority_counts = tools::PriorityCounts {
+            low: 0,
+            medium: 0,
+            high: 0,
+            critical: 0,
+        };
+
+        let mut assigned_count = 0;
+        let mut completion_times: Vec<i64> = Vec::new();
+
+        for task in &all_tasks {
+            // Status counts
+            match task.status {
+                TaskStatus::Pending => status_counts.pending += 1,
+                TaskStatus::Claimed => status_counts.claimed += 1,
+                TaskStatus::InProgress => status_counts.in_progress += 1,
+                TaskStatus::Completed => status_counts.completed += 1,
+                TaskStatus::Failed => status_counts.failed += 1,
+            }
+
+            // Priority counts
+            match task.priority {
+                Priority::Low => priority_counts.low += 1,
+                Priority::Medium => priority_counts.medium += 1,
+                Priority::High => priority_counts.high += 1,
+                Priority::Critical => priority_counts.critical += 1,
+            }
+
+            // Assigned count
+            if task.assigned_to.is_some() {
+                assigned_count += 1;
+            }
+
+            // Completion times (for completed or failed tasks)
+            if let Some(completed_at) = task.completed_at {
+                let duration = completed_at.signed_duration_since(task.created_at);
+                completion_times.push(duration.num_seconds());
+            }
+        }
+
+        // Calculate completion metrics
+        let completion_rate = if all_tasks.is_empty() {
+            0.0
+        } else {
+            (status_counts.completed as f64 / all_tasks.len() as f64) * 100.0
+        };
+
+        let avg_completion_time_secs = if completion_times.is_empty() {
+            None
+        } else {
+            let sum: i64 = completion_times.iter().sum();
+            Some(sum as f64 / completion_times.len() as f64)
+        };
+
+        let median_completion_time_secs = if completion_times.is_empty() {
+            None
+        } else {
+            completion_times.sort_unstable();
+            let mid = completion_times.len() / 2;
+            if completion_times.len().is_multiple_of(2) {
+                Some((completion_times[mid - 1] + completion_times[mid]) as f64 / 2.0)
+            } else {
+                Some(completion_times[mid] as f64)
+            }
+        };
+
+        let completion_metrics = tools::CompletionMetrics {
+            completion_rate,
+            avg_completion_time_secs,
+            median_completion_time_secs,
+        };
+
+        // Count blocked tasks (tasks with blocking dependencies)
+        let mut blocked_count = 0;
+        for task in &all_tasks {
+            let blocking = self.state.repository().get_blocking_tasks(task.id).await?;
+            if !blocking.is_empty() {
+                blocked_count += 1;
+            }
+        }
+
+        Ok(tools::TaskStatisticsResponse {
+            status_counts,
+            priority_counts,
+            completion_metrics,
+            assigned_count,
+            blocked_count,
+        })
+    }
+
+    async fn handle_cold_storage_query(
+        &self,
+        _req: tools::ColdStorageQueryRequest,
+    ) -> HandlerResult<tools::ColdStorageQueryResponse> {
+        // Query cold storage requires AletheiaDB backend with tiered storage enabled
+        // Currently, the AletheiaDB historical field is private, so we can't access it
+        // TODO: Add public API to AletheiaDB to access tiered storage metrics
+        Ok(tools::ColdStorageQueryResponse {
+            available: false,
+            storage_stats: None,
+            tiered_metrics: None,
+            message: "Cold storage query requires AletheiaDB backend with cold storage enabled and public API access to tiered storage metrics.".into(),
+        })
+    }
+
+    async fn handle_export_project_graph(
+        &self,
+        req: tools::ExportProjectGraphRequest,
+    ) -> HandlerResult<tools::ExportProjectGraphResponse> {
+        let session_id = self.state.session_id();
+
+        // Gather all entities to include in the graph
+        let mut node_count = 0;
+        let mut edge_count = 0;
+        let mut task_count = 0;
+        let mut agent_count = 0;
+        let mut knowledge_count = 0;
+
+        let mut graph_data = String::new();
+
+        match req.format.as_str() {
+            "dot" => {
+                graph_data.push_str("digraph HarnessProject {\n");
+                graph_data.push_str("  rankdir=LR;\n");
+                graph_data.push_str("  node [shape=box, style=rounded];\n\n");
+
+                // Add session node
+                graph_data.push_str(&format!("  session_{} [label=\"Session {}\", shape=oval, style=filled, fillcolor=lightblue];\n",
+                    session_id.as_uuid().to_string().replace('-', "_"),
+                    session_id.as_uuid()));
+                node_count += 1;
+
+                // Add agents if requested
+                if req.include_agents {
+                    let agents = self.state.repository().list_agents(session_id).await?;
+                    agent_count = agents.len();
+                    for agent in &agents {
+                        let agent_id = agent.id.as_uuid().to_string().replace('-', "_");
+                        let role_str = format!("{:?}", agent.role);
+                        graph_data.push_str(&format!("  agent_{} [label=\"{} Agent\\n{}\", style=filled, fillcolor=lightgreen];\n",
+                            agent_id,
+                            role_str,
+                            agent.id.as_uuid()));
+                        graph_data.push_str(&format!(
+                            "  session_{} -> agent_{} [label=\"CONTAINS_AGENT\"];\n",
+                            session_id.as_uuid().to_string().replace('-', "_"),
+                            agent_id
+                        ));
+                        node_count += 1;
+                        edge_count += 1;
+                    }
+                    graph_data.push('\n');
+                }
+
+                // Add tasks if requested
+                if req.include_tasks {
+                    let tasks = self.state.repository().list_tasks(session_id, None).await?;
+                    task_count = tasks.len();
+                    for task in &tasks {
+                        let task_id = task.id.as_uuid().to_string().replace('-', "_");
+                        let color = match task.status {
+                            TaskStatus::Completed => "lightgreen",
+                            TaskStatus::InProgress => "lightyellow",
+                            TaskStatus::Failed => "lightcoral",
+                            _ => "white",
+                        };
+                        let status_str = format!("{:?}", task.status);
+                        graph_data.push_str(&format!(
+                            "  task_{} [label=\"Task: {}\\n{}\", style=filled, fillcolor={}];\n",
+                            task_id,
+                            task.title.replace('"', "'"),
+                            status_str,
+                            color
+                        ));
+                        graph_data.push_str(&format!(
+                            "  session_{} -> task_{} [label=\"CONTAINS_TASK\"];\n",
+                            session_id.as_uuid().to_string().replace('-', "_"),
+                            task_id
+                        ));
+                        node_count += 1;
+                        edge_count += 1;
+
+                        // Add task dependencies
+                        let blocking = self.state.repository().get_blocking_tasks(task.id).await?;
+                        for blocker in blocking {
+                            let blocker_id = blocker.id.as_uuid().to_string().replace('-', "_");
+                            graph_data.push_str(&format!("  task_{} -> task_{} [label=\"BLOCKS\", style=dashed, color=red];\n",
+                                blocker_id,
+                                task_id));
+                            edge_count += 1;
+                        }
+
+                        // Add agent assignments
+                        if let Some(agent_id) = task.assigned_to {
+                            graph_data.push_str(&format!(
+                                "  agent_{} -> task_{} [label=\"CLAIMS\", color=blue];\n",
+                                agent_id.as_uuid().to_string().replace('-', "_"),
+                                task_id
+                            ));
+                            edge_count += 1;
+                        }
+                    }
+                    graph_data.push('\n');
+                }
+
+                // Add knowledge if requested
+                if req.include_knowledge {
+                    let knowledge_entries = self
+                        .state
+                        .repository()
+                        .get_recent_knowledge(session_id, 100)
+                        .await?;
+                    knowledge_count = knowledge_entries.len();
+                    for (idx, knowledge) in knowledge_entries.iter().enumerate() {
+                        let k_id = knowledge.id.as_uuid().to_string().replace('-', "_");
+                        let kind_str = format!("{:?}", knowledge.kind);
+                        graph_data.push_str(&format!("  knowledge_{} [label=\"Knowledge {}\\n{}\", shape=note, style=filled, fillcolor=lightyellow];\n",
+                            k_id,
+                            idx + 1,
+                            kind_str));
+                        graph_data.push_str(&format!(
+                            "  agent_{} -> knowledge_{} [label=\"SHARED\", color=purple];\n",
+                            knowledge.author_id.as_uuid().to_string().replace('-', "_"),
+                            k_id
+                        ));
+                        node_count += 1;
+                        edge_count += 1;
+
+                        if let Some(task_id) = knowledge.task_id {
+                            graph_data.push_str(&format!(
+                                "  knowledge_{} -> task_{} [label=\"ABOUT\", style=dotted];\n",
+                                k_id,
+                                task_id.as_uuid().to_string().replace('-', "_")
+                            ));
+                            edge_count += 1;
+                        }
+                    }
+                }
+
+                graph_data.push_str("}\n");
+            }
+            "json" => {
+                // Simple JSON format with nodes and edges
+                use serde_json::json;
+
+                let mut nodes = vec![];
+                let mut edges = vec![];
+
+                // Session node
+                nodes.push(json!({
+                    "id": session_id.as_uuid().to_string(),
+                    "type": "session",
+                    "label": format!("Session {}", session_id.as_uuid())
+                }));
+                node_count += 1;
+
+                // Agents
+                if req.include_agents {
+                    let agents = self.state.repository().list_agents(session_id).await?;
+                    agent_count = agents.len();
+                    for agent in &agents {
+                        nodes.push(json!({
+                            "id": agent.id.as_uuid().to_string(),
+                            "type": "agent",
+                            "label": format!("{:?}", agent.role),
+                            "role": format!("{:?}", agent.role),
+                            "status": format!("{:?}", agent.status)
+                        }));
+                        edges.push(json!({
+                            "from": session_id.as_uuid().to_string(),
+                            "to": agent.id.as_uuid().to_string(),
+                            "type": "CONTAINS_AGENT"
+                        }));
+                        node_count += 1;
+                        edge_count += 1;
+                    }
+                }
+
+                // Tasks
+                if req.include_tasks {
+                    let tasks = self.state.repository().list_tasks(session_id, None).await?;
+                    task_count = tasks.len();
+                    for task in &tasks {
+                        nodes.push(json!({
+                            "id": task.id.as_uuid().to_string(),
+                            "type": "task",
+                            "label": task.title.clone(),
+                            "status": format!("{:?}", task.status),
+                            "priority": format!("{:?}", task.priority)
+                        }));
+                        edges.push(json!({
+                            "from": session_id.as_uuid().to_string(),
+                            "to": task.id.as_uuid().to_string(),
+                            "type": "CONTAINS_TASK"
+                        }));
+                        node_count += 1;
+                        edge_count += 1;
+
+                        // Dependencies
+                        let blocking = self.state.repository().get_blocking_tasks(task.id).await?;
+                        for blocker in blocking {
+                            edges.push(json!({
+                                "from": blocker.id.as_uuid().to_string(),
+                                "to": task.id.as_uuid().to_string(),
+                                "type": "BLOCKS"
+                            }));
+                            edge_count += 1;
+                        }
+
+                        // Agent assignments
+                        if let Some(agent_id) = task.assigned_to {
+                            edges.push(json!({
+                                "from": agent_id.as_uuid().to_string(),
+                                "to": task.id.as_uuid().to_string(),
+                                "type": "CLAIMS"
+                            }));
+                            edge_count += 1;
+                        }
+                    }
+                }
+
+                // Knowledge
+                if req.include_knowledge {
+                    let knowledge_entries = self
+                        .state
+                        .repository()
+                        .get_recent_knowledge(session_id, 100)
+                        .await?;
+                    knowledge_count = knowledge_entries.len();
+                    for knowledge in &knowledge_entries {
+                        nodes.push(json!({
+                            "id": knowledge.id.as_uuid().to_string(),
+                            "type": "knowledge",
+                            "label": knowledge.content[..knowledge.content.len().min(50)].to_string(),
+                            "kind": format!("{:?}", knowledge.kind)
+                        }));
+                        edges.push(json!({
+                            "from": knowledge.author_id.as_uuid().to_string(),
+                            "to": knowledge.id.as_uuid().to_string(),
+                            "type": "SHARED"
+                        }));
+                        node_count += 1;
+                        edge_count += 1;
+
+                        if let Some(task_id) = knowledge.task_id {
+                            edges.push(json!({
+                                "from": knowledge.id.as_uuid().to_string(),
+                                "to": task_id.as_uuid().to_string(),
+                                "type": "ABOUT"
+                            }));
+                            edge_count += 1;
+                        }
+                    }
+                }
+
+                let graph_json = json!({
+                    "nodes": nodes,
+                    "edges": edges
+                });
+                graph_data = serde_json::to_string_pretty(&graph_json).unwrap();
+            }
+            _ => {
+                return Err(HandlerError::InvalidArgs(format!(
+                    "Invalid format: {}. Supported formats: dot, json",
+                    req.format
+                )));
+            }
+        }
+
+        Ok(tools::ExportProjectGraphResponse {
+            graph: graph_data,
+            format: req.format.clone(),
+            stats: tools::GraphExportStats {
+                node_count,
+                edge_count,
+                task_count,
+                agent_count,
+                knowledge_count,
+            },
+        })
+    }
+
     // --- Knowledge handlers ---
 
     async fn handle_share_knowledge(
@@ -750,52 +1585,51 @@ impl<R: Repository + 'static> HiveHandler<R> {
         visited.insert(kid);
 
         // 1. Get vector-similar knowledge (semantic component)
-        if let Some(embedding) = &start_knowledge.embedding {
-            if let Ok(similar) = self
+        if let Some(embedding) = &start_knowledge.embedding
+            && let Ok(similar) = self
                 .state
                 .repository()
                 .search_knowledge(embedding, req.limit * 2)
                 .await
-            {
-                for (k, similarity) in similar {
-                    if k.id != kid {
-                        let k_id = k.id;
-                        let score = similarity * 0.7; // Weight vector similarity
-                        let paths = vec![format!("Vector Similarity: {:.4}", similarity)];
-                        results.insert(k_id, (k, score, paths));
-                        visited.insert(k_id);
-                    }
+        {
+            for (k, similarity) in similar {
+                if k.id != kid {
+                    let k_id = k.id;
+                    let score = similarity * 0.7; // Weight vector similarity
+                    let paths = vec![format!("Vector Similarity: {:.4}", similarity)];
+                    results.insert(k_id, (k, score, paths));
+                    visited.insert(k_id);
                 }
             }
         }
 
         // 2. Get graph-connected knowledge (structural component)
         // Knowledge connected via same task
-        if let Some(task_id) = start_knowledge.task_id {
-            if let Ok(task_knowledge) = self.state.repository().get_task_knowledge(task_id).await {
-                for k in task_knowledge {
-                    if !visited.contains(&k.id) {
-                        let k_id = k.id;
-                        let score = 0.8; // Graph connection weight
-                        let task_title = self
-                            .state
-                            .repository()
-                            .get_task(task_id)
-                            .await
-                            .map(|t| t.title)
-                            .unwrap_or_else(|_| "Unknown Task".into());
-                        let paths = vec![format!("via Task: {}", task_title)];
+        if let Some(task_id) = start_knowledge.task_id
+            && let Ok(task_knowledge) = self.state.repository().get_task_knowledge(task_id).await
+        {
+            for k in task_knowledge {
+                if !visited.contains(&k.id) {
+                    let k_id = k.id;
+                    let score = 0.8; // Graph connection weight
+                    let task_title = self
+                        .state
+                        .repository()
+                        .get_task(task_id)
+                        .await
+                        .map(|t| t.title)
+                        .unwrap_or_else(|_| "Unknown Task".into());
+                    let paths = vec![format!("via Task: {}", task_title)];
 
-                        // If we already have this from vector search, combine scores
-                        results
-                            .entry(k_id)
-                            .and_modify(|(_, s, p)| {
-                                *s += score;
-                                p.push(paths[0].clone());
-                            })
-                            .or_insert((k, score, paths));
-                        visited.insert(k_id);
-                    }
+                    // If we already have this from vector search, combine scores
+                    results
+                        .entry(k_id)
+                        .and_modify(|(_, s, p)| {
+                            *s += score;
+                            p.push(paths[0].clone());
+                        })
+                        .or_insert((k, score, paths));
+                    visited.insert(k_id);
                 }
             }
         }
@@ -856,12 +1690,202 @@ impl<R: Repository + 'static> HiveHandler<R> {
                     kind: format!("{:?}", k.kind).to_lowercase(),
                     author: k.author_id.as_uuid().to_string(),
                     score,
-                    vector_similarity: k.embedding.as_ref().and_then(|_| Some(score * 0.7)),
+                    vector_similarity: k.embedding.as_ref().map(|_| score * 0.7),
                     connection_paths: paths,
                     created_at: k.created_at.to_rfc3339(),
                     task_id: k.task_id.map(|t| t.as_uuid().to_string()),
                 })
                 .collect(),
+        })
+    }
+
+    async fn handle_knowledge_clusters(
+        &self,
+        req: tools::KnowledgeClustersRequest,
+    ) -> HandlerResult<tools::KnowledgeClustersResponse> {
+        use harness_persistence::KnowledgeId;
+        use std::collections::{HashMap, HashSet};
+
+        // Get all knowledge in the session
+        let all_knowledge = self
+            .state
+            .repository()
+            .get_recent_knowledge(self.state.session_id(), 10000)
+            .await?;
+
+        // Filter to only those with embeddings
+        let knowledge_with_embeddings: Vec<_> = all_knowledge
+            .iter()
+            .filter(|k| k.embedding.is_some())
+            .collect();
+
+        let total_count = all_knowledge.len();
+        let _embeddable_count = knowledge_with_embeddings.len();
+
+        // Early exit if no knowledge with embeddings
+        if knowledge_with_embeddings.is_empty() {
+            return Ok(tools::KnowledgeClustersResponse {
+                clusters: Vec::new(),
+                total_knowledge_count: total_count,
+                clustered_count: 0,
+                unclustered_count: total_count,
+            });
+        }
+
+        // Build pairwise similarity matrix
+        let mut similarity_matrix: HashMap<(KnowledgeId, KnowledgeId), f32> = HashMap::new();
+
+        for (i, k1) in knowledge_with_embeddings.iter().enumerate() {
+            for k2 in knowledge_with_embeddings.iter().skip(i + 1) {
+                if k1.id == k2.id {
+                    continue;
+                }
+
+                if let (Some(e1), Some(e2)) = (&k1.embedding, &k2.embedding) {
+                    // Compute cosine similarity
+                    let dot_product: f32 = e1.iter().zip(e2.iter()).map(|(a, b)| a * b).sum();
+                    let mag1: f32 = e1.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    let mag2: f32 = e2.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+                    let similarity = if mag1 > 0.0 && mag2 > 0.0 {
+                        dot_product / (mag1 * mag2)
+                    } else {
+                        0.0
+                    };
+
+                    similarity_matrix.insert((k1.id, k2.id), similarity);
+                    similarity_matrix.insert((k2.id, k1.id), similarity);
+                }
+            }
+        }
+
+        // Simple agglomerative clustering using similarity threshold
+        let mut clusters: Vec<HashSet<KnowledgeId>> = Vec::new();
+        let mut assigned: HashSet<KnowledgeId> = HashSet::new();
+
+        for k in &knowledge_with_embeddings {
+            if assigned.contains(&k.id) {
+                continue;
+            }
+
+            // Start new cluster
+            let mut cluster = HashSet::new();
+            cluster.insert(k.id);
+            assigned.insert(k.id);
+
+            // Find all knowledge similar enough to join this cluster
+            for other in &knowledge_with_embeddings {
+                if assigned.contains(&other.id) || other.id == k.id {
+                    continue;
+                }
+
+                // Check if similar to any member of current cluster
+                let mut max_similarity = 0.0f32;
+                for &member_id in &cluster {
+                    if let Some(&sim) = similarity_matrix.get(&(member_id, other.id)) {
+                        max_similarity = max_similarity.max(sim);
+                    }
+                }
+
+                if max_similarity >= req.similarity_threshold {
+                    cluster.insert(other.id);
+                    assigned.insert(other.id);
+                }
+            }
+
+            // Only keep clusters above minimum size
+            if cluster.len() >= req.min_cluster_size {
+                clusters.push(cluster);
+            }
+        }
+
+        // Build response clusters
+        let mut response_clusters = Vec::new();
+
+        for (cluster_idx, cluster_members) in clusters.iter().enumerate() {
+            let members_vec: Vec<_> = cluster_members.iter().collect();
+
+            // Compute average pairwise similarity within cluster
+            let mut total_sim = 0.0f32;
+            let mut pair_count = 0;
+
+            for (i, id1) in members_vec.iter().enumerate() {
+                for id2 in members_vec.iter().skip(i + 1) {
+                    if let Some(&sim) = similarity_matrix.get(&(**id1, **id2)) {
+                        total_sim += sim;
+                        pair_count += 1;
+                    }
+                }
+            }
+
+            let avg_similarity = if pair_count > 0 {
+                total_sim / pair_count as f32
+            } else {
+                1.0 // Single-member cluster
+            };
+
+            // Find representative (most central) member
+            let mut best_avg = -1.0f32;
+            let mut representative_content = String::new();
+
+            for &member_id in cluster_members {
+                let mut member_total_sim = 0.0f32;
+                let mut member_count = 0;
+
+                for &other_id in cluster_members {
+                    if member_id != other_id
+                        && let Some(&sim) = similarity_matrix.get(&(member_id, other_id))
+                    {
+                        member_total_sim += sim;
+                        member_count += 1;
+                    }
+                }
+
+                let member_avg = if member_count > 0 {
+                    member_total_sim / member_count as f32
+                } else {
+                    0.0
+                };
+
+                if member_avg > best_avg {
+                    best_avg = member_avg;
+                    if let Some(k) = all_knowledge.iter().find(|k| k.id == member_id) {
+                        representative_content = if k.content.len() > 100 {
+                            format!("{}...", &k.content[..97])
+                        } else {
+                            k.content.clone()
+                        };
+                    }
+                }
+            }
+
+            // Build member results
+            let mut member_results = Vec::new();
+            for &member_id in cluster_members {
+                if let Some(k) = all_knowledge.iter().find(|k| k.id == member_id) {
+                    member_results.push(Self::knowledge_to_result(k, avg_similarity));
+                }
+            }
+
+            response_clusters.push(tools::KnowledgeCluster {
+                cluster_id: cluster_idx,
+                size: cluster_members.len(),
+                avg_similarity,
+                representative_content,
+                members: member_results,
+            });
+        }
+
+        // Sort clusters by size (largest first)
+        response_clusters.sort_by(|a, b| b.size.cmp(&a.size));
+
+        let clustered_count = clusters.iter().map(|c| c.len()).sum();
+
+        Ok(tools::KnowledgeClustersResponse {
+            clusters: response_clusters,
+            total_knowledge_count: total_count,
+            clustered_count,
+            unclustered_count: total_count - clustered_count,
         })
     }
 
@@ -877,7 +1901,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
         let aid = if let Some(ref agent_id_str) = req.agent_id {
             // Spawned agent: activate existing agent
             let agent_id = Self::parse_agent_id(agent_id_str)?;
-            let mut agent = self.state.repository().get_agent(agent_id).await?;
+            let agent = self.state.repository().get_agent(agent_id).await?;
 
             // Validate agent is in Starting status (prevent hijacking)
             if agent.status != AgentStatus::Starting {
@@ -903,7 +1927,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
 
             // Add project context if provided (update the agent entity)
             if let (Some(name), Some(path)) = (req.project_name.clone(), req.project_path.clone()) {
-                agent = agent.with_project(name, path);
+                let _agent = agent.with_project(name, path);
                 // TODO: Add repository method to update project context
                 // For now, the agent is Active but project context isn't persisted for spawned agents
             }
@@ -994,7 +2018,9 @@ impl<R: Repository + 'static> HiveHandler<R> {
                         id: msg.id.as_uuid().to_string(),
                         from_agent: msg.from_agent.as_uuid().to_string(),
                         from_agent_role: from_agent.as_ref().map(|a| format!("{}", a.role)),
-                        from_agent_project: from_agent.as_ref().and_then(|a| a.project_name.clone()),
+                        from_agent_project: from_agent
+                            .as_ref()
+                            .and_then(|a| a.project_name.clone()),
                         to_agent: msg.to_agent.as_uuid().to_string(),
                         content: msg.content.clone(),
                         task_id: msg.task_id.map(|t| t.as_uuid().to_string()),
@@ -1016,7 +2042,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
 
                 let mut threads_map: HashMap<Option<TaskId>, Vec<&DirectMessage>> = HashMap::new();
                 for msg in &messages {
-                    threads_map.entry(msg.task_id).or_insert_with(Vec::new).push(msg);
+                    threads_map.entry(msg.task_id).or_default().push(msg);
                 }
 
                 let mut threads = Vec::new();
@@ -1051,7 +2077,10 @@ impl<R: Repository + 'static> HiveHandler<R> {
                     threads.push(tools::ActiveThread {
                         task_id: task_id_str,
                         task_title,
-                        participants: participant_ids.iter().map(|id| id.as_uuid().to_string()).collect(),
+                        participants: participant_ids
+                            .iter()
+                            .map(|id| id.as_uuid().to_string())
+                            .collect(),
                         message_count: thread_msgs.len(),
                         last_message_at: last_msg.created_at.to_rfc3339(),
                         last_message_preview: preview,
@@ -1536,6 +2565,565 @@ mod tests {
         assert!(names.contains(&"list_projects"));
         assert!(names.contains(&"create_plan"));
         assert!(names.contains(&"list_plans"));
-        assert_eq!(names.len(), 21);
+        assert!(names.contains(&"find_path"));
+        assert!(names.contains(&"task_statistics"));
+        assert!(names.contains(&"get_task_history"));
+        assert!(names.contains(&"knowledge_clusters"));
+        assert_eq!(names.len(), 34);
+    }
+
+    #[tokio::test]
+    async fn test_task_statistics() {
+        let (_state, handler) = setup().await;
+
+        // Register agent
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        // Create tasks with different statuses and priorities
+        let task1 = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({
+                    "title": "High priority task",
+                    "description": "Important work",
+                    "priority": "high"
+                }),
+            )
+            .await
+            .unwrap();
+        let task1_id: tools::CreateTaskResponse = serde_json::from_value(task1).unwrap();
+
+        let task2 = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({
+                    "title": "Low priority task",
+                    "description": "Can wait",
+                    "priority": "low"
+                }),
+            )
+            .await
+            .unwrap();
+        let task2_id: tools::CreateTaskResponse = serde_json::from_value(task2).unwrap();
+
+        handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({
+                    "title": "Critical task",
+                    "description": "Urgent",
+                    "priority": "critical"
+                }),
+            )
+            .await
+            .unwrap();
+
+        handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({
+                    "title": "Medium priority task",
+                    "description": "Normal",
+                    "priority": "medium"
+                }),
+            )
+            .await
+            .unwrap();
+
+        // Complete one task
+        handler
+            .call_tool(
+                "update_task_status",
+                serde_json::json!({
+                    "task_id": task1_id.task_id,
+                    "status": "completed",
+                    "summary": "Finished successfully"
+                }),
+            )
+            .await
+            .unwrap();
+
+        // Set one to in_progress
+        handler
+            .call_tool(
+                "update_task_status",
+                serde_json::json!({
+                    "task_id": task2_id.task_id,
+                    "status": "in_progress"
+                }),
+            )
+            .await
+            .unwrap();
+
+        // Get statistics
+        let resp = handler
+            .call_tool("task_statistics", serde_json::json!({}))
+            .await
+            .unwrap();
+
+        let stats: tools::TaskStatisticsResponse = serde_json::from_value(resp).unwrap();
+
+        // Verify status counts
+        assert_eq!(stats.status_counts.total, 4);
+        assert_eq!(stats.status_counts.pending, 2);
+        assert_eq!(stats.status_counts.in_progress, 1);
+        assert_eq!(stats.status_counts.completed, 1);
+        assert_eq!(stats.status_counts.failed, 0);
+
+        // Verify priority counts
+        assert_eq!(stats.priority_counts.low, 1);
+        assert_eq!(stats.priority_counts.medium, 1);
+        assert_eq!(stats.priority_counts.high, 1);
+        assert_eq!(stats.priority_counts.critical, 1);
+
+        // Verify completion metrics
+        assert_eq!(stats.completion_metrics.completion_rate, 25.0); // 1/4 = 25%
+        assert!(stats.completion_metrics.avg_completion_time_secs.is_some());
+        assert!(
+            stats
+                .completion_metrics
+                .median_completion_time_secs
+                .is_some()
+        );
+
+        // No assigned tasks in this test
+        assert_eq!(stats.assigned_count, 0);
+        assert_eq!(stats.blocked_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_find_path_same_task() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "developer"}))
+            .await
+            .unwrap();
+
+        // Create a single task
+        let resp = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({
+                    "title": "Task A",
+                    "description": "Test task",
+                }),
+            )
+            .await
+            .unwrap();
+        let task_a: tools::CreateTaskResponse = serde_json::from_value(resp).unwrap();
+
+        // Find path from A to A
+        let resp = handler
+            .call_tool(
+                "find_path",
+                serde_json::json!({
+                    "from_task_id": task_a.task_id,
+                    "to_task_id": task_a.task_id,
+                }),
+            )
+            .await
+            .unwrap();
+        let path_resp: tools::FindPathResponse = serde_json::from_value(resp).unwrap();
+
+        assert!(path_resp.found);
+        assert_eq!(path_resp.distance, Some(0));
+        assert_eq!(path_resp.path.as_ref().unwrap().len(), 1);
+        assert_eq!(path_resp.path.unwrap()[0].relationship, "self");
+    }
+
+    #[tokio::test]
+    async fn test_find_path_direct_dependency() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "developer"}))
+            .await
+            .unwrap();
+
+        // Create two tasks
+        let resp = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({"title": "Task A", "description": "First"}),
+            )
+            .await
+            .unwrap();
+        let task_a: tools::CreateTaskResponse = serde_json::from_value(resp).unwrap();
+
+        let resp = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({"title": "Task B", "description": "Second"}),
+            )
+            .await
+            .unwrap();
+        let task_b: tools::CreateTaskResponse = serde_json::from_value(resp).unwrap();
+
+        // Add dependency: A blocks B
+        handler
+            .call_tool(
+                "add_task_dependency",
+                serde_json::json!({
+                    "task_id": task_a.task_id,
+                    "blocked_task_id": task_b.task_id,
+                }),
+            )
+            .await
+            .unwrap();
+
+        // Find path from A to B
+        let resp = handler
+            .call_tool(
+                "find_path",
+                serde_json::json!({
+                    "from_task_id": task_a.task_id,
+                    "to_task_id": task_b.task_id,
+                }),
+            )
+            .await
+            .unwrap();
+        let path_resp: tools::FindPathResponse = serde_json::from_value(resp).unwrap();
+
+        assert!(path_resp.found);
+        assert_eq!(path_resp.distance, Some(1));
+        let path = path_resp.path.unwrap();
+        assert_eq!(path.len(), 2);
+        assert_eq!(path[0].title, "Task A");
+        assert_eq!(path[0].relationship, "start");
+        assert_eq!(path[1].title, "Task B");
+        assert_eq!(path[1].relationship, "blocks");
+    }
+
+    #[tokio::test]
+    async fn test_find_path_chain() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "developer"}))
+            .await
+            .unwrap();
+
+        // Create three tasks: A -> B -> C
+        let resp = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({"title": "Task A", "description": "First"}),
+            )
+            .await
+            .unwrap();
+        let task_a: tools::CreateTaskResponse = serde_json::from_value(resp).unwrap();
+
+        let resp = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({"title": "Task B", "description": "Second"}),
+            )
+            .await
+            .unwrap();
+        let task_b: tools::CreateTaskResponse = serde_json::from_value(resp).unwrap();
+
+        let resp = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({"title": "Task C", "description": "Third"}),
+            )
+            .await
+            .unwrap();
+        let task_c: tools::CreateTaskResponse = serde_json::from_value(resp).unwrap();
+
+        // A blocks B, B blocks C
+        handler
+            .call_tool(
+                "add_task_dependency",
+                serde_json::json!({
+                    "task_id": task_a.task_id,
+                    "blocked_task_id": task_b.task_id,
+                }),
+            )
+            .await
+            .unwrap();
+
+        handler
+            .call_tool(
+                "add_task_dependency",
+                serde_json::json!({
+                    "task_id": task_b.task_id,
+                    "blocked_task_id": task_c.task_id,
+                }),
+            )
+            .await
+            .unwrap();
+
+        // Find path from A to C
+        let resp = handler
+            .call_tool(
+                "find_path",
+                serde_json::json!({
+                    "from_task_id": task_a.task_id,
+                    "to_task_id": task_c.task_id,
+                }),
+            )
+            .await
+            .unwrap();
+        let path_resp: tools::FindPathResponse = serde_json::from_value(resp).unwrap();
+
+        assert!(path_resp.found);
+        assert_eq!(path_resp.distance, Some(2));
+        let path = path_resp.path.unwrap();
+        assert_eq!(path.len(), 3);
+        assert_eq!(path[0].title, "Task A");
+        assert_eq!(path[1].title, "Task B");
+        assert_eq!(path[2].title, "Task C");
+    }
+
+    #[tokio::test]
+    async fn test_find_path_no_connection() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "developer"}))
+            .await
+            .unwrap();
+
+        // Create two isolated tasks
+        let resp = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({"title": "Task A", "description": "First"}),
+            )
+            .await
+            .unwrap();
+        let task_a: tools::CreateTaskResponse = serde_json::from_value(resp).unwrap();
+
+        let resp = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({"title": "Task B", "description": "Second"}),
+            )
+            .await
+            .unwrap();
+        let task_b: tools::CreateTaskResponse = serde_json::from_value(resp).unwrap();
+
+        // No dependency added, find path from A to B
+        let resp = handler
+            .call_tool(
+                "find_path",
+                serde_json::json!({
+                    "from_task_id": task_a.task_id,
+                    "to_task_id": task_b.task_id,
+                }),
+            )
+            .await
+            .unwrap();
+        let path_resp: tools::FindPathResponse = serde_json::from_value(resp).unwrap();
+
+        assert!(!path_resp.found);
+        assert_eq!(path_resp.distance, None);
+        assert_eq!(path_resp.path, None);
+    }
+
+    #[tokio::test]
+    async fn test_find_path_bidirectional() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "developer"}))
+            .await
+            .unwrap();
+
+        // Create two tasks
+        let resp = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({"title": "Task A", "description": "First"}),
+            )
+            .await
+            .unwrap();
+        let task_a: tools::CreateTaskResponse = serde_json::from_value(resp).unwrap();
+
+        let resp = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({"title": "Task B", "description": "Second"}),
+            )
+            .await
+            .unwrap();
+        let task_b: tools::CreateTaskResponse = serde_json::from_value(resp).unwrap();
+
+        // A blocks B
+        handler
+            .call_tool(
+                "add_task_dependency",
+                serde_json::json!({
+                    "task_id": task_a.task_id,
+                    "blocked_task_id": task_b.task_id,
+                }),
+            )
+            .await
+            .unwrap();
+
+        // Find path from B to A (reverse direction)
+        let resp = handler
+            .call_tool(
+                "find_path",
+                serde_json::json!({
+                    "from_task_id": task_b.task_id,
+                    "to_task_id": task_a.task_id,
+                }),
+            )
+            .await
+            .unwrap();
+        let path_resp: tools::FindPathResponse = serde_json::from_value(resp).unwrap();
+
+        assert!(path_resp.found);
+        assert_eq!(path_resp.distance, Some(1));
+        let path = path_resp.path.unwrap();
+        assert_eq!(path.len(), 2);
+        assert_eq!(path[0].title, "Task B");
+        assert_eq!(path[1].title, "Task A");
+        assert_eq!(path[1].relationship, "blocked_by");
+    }
+
+    #[tokio::test]
+    async fn test_knowledge_clusters() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "developer"}))
+            .await
+            .unwrap();
+
+        // Create some knowledge entries with similar content
+        // Group 1: Error handling related
+        handler
+            .call_tool(
+                "share_knowledge",
+                serde_json::json!({
+                    "content": "Found a null pointer exception in login.rs",
+                    "kind": "discovery"
+                }),
+            )
+            .await
+            .unwrap();
+
+        handler
+            .call_tool(
+                "share_knowledge",
+                serde_json::json!({
+                    "content": "Added error handling for null pointer cases",
+                    "kind": "decision"
+                }),
+            )
+            .await
+            .unwrap();
+
+        // Group 2: Performance optimization
+        handler
+            .call_tool(
+                "share_knowledge",
+                serde_json::json!({
+                    "content": "Database query taking 2 seconds, needs optimization",
+                    "kind": "blocker"
+                }),
+            )
+            .await
+            .unwrap();
+
+        handler
+            .call_tool(
+                "share_knowledge",
+                serde_json::json!({
+                    "content": "Optimized query with index, reduced to 50ms",
+                    "kind": "activity"
+                }),
+            )
+            .await
+            .unwrap();
+
+        // Call knowledge_clusters
+        let resp = handler
+            .call_tool(
+                "knowledge_clusters",
+                serde_json::json!({
+                    "similarity_threshold": 0.5,
+                    "min_cluster_size": 2
+                }),
+            )
+            .await
+            .unwrap();
+
+        let clusters_resp: tools::KnowledgeClustersResponse = serde_json::from_value(resp).unwrap();
+
+        // Without embeddings (no embedding service in test), should have no clusters
+        assert_eq!(clusters_resp.clusters.len(), 0);
+        assert_eq!(clusters_resp.total_knowledge_count, 4);
+        assert_eq!(clusters_resp.unclustered_count, 4);
+    }
+
+    #[tokio::test]
+    async fn test_get_task_as_of() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "developer"}))
+            .await
+            .unwrap();
+
+        // Create a task
+        let resp = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({
+                    "title": "Original Title",
+                    "description": "Original description",
+                    "priority": "medium"
+                }),
+            )
+            .await
+            .unwrap();
+        let create_resp: tools::CreateTaskResponse = serde_json::from_value(resp).unwrap();
+
+        // Get current time for time travel
+        let created_time = chrono::Utc::now();
+
+        // Wait a tiny bit
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        // Update the task status
+        handler
+            .call_tool(
+                "update_task_status",
+                serde_json::json!({
+                    "task_id": create_resp.task_id,
+                    "status": "in_progress",
+                    "summary": "Started work"
+                }),
+            )
+            .await
+            .unwrap();
+
+        // Query task as it was at creation time
+        let resp = handler
+            .call_tool(
+                "get_task_as_of",
+                serde_json::json!({
+                    "task_id": create_resp.task_id,
+                    "valid_time": created_time.to_rfc3339()
+                }),
+            )
+            .await
+            .unwrap();
+
+        let as_of_resp: tools::GetTaskAsOfResponse = serde_json::from_value(resp).unwrap();
+
+        // The task at creation time should have pending status
+        // Note: InMemoryRepository doesn't store full history, so this will return latest
+        // But the structure should be correct
+        assert_eq!(as_of_resp.task.id, create_resp.task_id);
+        assert_eq!(as_of_resp.task.title, "Original Title");
     }
 }

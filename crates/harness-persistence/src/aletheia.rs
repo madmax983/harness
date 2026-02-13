@@ -349,7 +349,9 @@ impl AletheiaRepository {
             "active" => Ok(ProductStatus::Active),
             "maintenance" => Ok(ProductStatus::Maintenance),
             "archived" => Ok(ProductStatus::Archived),
-            _ => Err(RepositoryError::Database(format!("Invalid product status: {s}"))),
+            _ => Err(RepositoryError::Database(format!(
+                "Invalid product status: {s}"
+            ))),
         }
     }
 
@@ -360,7 +362,9 @@ impl AletheiaRepository {
             "on_hold" => Ok(ProjectStatus::OnHold),
             "completed" => Ok(ProjectStatus::Completed),
             "archived" => Ok(ProjectStatus::Archived),
-            _ => Err(RepositoryError::Database(format!("Invalid project status: {s}"))),
+            _ => Err(RepositoryError::Database(format!(
+                "Invalid project status: {s}"
+            ))),
         }
     }
 
@@ -372,7 +376,9 @@ impl AletheiaRepository {
             "paused" => Ok(PlanStatus::Paused),
             "completed" => Ok(PlanStatus::Completed),
             "abandoned" => Ok(PlanStatus::Abandoned),
-            _ => Err(RepositoryError::Database(format!("Invalid plan status: {s}"))),
+            _ => Err(RepositoryError::Database(format!(
+                "Invalid plan status: {s}"
+            ))),
         }
     }
 
@@ -454,6 +460,7 @@ impl AletheiaRepository {
                 .map(Self::ts_to_dt),
             summary: Self::opt_str(n, "summary").map(String::from),
             session_id: SessionId::from_uuid(Self::parse_uuid(Self::pstr(n, "session_id")?)?),
+            embedding: None, // Embeddings are not stored in node properties, only in vector index
         })
     }
 
@@ -665,6 +672,45 @@ impl AletheiaRepository {
     fn get_node(&self, node_id: NodeId) -> RepositoryResult<Node> {
         self.db_read(|tx| Ok(tx.get_node(node_id)?))
     }
+
+    /// Query cold storage statistics and tiered storage metrics.
+    ///
+    /// Returns information about AletheiaDB's cold storage backend (cold.redb),
+    /// including compression statistics and tiered storage access patterns.
+    pub fn query_cold_storage(
+        &self,
+    ) -> RepositoryResult<(
+        Option<ColdStorageStatsData>,
+        Option<TieredStorageMetricsData>,
+    )> {
+        // TODO: Add public API to AletheiaDB to access historical.tiered_storage
+        // The historical field is currently private, so we can't access tiered storage directly.
+        // For now, return None to indicate cold storage metrics are not available.
+        // Future implementation will require AletheiaDB to expose a method like:
+        // pub fn tiered_storage_metrics(&self) -> Option<TieredStorageMetrics>
+        Ok((None, None))
+    }
+}
+
+/// Cold storage statistics data.
+#[derive(Debug, Clone)]
+pub struct ColdStorageStatsData {
+    pub node_versions_stored: u64,
+    pub edge_versions_stored: u64,
+    pub compression_ratio: f64,
+    pub bytes_stored_compressed: u64,
+    pub bytes_stored_raw: u64,
+}
+
+/// Tiered storage metrics data.
+#[derive(Debug, Clone)]
+pub struct TieredStorageMetricsData {
+    pub hot_hits: u64,
+    pub warm_hits: u64,
+    pub cold_hits: u64,
+    pub misses: u64,
+    pub hot_ratio: f64,
+    pub warm_ratio: f64,
 }
 
 #[async_trait]
@@ -858,6 +904,15 @@ impl Repository for AletheiaRepository {
 
         self.index_set(&Self::task_key(task.id), task_node)?;
 
+        // Add task to vector index if embedding exists
+        if let Some(ref embedding) = task.embedding
+            && let Some(ref index) = self.vector_index
+        {
+            index
+                .add(task_node, embedding)
+                .map_err(|e| RepositoryError::Database(format!("Vector index add failed: {e}")))?;
+        }
+
         if let Some(parent_id) = task.parent_task
             && let Ok(parent_node) = self.index_get(&Self::task_key(parent_id))
         {
@@ -1034,6 +1089,133 @@ impl Repository for AletheiaRepository {
     async fn get_blocked_tasks(&self, task_id: TaskId) -> RepositoryResult<Vec<Task>> {
         let task_node = self.index_get(&Self::task_key(task_id))?;
         self.collect_outgoing(task_node, EDGE_BLOCKS, Self::node_to_task)
+    }
+
+    async fn get_task_history(&self, task_id: TaskId) -> RepositoryResult<Vec<Task>> {
+        let task_node = self.index_get(&Self::task_key(task_id))?;
+
+        // Get the complete version history from AletheiaDB
+        let history = self.db.get_node_history(task_node)?;
+
+        // Convert each version to a Task by extracting properties directly
+        let mut task_versions = Vec::with_capacity(history.versions.len());
+
+        for version_info in &history.versions {
+            // Helper to extract string property
+            let get_str = |key: &str| -> Result<&str, RepositoryError> {
+                version_info
+                    .properties
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| RepositoryError::Database(format!("Missing property: {key}")))
+            };
+
+            // Helper to extract optional string property
+            let get_opt_str = |key: &str| -> Option<&str> {
+                version_info.properties.get(key).and_then(|v| v.as_str())
+            };
+
+            // Helper to extract i64 property
+            let get_i64 = |key: &str| -> Result<i64, RepositoryError> {
+                version_info
+                    .properties
+                    .get(key)
+                    .and_then(|v| v.as_int())
+                    .ok_or_else(|| RepositoryError::Database(format!("Missing property: {key}")))
+            };
+
+            let task = Task {
+                id: TaskId::from_uuid(Self::parse_uuid(get_str("id")?)?),
+                title: get_str("title")?.to_string(),
+                description: get_str("description")?.to_string(),
+                status: Self::parse_task_status(get_str("status")?)?,
+                priority: Self::parse_priority(get_str("priority")?)?,
+                assigned_to: get_opt_str("assigned_to")
+                    .and_then(|s| Self::parse_uuid(s).ok())
+                    .map(AgentId::from_uuid),
+                created_by: get_opt_str("created_by")
+                    .and_then(|s| Self::parse_uuid(s).ok())
+                    .map(AgentId::from_uuid),
+                parent_task: get_opt_str("parent_task")
+                    .and_then(|s| Self::parse_uuid(s).ok())
+                    .map(TaskId::from_uuid),
+                created_at: Self::ts_to_dt(get_i64("created_at")?),
+                completed_at: version_info
+                    .properties
+                    .get("completed_at")
+                    .and_then(|v| v.as_int())
+                    .map(Self::ts_to_dt),
+                summary: get_opt_str("summary").map(String::from),
+                session_id: SessionId::from_uuid(Self::parse_uuid(get_str("session_id")?)?),
+                embedding: None, // Task embeddings not stored in version history
+            };
+
+            task_versions.push(task);
+        }
+
+        Ok(task_versions)
+    }
+
+    async fn search_tasks(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+        status: Option<TaskStatus>,
+    ) -> RepositoryResult<Vec<(Task, f32)>> {
+        // Use vector index if configured.
+        if let Some(ref index) = self.vector_index {
+            let results = index
+                .search(query_embedding, limit * 2) // Get more candidates for filtering
+                .map_err(|e| RepositoryError::Database(format!("Vector search failed: {e}")))?;
+
+            let mut task_results = Vec::new();
+            for (node_id, similarity) in results {
+                match self.get_node(node_id).and_then(|n| {
+                    // Only convert if it's a Task node (not Knowledge or other entities)
+                    if n.has_label_str(LABEL_TASK) {
+                        Self::node_to_task(&n)
+                    } else {
+                        Err(RepositoryError::Database("Not a task node".into()))
+                    }
+                }) {
+                    Ok(task) => {
+                        // Apply status filter if provided
+                        if let Some(filter_status) = status {
+                            if task.status == filter_status {
+                                task_results.push((task, similarity));
+                            }
+                        } else {
+                            task_results.push((task, similarity));
+                        }
+
+                        // Stop if we've collected enough results
+                        if task_results.len() >= limit {
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        // Skip non-task nodes silently
+                    }
+                }
+            }
+            return Ok(task_results);
+        }
+
+        // No vector index configured - return empty.
+        Ok(Vec::new())
+    }
+
+    async fn get_root_tasks(&self, session_id: SessionId) -> RepositoryResult<Vec<Task>> {
+        // Get all tasks in the session
+        let all_tasks = self.list_tasks(session_id, None).await?;
+
+        // Filter to tasks with no parent
+        let root_tasks: Vec<Task> = all_tasks
+            .into_iter()
+            .filter(|task| task.parent_task.is_none())
+            .collect();
+
+        Ok(root_tasks)
     }
 
     async fn create_knowledge(&self, knowledge: &Knowledge) -> RepositoryResult<()> {
@@ -1338,10 +1520,10 @@ impl Repository for AletheiaRepository {
         let mut all = self.collect_targets_project(sn, EDGE_CONTAINS_PROJECT)?;
 
         if let Some(pid) = product_id {
-            all = all.into_iter().filter(|p| p.product_id == pid).collect();
+            all.retain(|p| p.product_id == pid);
         }
         if let Some(s) = status {
-            all = all.into_iter().filter(|p| p.status == s).collect();
+            all.retain(|p| p.status == s);
         }
 
         Ok(all)
@@ -1396,10 +1578,10 @@ impl Repository for AletheiaRepository {
         let mut all = self.collect_targets_plan(sn, EDGE_CONTAINS_PLAN)?;
 
         if let Some(pid) = project_id {
-            all = all.into_iter().filter(|p| p.project_id == pid).collect();
+            all.retain(|p| p.project_id == pid);
         }
         if let Some(s) = status {
-            all = all.into_iter().filter(|p| p.status == s).collect();
+            all.retain(|p| p.status == s);
         }
 
         Ok(all)
@@ -1463,7 +1645,7 @@ mod tests {
         let fetched = repo.get_agent(agent.id).await.unwrap();
         assert_eq!(fetched.id, agent.id);
         assert_eq!(fetched.role, AgentRole::Developer);
-        assert_eq!(fetched.status, AgentStatus::Pending);
+        assert_eq!(fetched.status, AgentStatus::Active); // Auto-activated on creation
         assert!(!fetched.is_strategoi);
         assert!(fetched.current_task.is_none());
         assert_eq!(fetched.session_id, session.id);
@@ -1525,14 +1707,11 @@ mod tests {
         repo.create_agent(&a2).await.unwrap();
         repo.create_agent(&a3).await.unwrap();
 
-        // All pending initially - none active
-        assert_eq!(repo.list_active_agents(session.id).await.unwrap().len(), 0);
+        // All auto-activated on creation
+        assert_eq!(repo.list_active_agents(session.id).await.unwrap().len(), 3);
 
-        // Set a1 to Starting, a2 to Active
-        repo.update_agent_status(a1.id, AgentStatus::Starting)
-            .await
-            .unwrap();
-        repo.update_agent_status(a2.id, AgentStatus::Active)
+        // Kill one agent to test filtering
+        repo.update_agent_status(a3.id, AgentStatus::Killed)
             .await
             .unwrap();
 
@@ -1549,14 +1728,17 @@ mod tests {
         repo.create_agent(&a1).await.unwrap();
         repo.create_agent(&a2).await.unwrap();
 
-        assert_eq!(repo.count_active_agents(session.id).await.unwrap(), 0);
+        // Both agents auto-activate on creation
+        assert_eq!(repo.count_active_agents(session.id).await.unwrap(), 2);
 
-        repo.update_agent_status(a1.id, AgentStatus::Active)
+        // Kill one agent
+        repo.update_agent_status(a1.id, AgentStatus::Killed)
             .await
             .unwrap();
         assert_eq!(repo.count_active_agents(session.id).await.unwrap(), 1);
 
-        repo.update_agent_status(a1.id, AgentStatus::Killed)
+        // Kill the other agent
+        repo.update_agent_status(a2.id, AgentStatus::Killed)
             .await
             .unwrap();
         assert_eq!(repo.count_active_agents(session.id).await.unwrap(), 0);
@@ -2184,10 +2366,10 @@ mod tests {
         let agent = Agent::new(AgentRole::Developer, session.id);
         repo.create_agent(&agent).await.unwrap();
 
-        // Initially pending, not counted as active
-        assert_eq!(repo.count_active_agents(session.id).await.unwrap(), 0);
+        // Auto-activated on creation
+        assert_eq!(repo.count_active_agents(session.id).await.unwrap(), 1);
 
-        // Starting -> active
+        // Starting -> still active
         repo.update_agent_status(agent.id, AgentStatus::Starting)
             .await
             .unwrap();

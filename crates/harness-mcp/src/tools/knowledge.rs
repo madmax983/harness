@@ -94,3 +94,42 @@ pub struct FishKnowledgeResponse {
     pub starting_from: String,
     pub results: Vec<FishResult>,
 }
+
+/// Request to auto-cluster knowledge entries by similarity.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct KnowledgeClustersRequest {
+    #[serde(default = "default_similarity_threshold")]
+    pub similarity_threshold: f32,
+    #[serde(default = "default_min_cluster_size")]
+    pub min_cluster_size: usize,
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
+
+fn default_similarity_threshold() -> f32 {
+    0.7
+}
+
+fn default_min_cluster_size() -> usize {
+    2
+}
+
+/// A single cluster of related knowledge entries.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct KnowledgeCluster {
+    pub cluster_id: usize,
+    pub size: usize,
+    pub avg_similarity: f32,
+    pub representative_content: String,
+    pub members: Vec<KnowledgeResult>,
+}
+
+/// Response from knowledge_clusters.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct KnowledgeClustersResponse {
+    pub clusters: Vec<KnowledgeCluster>,
+    pub total_knowledge_count: usize,
+    pub clustered_count: usize,
+    pub unclustered_count: usize,
+}

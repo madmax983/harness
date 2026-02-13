@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AgentId, AgentRole, DirectMessageId, KnowledgeId, KnowledgeKind, Priority, ProductId,
-    ProductStatus, ProjectId, ProjectStatus, PlanId, PlanStatus, SessionId, TaskId, TaskStatus,
+    AgentId, AgentRole, DirectMessageId, KnowledgeId, KnowledgeKind, PlanId, PlanStatus, Priority,
+    ProductId, ProductStatus, ProjectId, ProjectStatus, SessionId, TaskId, TaskStatus,
 };
 
 /// Status of an agent in its lifecycle.
@@ -119,6 +119,9 @@ pub struct Task {
     pub summary: Option<String>,
     /// Session this task belongs to.
     pub session_id: SessionId,
+    /// Vector embedding for semantic search (derived from title + description).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<Vec<f32>>,
 }
 
 impl Task {
@@ -142,6 +145,7 @@ impl Task {
             completed_at: None,
             summary: None,
             session_id,
+            embedding: None,
         }
     }
 
@@ -492,7 +496,7 @@ mod tests {
         let session = Session::new(8);
         let agent = Agent::new(AgentRole::Developer, session.id);
         // v2 Agent has no subscriptions or system_prompt fields
-        assert_eq!(agent.status, AgentStatus::Pending);
+        assert_eq!(agent.status, AgentStatus::Active); // Auto-activated on creation
         assert!(agent.current_task.is_none());
         assert!(!agent.is_strategoi);
     }
@@ -545,8 +549,8 @@ mod tests {
     fn product_with_id() {
         let session = Session::new(8);
         let original_id = ProductId::new();
-        let product = Product::new("Harness v2", "Hive mind AI platform", session.id)
-            .with_id(original_id);
+        let product =
+            Product::new("Harness v2", "Hive mind AI platform", session.id).with_id(original_id);
         assert_eq!(product.id, original_id);
     }
 
@@ -554,7 +558,12 @@ mod tests {
     fn project_starts_in_planning() {
         let session = Session::new(8);
         let product = Product::new("Harness v2", "Hive mind AI platform", session.id);
-        let project = Project::new("Core MCP Server", "Implement HTTP/SSE MCP server", product.id, session.id);
+        let project = Project::new(
+            "Core MCP Server",
+            "Implement HTTP/SSE MCP server",
+            product.id,
+            session.id,
+        );
         assert_eq!(project.status, ProjectStatus::Planning);
         assert_eq!(project.name, "Core MCP Server");
         assert_eq!(project.product_id, product.id);
@@ -566,8 +575,13 @@ mod tests {
         let session = Session::new(8);
         let product = Product::new("Harness v2", "Hive mind AI platform", session.id);
         let original_id = ProjectId::new();
-        let project = Project::new("Core MCP Server", "Implement HTTP/SSE MCP server", product.id, session.id)
-            .with_id(original_id);
+        let project = Project::new(
+            "Core MCP Server",
+            "Implement HTTP/SSE MCP server",
+            product.id,
+            session.id,
+        )
+        .with_id(original_id);
         assert_eq!(project.id, original_id);
     }
 
@@ -575,7 +589,12 @@ mod tests {
     fn project_maintains_associations() {
         let session = Session::new(8);
         let product = Product::new("Harness v2", "Hive mind AI platform", session.id);
-        let project = Project::new("Core MCP Server", "Implement HTTP/SSE MCP server", product.id, session.id);
+        let project = Project::new(
+            "Core MCP Server",
+            "Implement HTTP/SSE MCP server",
+            product.id,
+            session.id,
+        );
         // Verify all associations are preserved
         assert_eq!(project.product_id, product.id);
         assert_eq!(project.session_id, session.id);
@@ -587,8 +606,18 @@ mod tests {
     fn plan_starts_in_draft() {
         let session = Session::new(8);
         let product = Product::new("Harness v2", "Hive mind AI platform", session.id);
-        let project = Project::new("Core MCP Server", "Implement HTTP/SSE MCP server", product.id, session.id);
-        let plan = Plan::new("MVP Execution", "Implement HTTP server first, then SSE", project.id, session.id);
+        let project = Project::new(
+            "Core MCP Server",
+            "Implement HTTP/SSE MCP server",
+            product.id,
+            session.id,
+        );
+        let plan = Plan::new(
+            "MVP Execution",
+            "Implement HTTP server first, then SSE",
+            project.id,
+            session.id,
+        );
         assert_eq!(plan.status, PlanStatus::Draft);
         assert_eq!(plan.name, "MVP Execution");
         assert_eq!(plan.project_id, project.id);
@@ -599,10 +628,20 @@ mod tests {
     fn plan_with_id() {
         let session = Session::new(8);
         let product = Product::new("Harness v2", "Hive mind AI platform", session.id);
-        let project = Project::new("Core MCP Server", "Implement HTTP/SSE MCP server", product.id, session.id);
+        let project = Project::new(
+            "Core MCP Server",
+            "Implement HTTP/SSE MCP server",
+            product.id,
+            session.id,
+        );
         let original_id = PlanId::new();
-        let plan = Plan::new("MVP Execution", "Implement HTTP server first, then SSE", project.id, session.id)
-            .with_id(original_id);
+        let plan = Plan::new(
+            "MVP Execution",
+            "Implement HTTP server first, then SSE",
+            project.id,
+            session.id,
+        )
+        .with_id(original_id);
         assert_eq!(plan.id, original_id);
     }
 
@@ -610,8 +649,18 @@ mod tests {
     fn plan_maintains_associations() {
         let session = Session::new(8);
         let product = Product::new("Harness v2", "Hive mind AI platform", session.id);
-        let project = Project::new("Core MCP Server", "Implement HTTP/SSE MCP server", product.id, session.id);
-        let plan = Plan::new("MVP Execution", "Implement HTTP server first, then SSE", project.id, session.id);
+        let project = Project::new(
+            "Core MCP Server",
+            "Implement HTTP/SSE MCP server",
+            product.id,
+            session.id,
+        );
+        let plan = Plan::new(
+            "MVP Execution",
+            "Implement HTTP server first, then SSE",
+            project.id,
+            session.id,
+        );
         // Verify all associations are preserved
         assert_eq!(plan.project_id, project.id);
         assert_eq!(plan.session_id, session.id);
@@ -623,7 +672,12 @@ mod tests {
     fn plan_serde_with_all_statuses() {
         let session = Session::new(8);
         let product = Product::new("Harness v2", "Hive mind AI platform", session.id);
-        let project = Project::new("Core MCP Server", "Implement HTTP/SSE MCP server", product.id, session.id);
+        let project = Project::new(
+            "Core MCP Server",
+            "Implement HTTP/SSE MCP server",
+            product.id,
+            session.id,
+        );
 
         let statuses = vec![
             PlanStatus::Draft,
@@ -651,8 +705,18 @@ mod tests {
     fn product_project_plan_hierarchy() {
         let session = Session::new(8);
         let product = Product::new("Harness v2", "Hive mind AI platform", session.id);
-        let project = Project::new("Core MCP Server", "Implement HTTP/SSE MCP server", product.id, session.id);
-        let plan = Plan::new("MVP Execution", "Implement HTTP server first, then SSE", project.id, session.id);
+        let project = Project::new(
+            "Core MCP Server",
+            "Implement HTTP/SSE MCP server",
+            product.id,
+            session.id,
+        );
+        let plan = Plan::new(
+            "MVP Execution",
+            "Implement HTTP server first, then SSE",
+            project.id,
+            session.id,
+        );
 
         // Verify the complete hierarchy
         assert_eq!(product.session_id, session.id);

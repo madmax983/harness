@@ -26,23 +26,20 @@ async fn test_full_coordination_flow() {
     let (_state, handler) = setup_hive().await;
 
     // Register strategoi
-    let strategoi_resp = handler
+    handler
         .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
         .await
         .expect("register strategoi");
-    let strategoi_id: String =
-        serde_json::from_value(strategoi_resp.get("agent_id").unwrap().clone()).unwrap();
 
     // Register two workers
     let dev_handler = HiveHandler::new(handler.state_ref().clone());
-    let dev_resp = dev_handler
+    dev_handler
         .call_tool("register_agent", serde_json::json!({"role": "developer"}))
         .await
         .expect("register developer");
-    let dev_id: String = serde_json::from_value(dev_resp.get("agent_id").unwrap().clone()).unwrap();
 
     let tester_handler = HiveHandler::new(handler.state_ref().clone());
-    let tester_resp = tester_handler
+    tester_handler
         .call_tool("register_agent", serde_json::json!({"role": "tester"}))
         .await
         .expect("register tester");
@@ -399,14 +396,13 @@ async fn test_hive_status_accuracy() {
     }
 
     // Create tasks in various statuses
-    let task1 = handler
+    handler
         .call_tool(
             "create_task",
             serde_json::json!({"title": "Task 1", "description": "Pending task", "priority": "low"}),
         )
         .await
         .unwrap();
-    let task1_id: String = serde_json::from_value(task1.get("task_id").unwrap().clone()).unwrap();
 
     let task2 = handler
         .call_tool(

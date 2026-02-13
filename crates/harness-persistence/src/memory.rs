@@ -1,6 +1,6 @@
 //! In-memory repository implementation for testing.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 
 use chrono::Utc;
@@ -24,6 +24,8 @@ pub struct InMemoryRepository {
     products: RwLock<HashMap<ProductId, Product>>,
     projects: RwLock<HashMap<ProjectId, Project>>,
     plans: RwLock<HashMap<PlanId, Plan>>,
+    /// Task dependencies: TaskId -> Set of TaskIds it blocks
+    task_dependencies: RwLock<HashMap<TaskId, HashSet<TaskId>>>,
 }
 
 impl InMemoryRepository {
@@ -303,30 +305,106 @@ impl Repository for InMemoryRepository {
 
     async fn add_task_dependency(
         &self,
-        _task_id: TaskId,
-        _blocked_task_id: TaskId,
+        task_id: TaskId,
+        blocked_task_id: TaskId,
     ) -> RepositoryResult<()> {
-        // In-memory repository doesn't support graph edges
+        let mut deps = self
+            .task_dependencies
+            .write()
+            .map_err(|e| RepositoryError::Database(e.to_string()))?;
+        deps.entry(task_id)
+            .or_insert_with(HashSet::new)
+            .insert(blocked_task_id);
         Ok(())
     }
 
     async fn remove_task_dependency(
         &self,
-        _task_id: TaskId,
-        _blocked_task_id: TaskId,
+        task_id: TaskId,
+        blocked_task_id: TaskId,
     ) -> RepositoryResult<()> {
-        // In-memory repository doesn't support graph edges
+        let mut deps = self
+            .task_dependencies
+            .write()
+            .map_err(|e| RepositoryError::Database(e.to_string()))?;
+        if let Some(blocked_set) = deps.get_mut(&task_id) {
+            blocked_set.remove(&blocked_task_id);
+        }
         Ok(())
     }
 
-    async fn get_blocking_tasks(&self, _task_id: TaskId) -> RepositoryResult<Vec<Task>> {
-        // In-memory repository doesn't support graph edges
+    async fn get_blocking_tasks(&self, task_id: TaskId) -> RepositoryResult<Vec<Task>> {
+        // Find all tasks that block this task (i.e., tasks where task_id is in their blocked set)
+        let deps = self
+            .task_dependencies
+            .read()
+            .map_err(|e| RepositoryError::Database(e.to_string()))?;
+        let tasks = self
+            .tasks
+            .read()
+            .map_err(|e| RepositoryError::Database(e.to_string()))?;
+
+        let blocking_ids: Vec<TaskId> = deps
+            .iter()
+            .filter(|(_, blocked_set)| blocked_set.contains(&task_id))
+            .map(|(blocking_id, _)| *blocking_id)
+            .collect();
+
+        Ok(blocking_ids
+            .iter()
+            .filter_map(|id| tasks.get(id).cloned())
+            .collect())
+    }
+
+    async fn get_blocked_tasks(&self, task_id: TaskId) -> RepositoryResult<Vec<Task>> {
+        // Find all tasks that this task blocks
+        let deps = self
+            .task_dependencies
+            .read()
+            .map_err(|e| RepositoryError::Database(e.to_string()))?;
+        let tasks = self
+            .tasks
+            .read()
+            .map_err(|e| RepositoryError::Database(e.to_string()))?;
+
+        let blocked_ids = deps.get(&task_id).cloned().unwrap_or_default();
+
+        Ok(blocked_ids
+            .iter()
+            .filter_map(|id| tasks.get(id).cloned())
+            .collect())
+    }
+
+    async fn get_task_history(&self, task_id: TaskId) -> RepositoryResult<Vec<Task>> {
+        // In-memory repository doesn't maintain version history
+        // Return just the current version
+        let task = self.get_task(task_id).await?;
+        Ok(vec![task])
+    }
+
+    async fn search_tasks(
+        &self,
+        _query_embedding: &[f32],
+        _limit: usize,
+        _status: Option<TaskStatus>,
+    ) -> RepositoryResult<Vec<(Task, f32)>> {
+        // In-memory repository doesn't support vector search
         Ok(Vec::new())
     }
 
-    async fn get_blocked_tasks(&self, _task_id: TaskId) -> RepositoryResult<Vec<Task>> {
-        // In-memory repository doesn't support graph edges
-        Ok(Vec::new())
+    async fn get_root_tasks(&self, session_id: SessionId) -> RepositoryResult<Vec<Task>> {
+        let tasks = self
+            .tasks
+            .read()
+            .map_err(|e| RepositoryError::Database(e.to_string()))?;
+
+        let root_tasks: Vec<Task> = tasks
+            .values()
+            .filter(|task| task.session_id == session_id && task.parent_task.is_none())
+            .cloned()
+            .collect();
+
+        Ok(root_tasks)
     }
 
     // === Knowledge operations ===
@@ -605,10 +683,10 @@ mod tests {
         let agent_id = agent.id;
         repo.create_agent(&agent).await.unwrap();
 
-        // Initially pending, not counted as active
-        assert_eq!(repo.count_active_agents(session.id).await.unwrap(), 0);
+        // Auto-activated on creation
+        assert_eq!(repo.count_active_agents(session.id).await.unwrap(), 1);
 
-        // Transition to Starting - now active
+        // Transition to Starting - still active
         repo.update_agent_status(agent_id, AgentStatus::Starting)
             .await
             .unwrap();
@@ -1046,9 +1124,13 @@ mod tests {
         let session = Session::new(8);
         repo.create_session(&session).await.unwrap();
 
-        repo.create_product(&Product::new("Harness", "Multi-agent orchestration", session.id))
-            .await
-            .unwrap();
+        repo.create_product(&Product::new(
+            "Harness",
+            "Multi-agent orchestration",
+            session.id,
+        ))
+        .await
+        .unwrap();
         repo.create_product(&Product::new("Thorp", "Quant trading platform", session.id))
             .await
             .unwrap();
@@ -1135,9 +1217,14 @@ mod tests {
         repo.create_product(&product1).await.unwrap();
         repo.create_product(&product2).await.unwrap();
 
-        repo.create_project(&Project::new("Harness Project", "H", product1.id, session.id))
-            .await
-            .unwrap();
+        repo.create_project(&Project::new(
+            "Harness Project",
+            "H",
+            product1.id,
+            session.id,
+        ))
+        .await
+        .unwrap();
         repo.create_project(&Project::new("Thorp Project", "T", product2.id, session.id))
             .await
             .unwrap();

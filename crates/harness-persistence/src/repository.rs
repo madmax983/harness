@@ -4,8 +4,8 @@ use async_trait::async_trait;
 
 use crate::{
     Agent, AgentId, AgentRole, AgentStatus, DirectMessage, Knowledge, Plan, PlanId, PlanStatus,
-    Product, ProductId, ProductStatus, Project, ProjectId, ProjectStatus, Session, SessionId,
-    Task, TaskId, TaskStatus,
+    Product, ProductId, ProductStatus, Project, ProjectId, ProjectStatus, Session, SessionId, Task,
+    TaskId, TaskStatus,
 };
 
 /// Error type for repository operations.
@@ -139,6 +139,23 @@ pub trait Repository: Send + Sync {
 
     /// Get tasks that this task is blocking (waiting for this task to complete).
     async fn get_blocked_tasks(&self, task_id: TaskId) -> RepositoryResult<Vec<Task>>;
+
+    /// Get the complete version history of a task.
+    /// Returns all versions in chronological order (oldest first).
+    async fn get_task_history(&self, task_id: TaskId) -> RepositoryResult<Vec<Task>>;
+
+    /// Search tasks by vector similarity using semantic embeddings.
+    /// Returns (task, similarity_score) pairs ordered by descending similarity.
+    /// Optionally filter by task status.
+    async fn search_tasks(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+        status: Option<TaskStatus>,
+    ) -> RepositoryResult<Vec<(Task, f32)>>;
+
+    /// Get all top-level tasks (tasks with no parent) in a session.
+    async fn get_root_tasks(&self, session_id: SessionId) -> RepositoryResult<Vec<Task>>;
 
     // === Knowledge operations ===
 

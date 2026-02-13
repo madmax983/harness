@@ -10,10 +10,11 @@ use serde::{Deserialize, Serialize};
 use crate::config::{McpServerConfig, McpTransport};
 
 /// Runtime flavor used to spawn agent CLI processes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentRuntimeKind {
     /// Anthropic Claude CLI-compatible invocation (`-p` + `--mcp-config`).
+    #[default]
     Claude,
     /// OpenAI Codex CLI invocation (`exec`).
     Codex,
@@ -52,12 +53,6 @@ impl AgentRuntimeKind {
             "claude_compatible" => Some(Self::ClaudeCompatible),
             _ => None,
         }
-    }
-}
-
-impl Default for AgentRuntimeKind {
-    fn default() -> Self {
-        Self::Claude
     }
 }
 
