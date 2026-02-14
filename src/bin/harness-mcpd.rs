@@ -14,10 +14,11 @@ use anyhow::{Context, Result, anyhow, bail};
 use harness_mcp::{HiveState, start_mcp_server};
 use harness_orchestrator::{OrchestratorConfig, ProcessManager};
 use harness_persistence::{AletheiaRepository, Repository, Session, SessionId};
+use harness_sona::SonaConfig;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct Args {
     host: String,
     port: u16,
@@ -25,6 +26,12 @@ struct Args {
     session_file: PathBuf,
     embedding_model: Option<String>,
     ollama_url: Option<String>,
+    // SONA configuration
+    sona_enabled: Option<bool>,
+    ewc_lambda: Option<f32>,
+    ewc_gamma: Option<f32>,
+    lora_rank: Option<usize>,
+    learning_interval_secs: Option<u64>,
 }
 
 impl Default for Args {
@@ -36,6 +43,11 @@ impl Default for Args {
             session_file: PathBuf::from(".harness-mcp-session"),
             embedding_model: None,
             ollama_url: None,
+            sona_enabled: None,
+            ewc_lambda: None,
+            ewc_gamma: None,
+            lora_rank: None,
+            learning_interval_secs: None,
         }
     }
 }
@@ -93,6 +105,28 @@ impl Args {
                             .ok_or_else(|| anyhow!("--ollama-url requires a value"))?,
                     );
                 }
+                "--enable-sona" => {
+                    args.sona_enabled = Some(true);
+                }
+                "--disable-sona" => {
+                    args.sona_enabled = Some(false);
+                }
+                "--ewc-lambda" => {
+                    let raw = it.next().ok_or_else(|| anyhow!("--ewc-lambda requires a value"))?;
+                    args.ewc_lambda = Some(raw.parse().with_context(|| format!("invalid --ewc-lambda value: {raw}"))?);
+                }
+                "--ewc-gamma" => {
+                    let raw = it.next().ok_or_else(|| anyhow!("--ewc-gamma requires a value"))?;
+                    args.ewc_gamma = Some(raw.parse().with_context(|| format!("invalid --ewc-gamma value: {raw}"))?);
+                }
+                "--lora-rank" => {
+                    let raw = it.next().ok_or_else(|| anyhow!("--lora-rank requires a value"))?;
+                    args.lora_rank = Some(raw.parse().with_context(|| format!("invalid --lora-rank value: {raw}"))?);
+                }
+                "--learning-interval" => {
+                    let raw = it.next().ok_or_else(|| anyhow!("--learning-interval requires a value"))?;
+                    args.learning_interval_secs = Some(raw.parse().with_context(|| format!("invalid --learning-interval value: {raw}"))?);
+                }
                 "-h" | "--help" => {
                     print_usage();
                     std::process::exit(0);
@@ -120,6 +154,22 @@ Options:
   --session-file <PATH>       Session ID file path (default: .harness-mcp-session)
   --embedding-model, -e <M>   Enable semantic search embeddings using Ollama model M
   --ollama-url <URL>          Ollama base URL (default provider default)
+
+SONA (Self-Optimizing Neural Architecture):
+  --enable-sona               Enable SONA adaptive learning (default: disabled)
+  --disable-sona              Explicitly disable SONA
+  --ewc-lambda <FLOAT>        EWC penalty strength (default: 0.4)
+  --ewc-gamma <FLOAT>         EWC online decay factor (default: 0.9)
+  --lora-rank <INT>           BaseLoRA rank (default: 8)
+  --learning-interval <SECS>  Learning cycle interval in seconds (default: 300)
+
+Environment variables (override CLI flags):
+  HARNESS_SONA_ENABLED        1/true to enable, 0/false to disable
+  HARNESS_EWC_LAMBDA          EWC lambda value
+  HARNESS_EWC_GAMMA           EWC gamma value
+  HARNESS_LORA_RANK           LoRA rank value
+  HARNESS_LEARNING_INTERVAL   Learning interval in seconds
+
   -h, --help                  Show this help
 "
     );
@@ -191,6 +241,57 @@ fn write_session_id(path: &Path, session_id: SessionId) -> Result<()> {
     fs::write(path, session_id.as_uuid().to_string())
         .with_context(|| format!("failed writing session file: {}", path.display()))?;
     Ok(())
+}
+
+/// Build SONA configuration from CLI args and environment variables.
+///
+/// Priority: Environment variables > CLI flags > Defaults
+fn build_sona_config(args: &Args) -> SonaConfig {
+    let mut config = SonaConfig::default();
+
+    // Apply CLI flags first (lower priority)
+    if let Some(enabled) = args.sona_enabled {
+        config = config.with_enabled(enabled);
+    }
+    if let Some(lambda) = args.ewc_lambda {
+        config = config.with_ewc_lambda(lambda);
+    }
+    if let Some(gamma) = args.ewc_gamma {
+        config = config.with_ewc_gamma(gamma);
+    }
+    if let Some(rank) = args.lora_rank {
+        config = config.with_lora_rank(rank);
+    }
+    if let Some(interval) = args.learning_interval_secs {
+        config = config.with_learning_interval(interval);
+    }
+
+    // Apply environment variables last (highest priority - overrides CLI)
+    if let Ok(val) = std::env::var("HARNESS_SONA_ENABLED") {
+        config.enabled = val == "1" || val.eq_ignore_ascii_case("true");
+    }
+    if let Ok(val) = std::env::var("HARNESS_EWC_LAMBDA") {
+        if let Ok(lambda) = val.parse::<f32>() {
+            config = config.with_ewc_lambda(lambda);
+        }
+    }
+    if let Ok(val) = std::env::var("HARNESS_EWC_GAMMA") {
+        if let Ok(gamma) = val.parse::<f32>() {
+            config = config.with_ewc_gamma(gamma);
+        }
+    }
+    if let Ok(val) = std::env::var("HARNESS_LORA_RANK") {
+        if let Ok(rank) = val.parse::<usize>() {
+            config = config.with_lora_rank(rank);
+        }
+    }
+    if let Ok(val) = std::env::var("HARNESS_LEARNING_INTERVAL") {
+        if let Ok(interval) = val.parse::<u64>() {
+            config = config.with_learning_interval(interval);
+        }
+    }
+
+    config
 }
 
 async fn ensure_session<R: Repository + 'static>(
@@ -286,11 +387,31 @@ async fn main() -> Result<()> {
 
     let process_manager = Arc::new(ProcessManager::new(orchestrator_config, repository.clone()));
 
-    let mut hive_state = HiveState::new(session.clone(), repository, process_manager);
+    // Build SONA configuration
+    let sona_config = build_sona_config(&args);
+
+    let mut hive_state = HiveState::with_sona_config(
+        session.clone(),
+        repository,
+        process_manager,
+        sona_config.clone(),
+    );
+
     if let Some(model) = args.embedding_model.as_deref() {
         let svc = create_ollama_embedding_service(model, args.ollama_url.as_deref())?;
         hive_state = hive_state.with_embedding_service(Arc::new(svc));
         tracing::info!(model = %model, "Embedding service enabled");
+    }
+
+    // Initialize SONA engine if enabled
+    if sona_config.enabled {
+        tracing::info!(
+            ewc_lambda = sona_config.ewc.lambda,
+            ewc_gamma = sona_config.ewc.gamma,
+            lora_rank = sona_config.base_lora.rank,
+            learning_interval = sona_config.learning_loop.interval_secs,
+            "SONA adaptive learning enabled"
+        );
     }
 
     tracing::info!(
