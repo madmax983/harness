@@ -543,20 +543,20 @@ impl<R: crate::Repository> TrajectoryRecorder<R> {
         let results: Vec<TrajectoryEvent> = buffer
             .iter()
             .filter(|e| {
-                if let Some(agent_id) = query.agent_id {
-                    if e.agent_id != agent_id {
-                        return false;
-                    }
+                if let Some(agent_id) = query.agent_id
+                    && e.agent_id != agent_id
+                {
+                    return false;
                 }
-                if let Some(kind) = query.trigger_kind {
-                    if e.trigger_kind != kind {
-                        return false;
-                    }
+                if let Some(kind) = query.trigger_kind
+                    && e.trigger_kind != kind
+                {
+                    return false;
                 }
-                if let Some(success) = query.success_filter {
-                    if e.success != success {
-                        return false;
-                    }
+                if let Some(success) = query.success_filter
+                    && e.success != success
+                {
+                    return false;
                 }
                 true
             })
@@ -572,12 +572,17 @@ impl<R: crate::Repository> TrajectoryRecorder<R> {
     /// Only persists events added since the last flush, using last_flushed_index
     /// to track progress. This is O(new events) instead of O(total events).
     pub async fn flush(&self) -> RepositoryResult<()> {
-        let buffer = self.buffer.read();
-        let start_index = self.last_flushed_index.load(std::sync::atomic::Ordering::Acquire);
-        let end_index = buffer.len();
+        // Clone the events we need to flush (while holding lock briefly)
+        let (events_to_flush, end_index) = {
+            let buffer = self.buffer.read();
+            let start_index = self.last_flushed_index.load(std::sync::atomic::Ordering::Acquire);
+            let events: Vec<RawEvent> = buffer.iter().skip(start_index).cloned().collect();
+            let end = buffer.len();
+            (events, end)
+        }; // Lock is dropped here
 
-        // Only persist new events since last flush
-        for raw in buffer.iter().skip(start_index).take(end_index - start_index) {
+        // Persist without holding the lock
+        for raw in &events_to_flush {
             self.repo.create_trajectory_event(raw).await?;
         }
 

@@ -270,25 +270,25 @@ fn build_sona_config(args: &Args) -> SonaConfig {
     if let Ok(val) = std::env::var("HARNESS_SONA_ENABLED") {
         config.enabled = val == "1" || val.eq_ignore_ascii_case("true");
     }
-    if let Ok(val) = std::env::var("HARNESS_EWC_LAMBDA") {
-        if let Ok(lambda) = val.parse::<f32>() {
-            config = config.with_ewc_lambda(lambda);
-        }
+    if let Ok(val) = std::env::var("HARNESS_EWC_LAMBDA")
+        && let Ok(lambda) = val.parse::<f32>()
+    {
+        config = config.with_ewc_lambda(lambda);
     }
-    if let Ok(val) = std::env::var("HARNESS_EWC_GAMMA") {
-        if let Ok(gamma) = val.parse::<f32>() {
-            config = config.with_ewc_gamma(gamma);
-        }
+    if let Ok(val) = std::env::var("HARNESS_EWC_GAMMA")
+        && let Ok(gamma) = val.parse::<f32>()
+    {
+        config = config.with_ewc_gamma(gamma);
     }
-    if let Ok(val) = std::env::var("HARNESS_LORA_RANK") {
-        if let Ok(rank) = val.parse::<usize>() {
-            config = config.with_lora_rank(rank);
-        }
+    if let Ok(val) = std::env::var("HARNESS_LORA_RANK")
+        && let Ok(rank) = val.parse::<usize>()
+    {
+        config = config.with_lora_rank(rank);
     }
-    if let Ok(val) = std::env::var("HARNESS_LEARNING_INTERVAL") {
-        if let Ok(interval) = val.parse::<u64>() {
-            config = config.with_learning_interval(interval);
-        }
+    if let Ok(val) = std::env::var("HARNESS_LEARNING_INTERVAL")
+        && let Ok(interval) = val.parse::<u64>()
+    {
+        config = config.with_learning_interval(interval);
     }
 
     config

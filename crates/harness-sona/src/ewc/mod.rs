@@ -326,18 +326,18 @@ impl EwcConsolidator {
         }
 
         // Handle dimension mismatch gracefully (return 0 rather than panic)
-        if let Some(dim) = self.dim {
-            if weights.len() != dim {
-                return 0.0;
-            }
+        if let Some(dim) = self.dim
+            && weights.len() != dim
+        {
+            return 0.0;
         }
 
         let half_lambda = self.config.lambda / 2.0;
         let mut total = 0.0f32;
 
         for snapshot in &self.snapshots {
-            for i in 0..weights.len() {
-                let delta = weights[i] - snapshot.optimal_weights[i];
+            for (i, &weight) in weights.iter().enumerate() {
+                let delta = weight - snapshot.optimal_weights[i];
                 total += snapshot.fisher_diag[i] * delta * delta;
             }
         }

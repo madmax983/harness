@@ -228,7 +228,7 @@ impl<R: Repository + 'static> FederatedCoordinator<R> {
         // Knowledge coverage: based on number of domains
         let domains: std::collections::HashSet<&str> =
             latest.deltas.iter().map(|d| d.domain.as_str()).collect();
-        let knowledge_coverage = (domains.len() as f64).min(1.0).max(0.1);
+        let knowledge_coverage = (domains.len() as f64).clamp(0.1, 1.0);
 
         // Task success rate: average success rate of participants
         let avg_success = if latest.deltas.is_empty() {

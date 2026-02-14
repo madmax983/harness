@@ -536,14 +536,14 @@ impl<R: Repository + 'static> HiveHandler<R> {
         };
 
         // Auto-transition "starting" → "active" on first MCP call
-        if let Ok(agent) = self.state.repository().get_agent(agent_id).await {
-            if agent.status == AgentStatus::Starting {
-                let _ = self
-                    .state
-                    .repository()
-                    .update_agent_status(agent_id, AgentStatus::Active)
-                    .await;
-            }
+        if let Ok(agent) = self.state.repository().get_agent(agent_id).await
+            && agent.status == AgentStatus::Starting
+        {
+            let _ = self
+                .state
+                .repository()
+                .update_agent_status(agent_id, AgentStatus::Active)
+                .await;
         }
 
         Ok(agent_id)
@@ -876,10 +876,10 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 }
 
                 // EWC++: Auto-consolidate on task completion if enabled
-                if let Some(engine) = self.state.sona_engine() {
-                    if engine.auto_consolidate_enabled() {
-                        self.auto_consolidate_ewc(task_id, agent_id).await;
-                    }
+                if let Some(engine) = self.state.sona_engine()
+                    && engine.auto_consolidate_enabled()
+                {
+                    self.auto_consolidate_ewc(task_id, agent_id).await;
                 }
             }
         }

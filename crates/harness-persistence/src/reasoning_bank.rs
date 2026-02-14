@@ -349,15 +349,15 @@ impl ReasoningBank {
 
         // Apply filters (task_type, role, success_only)
         scored.retain(|sp| {
-            if let Some(ref tt) = query.task_type {
-                if sp.pattern.task_type() != tt {
-                    return false;
-                }
+            if let Some(ref tt) = query.task_type
+                && sp.pattern.task_type() != tt
+            {
+                return false;
             }
-            if let Some(role) = query.role {
-                if sp.pattern.agent_role() != role {
-                    return false;
-                }
+            if let Some(role) = query.role
+                && sp.pattern.agent_role() != role
+            {
+                return false;
             }
             if query.success_only && !sp.pattern.success() {
                 return false;
@@ -385,15 +385,15 @@ fn apply_filters(patterns: Vec<TaskPattern>, query: &PatternQuery) -> Vec<TaskPa
     patterns
         .into_iter()
         .filter(|p| {
-            if let Some(ref tt) = query.task_type {
-                if p.task_type() != tt {
-                    return false;
-                }
+            if let Some(ref tt) = query.task_type
+                && p.task_type() != tt
+            {
+                return false;
             }
-            if let Some(role) = query.role {
-                if p.agent_role() != role {
-                    return false;
-                }
+            if let Some(role) = query.role
+                && p.agent_role() != role
+            {
+                return false;
             }
             if query.success_only && !p.success() {
                 return false;

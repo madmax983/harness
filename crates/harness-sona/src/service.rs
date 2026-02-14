@@ -295,9 +295,9 @@ impl<R: Repository + 'static> HiveLearningService<R> {
 
         // Knowledge coverage: from SONA domains or repo knowledge count
         let knowledge_coverage = if state.is_initialized {
-            (state.domains.len() as f64 * 0.3).min(1.0).max(0.1)
+            (state.domains.len() as f64 * 0.3).clamp(0.1, 1.0)
         } else if !repo_knowledge.is_empty() {
-            (repo_knowledge.len() as f64 * 0.1).min(1.0).max(0.1)
+            (repo_knowledge.len() as f64 * 0.1).clamp(0.1, 1.0)
         } else {
             0.1
         };
@@ -307,7 +307,7 @@ impl<R: Repository + 'static> HiveLearningService<R> {
             (state.rounds_completed as f64 * 0.2).min(1.0)
         } else if !repo_knowledge.is_empty() {
             // Use knowledge existence as a proxy for task completion
-            (repo_knowledge.len() as f64 * 0.15).min(1.0).max(0.1)
+            (repo_knowledge.len() as f64 * 0.15).clamp(0.1, 1.0)
         } else {
             0.1
         };
