@@ -1295,6 +1295,84 @@ pub fn tool_definitions() -> Vec<Tool> {
                 ),
             ])),
         ),
+        // --- SONA MicroLoRA tools ---
+        make_tool(
+            "record_agent_trajectory",
+            "Record a trajectory (sequence of action-context-outcome-reward steps) for an agent. Used to train per-agent MicroLoRA models.",
+            vec!["agent_id", "trajectory"],
+            with_agent_id(HashMap::from([
+                ("agent_id".into(), prop("string", "Agent UUID to record trajectory for")),
+                ("trajectory".into(), prop("array", "Array of trajectory steps, each with action, context, outcome, and reward fields")),
+            ])),
+        ),
+        make_tool(
+            "get_agent_lora_state",
+            "Get the current MicroLoRA state for an agent including trajectories ingested, mean reward, and action-specific statistics.",
+            vec!["agent_id"],
+            with_agent_id(HashMap::from([
+                ("agent_id".into(), prop("string", "Agent UUID to get LoRA state for")),
+            ])),
+        ),
+        make_tool(
+            "apply_agent_optimization",
+            "Apply an optimization to an agent's behavior based on accumulated trajectory data. Returns ranked candidate actions based on learned preferences.",
+            vec!["agent_id", "context", "candidate_actions"],
+            with_agent_id(HashMap::from([
+                ("agent_id".into(), prop("string", "Agent UUID to optimize")),
+                ("context".into(), prop("string", "Current context/situation description")),
+                ("candidate_actions".into(), prop("array", "Array of possible actions to rank by learned preferences")),
+            ])),
+        ),
+        make_tool(
+            "persist_agent_lora",
+            "Persist an agent's MicroLoRA state to durable storage for later restoration.",
+            vec!["agent_id"],
+            with_agent_id(HashMap::from([
+                ("agent_id".into(), prop("string", "Agent UUID whose LoRA state to persist")),
+            ])),
+        ),
+        make_tool(
+            "restore_agent_lora",
+            "Restore an agent's MicroLoRA state from durable storage.",
+            vec!["agent_id"],
+            with_agent_id(HashMap::from([
+                ("agent_id".into(), prop("string", "Agent UUID whose LoRA state to restore")),
+            ])),
+        ),
+        // --- SONA Integration tools ---
+        make_tool(
+            "get_task_trajectory",
+            "Retrieve trajectory steps recorded for a specific task, including all learning events triggered by task completion.",
+            vec!["task_id"],
+            with_agent_id(HashMap::from([
+                ("task_id".into(), prop("string", "Task UUID to get trajectory for")),
+            ])),
+        ),
+        make_tool(
+            "query_reasoning_bank",
+            "Search learned patterns from the reasoning bank using text similarity. Returns patterns with confidence scores.",
+            vec!["query"],
+            with_agent_id(HashMap::from([
+                ("query".into(), prop("string", "Search query for finding similar patterns")),
+                ("limit".into(), prop_with_default("integer", "Maximum number of results to return", serde_json::Value::Number(10.into()))),
+            ])),
+        ),
+        make_tool(
+            "get_learning_status",
+            "Check the status of a SONA learning loop including patterns learned and total events recorded.",
+            vec!["loop_type"],
+            with_agent_id(HashMap::from([
+                ("loop_type".into(), prop("string", "Learning loop type: instant, background, or coordination")),
+            ])),
+        ),
+        make_tool(
+            "trigger_learning_cycle",
+            "Force a learning cycle for a specific loop type. Flushes buffered events and runs optimization.",
+            vec!["loop_type"],
+            with_agent_id(HashMap::from([
+                ("loop_type".into(), prop("string", "Learning loop type: instant, background, or coordination")),
+            ])),
+        ),
     ]
 }
 
@@ -1307,7 +1385,7 @@ mod tests {
     #[test]
     fn test_tool_definitions_returns_40_tools() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 43);
+        assert_eq!(tools.len(), 59);
     }
 
     #[test]

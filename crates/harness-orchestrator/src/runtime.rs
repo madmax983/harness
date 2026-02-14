@@ -18,7 +18,7 @@ pub enum AgentRuntimeKind {
     Claude,
     /// OpenAI Codex CLI invocation (`exec`).
     Codex,
-    /// Google Gemini CLI invocation (`-p` + `-o json`).
+    /// Google Gemini CLI invocation (`-p` + `--output-format json` + `--yolo`).
     Gemini,
     /// Fallback for unknown CLIs that are Claude-compatible.
     ClaudeCompatible,
@@ -167,8 +167,9 @@ impl AgentRuntime for GeminiRuntime {
             vec![
                 "-p".to_string(),
                 prompt.to_string(),
-                "-o".to_string(),
+                "--output-format".to_string(),
                 "json".to_string(),
+                "--yolo".to_string(), // Auto-approve actions for autonomous operation
             ],
         ))
     }
@@ -256,8 +257,9 @@ mod tests {
             vec![
                 "-p".to_string(),
                 "do work".to_string(),
-                "-o".to_string(),
+                "--output-format".to_string(),
                 "json".to_string(),
+                "--yolo".to_string(),
             ]
         );
     }

@@ -272,4 +272,20 @@ pub trait Repository: Send + Sync {
         &self,
         agent_id: AgentId,
     ) -> RepositoryResult<aletheiadb::core::id::NodeId>;
+
+    // === Trajectory operations ===
+
+    /// Create a trajectory event in persistent storage.
+    /// Stores the raw event data (without materialized steps for efficiency).
+    async fn create_trajectory_event(
+        &self,
+        event: &crate::trajectory::RawEvent,
+    ) -> RepositoryResult<()>;
+
+    /// Get all trajectory events for a session.
+    /// Returns raw events (steps are materialized on-demand by TrajectoryRecorder).
+    async fn get_trajectory_events(
+        &self,
+        session_id: SessionId,
+    ) -> RepositoryResult<Vec<crate::trajectory::RawEvent>>;
 }

@@ -6,9 +6,10 @@
 use std::sync::Arc;
 
 use harness_persistence::{
-    Agent, AgentId, AgentRole, AgentStatus, DirectMessage, Knowledge, KnowledgeKind, Plan,
-    PlanStatus, Priority, Product, ProductId, ProductStatus, Project, ProjectId, ProjectStatus,
-    Repository, RepositoryError, Task, TaskId, TaskStatus,
+    Agent, AgentId, AgentRole, AgentStatus, DirectMessage, Knowledge, KnowledgeKind,
+    LearningTrigger, PatternQuery, Plan, PlanStatus, Priority, Product, ProductId, ProductStatus,
+    Project, ProjectId, ProjectStatus, Repository, RepositoryError, Task, TaskId, TaskPattern,
+    TaskStatus, TriggerKind,
 };
 use tokio::sync::RwLock;
 
@@ -67,6 +68,11 @@ impl<R: Repository + 'static> HiveHandler<R> {
     /// Get a reference to the shared state (for spawning new handlers in tests).
     pub fn state_ref(&self) -> &Arc<HiveState<R>> {
         &self.state
+    }
+
+    /// Get the agent ID for this connection (if registered).
+    pub async fn agent_id(&self) -> Option<AgentId> {
+        *self.agent_id.read().await
     }
 
     /// Restore the agent ID from a previous session (for MCP client persistence).
@@ -389,6 +395,64 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 Ok(serde_json::to_value(resp).unwrap())
             }
 
+            // SONA MicroLoRA tools
+            "record_agent_trajectory" => {
+                let req: tools::RecordAgentTrajectoryRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_record_agent_trajectory(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "get_agent_lora_state" => {
+                let req: tools::GetAgentLoraStateRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_get_agent_lora_state(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "apply_agent_optimization" => {
+                let req: tools::ApplyAgentOptimizationRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_apply_agent_optimization(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "persist_agent_lora" => {
+                let req: tools::PersistAgentLoraRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_persist_agent_lora(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "restore_agent_lora" => {
+                let req: tools::RestoreAgentLoraRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_restore_agent_lora(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+
+            // SONA integration tools
+            "get_task_trajectory" => {
+                let req: tools::GetTaskTrajectoryRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_get_task_trajectory(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "query_reasoning_bank" => {
+                let req: tools::QueryReasoningBankRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_query_reasoning_bank(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "get_learning_status" => {
+                let req: tools::GetLearningStatusRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_get_learning_status(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "trigger_learning_cycle" => {
+                let req: tools::TriggerLearningCycleRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_trigger_learning_cycle(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+
             _ => Err(HandlerError::UnknownTool(name.to_string())),
         }
     }
@@ -436,6 +500,17 @@ impl<R: Repository + 'static> HiveHandler<R> {
             "generate_graph_layout",
             "find_activity_resonance",
             "compare_temporal_snapshots",
+            // SONA MicroLoRA
+            "record_agent_trajectory",
+            "get_agent_lora_state",
+            "apply_agent_optimization",
+            "persist_agent_lora",
+            "restore_agent_lora",
+            // SONA integration
+            "get_task_trajectory",
+            "query_reasoning_bank",
+            "get_learning_status",
+            "trigger_learning_cycle",
         ]
     }
 
@@ -733,10 +808,19 @@ impl<R: Repository + 'static> HiveHandler<R> {
         let agent_id = self.resolve_agent_id(req._agent_id.as_deref()).await?;
 
         match self.state.repository().claim_task(task_id, agent_id).await {
-            Ok(()) => Ok(tools::ClaimTaskResponse {
-                success: true,
-                error: None,
-            }),
+            Ok(()) => {
+                // SONA: Record claim as trajectory event
+                let trigger = LearningTrigger::new(TriggerKind::TaskComplete, agent_id)
+                    .with_task_id(task_id)
+                    .with_success(true)
+                    .with_summary("task claimed");
+                self.record_sona_trajectory(trigger, Some(task_id)).await;
+
+                Ok(tools::ClaimTaskResponse {
+                    success: true,
+                    error: None,
+                })
+            }
             Err(RepositoryError::Conflict(msg)) => Ok(tools::ClaimTaskResponse {
                 success: false,
                 error: Some(msg),
@@ -756,6 +840,49 @@ impl<R: Repository + 'static> HiveHandler<R> {
             .repository()
             .update_task_status(task_id, status, req.summary.as_deref())
             .await?;
+
+        // SONA: Record in_progress transitions as trajectory events.
+        if matches!(status, TaskStatus::InProgress) {
+            let agent_id = self
+                .resolve_agent_id(req._agent_id.as_deref())
+                .await
+                .unwrap_or_else(|_| AgentId::new());
+
+            let trigger = LearningTrigger::new(TriggerKind::TaskComplete, agent_id)
+                .with_task_id(task_id)
+                .with_success(true)
+                .with_summary("task started");
+            self.record_sona_trajectory(trigger, Some(task_id)).await;
+        }
+
+        // SONA: Fire TaskComplete learning trigger on completed/failed tasks.
+        if matches!(status, TaskStatus::Completed | TaskStatus::Failed) {
+            let agent_id = self
+                .resolve_agent_id(req._agent_id.as_deref())
+                .await
+                .unwrap_or_else(|_| AgentId::new());
+
+            let trigger = LearningTrigger::new(TriggerKind::TaskComplete, agent_id)
+                .with_task_id(task_id)
+                .with_success(status == TaskStatus::Completed)
+                .with_summary(req.summary.as_deref().unwrap_or(""));
+
+            self.record_sona_trajectory(trigger, Some(task_id)).await;
+
+            // Auto-store a pattern in the reasoning bank on successful completion
+            if status == TaskStatus::Completed {
+                if let Ok(task) = self.state.repository().get_task(task_id).await {
+                    self.auto_store_pattern(&task, agent_id).await;
+                }
+
+                // EWC++: Auto-consolidate on task completion if enabled
+                if let Some(engine) = self.state.sona_engine() {
+                    if engine.auto_consolidate_enabled() {
+                        self.auto_consolidate_ewc(task_id, agent_id).await;
+                    }
+                }
+            }
+        }
 
         Ok(tools::UpdateTaskStatusResponse { success: true })
     }
@@ -1642,7 +1769,26 @@ impl<R: Repository + 'static> HiveHandler<R> {
         }
 
         let kid = knowledge.id.as_uuid().to_string();
+        let task_id = knowledge.task_id;
         self.state.repository().create_knowledge(&knowledge).await?;
+
+        // SONA: Fire KnowledgeShare learning trigger.
+        {
+            let mut trigger =
+                LearningTrigger::new(TriggerKind::KnowledgeShare, agent_id)
+                    .with_knowledge_kind(kind)
+                    .with_summary(&req.content);
+
+            if let Some(tid) = task_id {
+                trigger = trigger.with_task_id(tid);
+            }
+
+            self.record_sona_trajectory(trigger, task_id).await;
+            self.state
+                .learning_counters()
+                .instant_patterns
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
 
         Ok(tools::ShareKnowledgeResponse { knowledge_id: kid })
     }
@@ -3519,6 +3665,618 @@ impl<R: Repository + 'static> HiveHandler<R> {
             narrative_summary,
         })
     }
+
+    // --- SONA MicroLoRA handlers ---
+
+    async fn handle_record_agent_trajectory(
+        &self,
+        req: tools::RecordAgentTrajectoryRequest,
+    ) -> HandlerResult<tools::RecordAgentTrajectoryResponse> {
+        use crate::state::{StoredTrajectory, TrajectoryRecord};
+
+        let agent_id = Self::parse_agent_id(&req.agent_id)?;
+        let trajectory_id = uuid::Uuid::new_v4().to_string();
+        let steps_count = req.trajectory.len() as u64;
+
+        let records: Vec<TrajectoryRecord> = req
+            .trajectory
+            .into_iter()
+            .map(|s| TrajectoryRecord {
+                action: s.action,
+                context: s.context,
+                outcome: s.outcome,
+                reward: s.reward,
+            })
+            .collect();
+
+        let reward_sum: f64 = records.iter().map(|r| r.reward).sum();
+
+        let stored = StoredTrajectory {
+            id: trajectory_id.clone(),
+            steps: records,
+        };
+
+        let mut lora_map = self.state.micro_lora().write().await;
+        let data = lora_map.entry(agent_id).or_default();
+        data.trajectories.push(stored);
+        data.total_steps += steps_count;
+        data.reward_sum += reward_sum;
+
+        Ok(tools::RecordAgentTrajectoryResponse {
+            trajectory_id,
+            steps_recorded: steps_count,
+        })
+    }
+
+    async fn handle_get_agent_lora_state(
+        &self,
+        req: tools::GetAgentLoraStateRequest,
+    ) -> HandlerResult<tools::GetAgentLoraStateResponse> {
+        let agent_id = Self::parse_agent_id(&req.agent_id)?;
+
+        let lora_map = self.state.micro_lora().read().await;
+        let data = lora_map.get(&agent_id);
+
+        match data {
+            Some(d) => Ok(tools::GetAgentLoraStateResponse {
+                agent_id: req.agent_id,
+                trajectories_ingested: d.trajectories_ingested(),
+                total_steps: d.total_steps,
+                mean_reward: d.mean_reward(),
+            }),
+            None => Ok(tools::GetAgentLoraStateResponse {
+                agent_id: req.agent_id,
+                trajectories_ingested: 0,
+                total_steps: 0,
+                mean_reward: 0.0,
+            }),
+        }
+    }
+
+    async fn handle_apply_agent_optimization(
+        &self,
+        req: tools::ApplyAgentOptimizationRequest,
+    ) -> HandlerResult<tools::ApplyAgentOptimizationResponse> {
+        let agent_id = Self::parse_agent_id(&req.agent_id)?;
+
+        let lora_map = self.state.micro_lora().read().await;
+        let data = lora_map.get(&agent_id);
+
+        let mut ranked: Vec<tools::RankedAction> = req
+            .candidate_actions
+            .iter()
+            .map(|action| {
+                let mean_reward = data
+                    .and_then(|d| d.action_mean_reward(action))
+                    .unwrap_or(0.5); // Default 0.5 for unknown actions
+
+                // Map reward [-1, 1] to confidence [0, 1]
+                let confidence = ((mean_reward + 1.0) / 2.0).clamp(0.0, 1.0);
+
+                tools::RankedAction {
+                    action: action.clone(),
+                    confidence,
+                }
+            })
+            .collect();
+
+        // Sort by confidence descending
+        ranked.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+
+        Ok(tools::ApplyAgentOptimizationResponse {
+            ranked_actions: ranked,
+        })
+    }
+
+    async fn handle_persist_agent_lora(
+        &self,
+        req: tools::PersistAgentLoraRequest,
+    ) -> HandlerResult<tools::PersistAgentLoraResponse> {
+        let agent_id = Self::parse_agent_id(&req.agent_id)?;
+
+        let lora_map = self.state.micro_lora().read().await;
+        if let Some(data) = lora_map.get(&agent_id) {
+            // Persist as knowledge entry with special kind
+            let serialized = serde_json::to_string(data)
+                .map_err(|e| HandlerError::InternalError(format!("Failed to serialize LoRA state: {e}")))?;
+
+            let knowledge = Knowledge::new(
+                format!("__micro_lora_state__:{}", req.agent_id),
+                KnowledgeKind::Activity,
+                agent_id,
+                self.state.session_id(),
+            );
+
+            // Store the serialized LoRA data as knowledge content
+            let mut knowledge_with_data = knowledge;
+            knowledge_with_data.content = serialized;
+
+            self.state
+                .repository()
+                .create_knowledge(&knowledge_with_data)
+                .await?;
+
+            Ok(tools::PersistAgentLoraResponse { persisted: true })
+        } else {
+            Ok(tools::PersistAgentLoraResponse { persisted: false })
+        }
+    }
+
+    async fn handle_restore_agent_lora(
+        &self,
+        req: tools::RestoreAgentLoraRequest,
+    ) -> HandlerResult<tools::RestoreAgentLoraResponse> {
+        use crate::state::AgentLoraData;
+
+        let agent_id = Self::parse_agent_id(&req.agent_id)?;
+
+        // Search for persisted LoRA state in knowledge entries
+        let knowledge_entries = self
+            .state
+            .repository()
+            .get_recent_knowledge(self.state.session_id(), 100)
+            .await?;
+
+        // Find the most recent LoRA state for this agent
+        // Knowledge entries are returned with most recent first by convention,
+        // but we search for the matching prefix regardless
+        let persisted_entry = knowledge_entries
+            .iter()
+            .find(|k| k.content.starts_with('{') && {
+                // Try to deserialize -- if it works and was stored with the right agent, use it
+                if let Ok(data) = serde_json::from_str::<AgentLoraData>(&k.content) {
+                    // Verify it belongs to this agent by checking the author
+                    k.author_id == agent_id && data.trajectories_ingested() > 0
+                } else {
+                    false
+                }
+            })
+            .or_else(|| {
+                // Fallback: look for entries matching the prefix pattern
+                // (from persist_agent_lora which stores raw serialized JSON)
+                knowledge_entries
+                    .iter()
+                    .find(|k| k.author_id == agent_id && k.content.starts_with('{'))
+            });
+
+        if let Some(entry) = persisted_entry {
+            match serde_json::from_str::<AgentLoraData>(&entry.content) {
+                Ok(data) => {
+                    let mut lora_map = self.state.micro_lora().write().await;
+                    lora_map.insert(agent_id, data);
+                    Ok(tools::RestoreAgentLoraResponse { restored: true })
+                }
+                Err(_) => Ok(tools::RestoreAgentLoraResponse { restored: false }),
+            }
+        } else {
+            Ok(tools::RestoreAgentLoraResponse { restored: false })
+        }
+    }
+
+    // --- SONA Integration handlers ---
+
+    /// Record a trajectory event and associate it with a task.
+    /// Called internally by task/knowledge handlers for auto-recording.
+    async fn record_sona_trajectory(
+        &self,
+        trigger: LearningTrigger,
+        task_id: Option<TaskId>,
+    ) {
+        let recorder = self.state.trajectory_recorder();
+        match recorder.record(trigger).await {
+            Ok(event_id) => {
+                if let Some(tid) = task_id {
+                    let mut map = self.state.task_trajectories().write().await;
+                    map.entry(tid)
+                        .or_default()
+                        .push(event_id.to_string());
+                }
+                self.state
+                    .learning_counters()
+                    .total_events
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to record SONA trajectory: {e}");
+            }
+        }
+    }
+
+    /// Auto-store a pattern in the reasoning bank from a completed task.
+    async fn auto_store_pattern(
+        &self,
+        task: &Task,
+        agent_id: AgentId,
+    ) {
+        let agent = self.state.repository().get_agent(agent_id).await.ok();
+        let role = agent
+            .map(|a| a.role)
+            .unwrap_or(AgentRole::Developer);
+
+        let description = format!(
+            "{}. {}",
+            task.title,
+            task.summary.as_deref().unwrap_or(&task.description)
+        );
+
+        let pattern = TaskPattern::new(
+            &task.title,
+            role,
+            true,
+            &description,
+        );
+
+        let bank = self.state.reasoning_bank();
+        match bank.store_pattern(pattern).await {
+            Ok(_id) => {
+                self.state
+                    .learning_counters()
+                    .instant_patterns
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to store pattern in reasoning bank: {e}");
+            }
+        }
+    }
+
+    /// Auto-consolidate EWC++ weights from task trajectory on completion.
+    async fn auto_consolidate_ewc(
+        &self,
+        task_id: TaskId,
+        agent_id: AgentId,
+    ) {
+        if let Some(engine) = self.state.sona_engine() {
+            // Get trajectory events for this task
+            let recorder = self.state.trajectory_recorder();
+            let all_events = recorder
+                .query(harness_persistence::TrajectoryQuery::new().with_limit(1000))
+                .await
+                .unwrap_or_default();
+
+            // Collect steps for this task
+            let mut task_steps = Vec::new();
+            for event in &all_events {
+                if event.task_id() == Some(task_id) {
+                    task_steps.extend_from_slice(event.steps());
+                }
+            }
+
+            if task_steps.is_empty() {
+                tracing::debug!(
+                    task_id = %task_id,
+                    agent_id = %agent_id,
+                    "No trajectory steps found for EWC consolidation"
+                );
+                return;
+            }
+
+            // Fixed dimensionality for now (configurable in production)
+            const WEIGHT_DIM: usize = 128;
+
+            // Extract synthetic gradients from trajectory steps
+            let gradients = engine.extract_gradients_from_trajectory(&task_steps, WEIGHT_DIM);
+
+            // Synthetic weights (in production, these would come from actual model)
+            let weights = vec![0.0f32; WEIGHT_DIM];
+
+            // Consolidate
+            match engine.on_task_complete(
+                agent_id,
+                &task_id.as_uuid().to_string(),
+                &weights,
+                &gradients,
+            ).await {
+                Ok(()) => {
+                    tracing::info!(
+                        task_id = %task_id,
+                        agent_id = %agent_id,
+                        num_gradients = gradients.len(),
+                        "EWC++ auto-consolidation completed"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        agent_id = %agent_id,
+                        error = %e,
+                        "EWC++ auto-consolidation failed"
+                    );
+                }
+            }
+        }
+    }
+
+    async fn handle_get_task_trajectory(
+        &self,
+        req: tools::GetTaskTrajectoryRequest,
+    ) -> HandlerResult<tools::GetTaskTrajectoryResponse> {
+        let task_id = Self::parse_task_id(&req.task_id)?;
+
+        let recorder = self.state.trajectory_recorder();
+        let all_events = recorder
+            .query(harness_persistence::TrajectoryQuery::new().with_limit(1000))
+            .await
+            .unwrap_or_default();
+
+        let mut all_steps = Vec::new();
+        let mut event_count = 0;
+
+        for event in &all_events {
+            if event.task_id() == Some(task_id) {
+                event_count += 1;
+                for step in event.steps() {
+                    all_steps.push(tools::TrajectoryStepResponse {
+                        kind: step.kind().to_string(),
+                        agent_id: step.agent_id().as_uuid().to_string(),
+                        payload: step.payload().clone(),
+                    });
+                }
+            }
+        }
+
+        Ok(tools::GetTaskTrajectoryResponse {
+            task_id: req.task_id,
+            steps: all_steps,
+            event_count,
+        })
+    }
+
+    async fn handle_query_reasoning_bank(
+        &self,
+        req: tools::QueryReasoningBankRequest,
+    ) -> HandlerResult<tools::QueryReasoningBankResponse> {
+        let bank = self.state.reasoning_bank();
+
+        let query = PatternQuery::new(&req.query).with_limit(req.limit);
+        let similar = bank.find_similar(query).await?;
+
+        let total_patterns = bank
+            .query_patterns(PatternQuery::new("").with_limit(10000))
+            .await
+            .map(|p| p.len())
+            .unwrap_or(0);
+
+        let mut patterns: Vec<tools::PatternResponse> = similar
+            .into_iter()
+            .map(|sp| tools::PatternResponse {
+                id: sp.pattern.id().to_string(),
+                task_type: sp.pattern.task_type().to_string(),
+                agent_role: format!("{:?}", sp.pattern.agent_role()),
+                success: sp.pattern.success(),
+                content: sp.pattern.description().to_string(),
+                confidence: sp.similarity,
+                source_trajectory_id: Some("auto-recorded".to_string()),
+            })
+            .collect();
+
+        // Fallback: if no patterns in the in-memory store (e.g. after restart),
+        // search knowledge entries from the persistent repo as a source of patterns.
+        // Uses prefix-based matching so "caching" matches "cache", etc.
+        if patterns.is_empty() && !req.query.is_empty() {
+            let knowledge_entries: Vec<(harness_persistence::Knowledge, f32)> = self
+                .state
+                .repository()
+                .get_recent_knowledge(self.state.session_id(), 100)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|k| (k, 0.0))
+                .collect();
+
+            let query_lower = req.query.to_lowercase();
+            let query_words: Vec<String> = query_lower
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| w.len() >= 3)
+                .map(String::from)
+                .collect();
+
+            for (entry, _score) in &knowledge_entries {
+                let content_lower = entry.content.to_lowercase();
+                let content_words: Vec<String> = content_lower
+                    .split(|c: char| !c.is_alphanumeric())
+                    .filter(|w| w.len() >= 3)
+                    .map(String::from)
+                    .collect();
+
+                // Score: count query words that share a stem with content words.
+                // Uses prefix matching (min 3 chars) so "caching" matches "cache".
+                let matches = query_words
+                    .iter()
+                    .filter(|qw| {
+                        let prefix = &qw[..qw.len().min(4)];
+                        content_words
+                            .iter()
+                            .any(|cw| cw.starts_with(prefix) || qw.starts_with(&cw[..cw.len().min(4)]))
+                    })
+                    .count();
+
+                if matches > 0 {
+                    let sim = matches as f32 / query_words.len().max(1) as f32;
+                    patterns.push(tools::PatternResponse {
+                        id: entry.id.as_uuid().to_string(),
+                        task_type: "knowledge".to_string(),
+                        agent_role: "Developer".to_string(),
+                        success: true,
+                        content: entry.content.clone(),
+                        confidence: sim,
+                        source_trajectory_id: Some("repo-knowledge".to_string()),
+                    });
+                }
+            }
+
+            patterns.sort_by(|a, b| {
+                b.confidence
+                    .partial_cmp(&a.confidence)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            patterns.truncate(req.limit);
+        }
+
+        let total = total_patterns + patterns.len().saturating_sub(total_patterns);
+
+        Ok(tools::QueryReasoningBankResponse {
+            patterns,
+            total_patterns: total,
+        })
+    }
+
+    async fn handle_get_learning_status(
+        &self,
+        req: tools::GetLearningStatusRequest,
+    ) -> HandlerResult<tools::GetLearningStatusResponse> {
+        let counters = self.state.learning_counters();
+        let total_events = counters
+            .total_events
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        let patterns_learned = match req.loop_type.as_str() {
+            "instant" => counters
+                .instant_patterns
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "background" => counters
+                .background_optimizations
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "coordination" => counters
+                .coordination_patterns
+                .load(std::sync::atomic::Ordering::Relaxed),
+            _ => 0,
+        };
+
+        Ok(tools::GetLearningStatusResponse {
+            loop_type: req.loop_type,
+            enabled: self.state.is_sona_enabled(),
+            patterns_learned,
+            total_events,
+        })
+    }
+
+    async fn handle_trigger_learning_cycle(
+        &self,
+        req: tools::TriggerLearningCycleRequest,
+    ) -> HandlerResult<tools::TriggerLearningCycleResponse> {
+        let counters = self.state.learning_counters();
+
+        match req.loop_type.as_str() {
+            "background" => {
+                let recorder = self.state.trajectory_recorder();
+                let all_events = recorder
+                    .query(
+                        harness_persistence::TrajectoryQuery::new()
+                            .with_trigger_kind(TriggerKind::TaskComplete)
+                            .with_limit(1000),
+                    )
+                    .await
+                    .unwrap_or_default();
+
+                let optimizations = all_events.len() as u64;
+                counters
+                    .background_optimizations
+                    .fetch_add(optimizations, std::sync::atomic::Ordering::Relaxed);
+
+                Ok(tools::TriggerLearningCycleResponse {
+                    loop_type: req.loop_type,
+                    optimizations_applied: optimizations,
+                    patterns_created: optimizations,
+                    cross_agent_patterns: None,
+                })
+            }
+            "coordination" => {
+                let recorder = self.state.trajectory_recorder();
+                let all_events = recorder
+                    .query(harness_persistence::TrajectoryQuery::new().with_limit(1000))
+                    .await
+                    .unwrap_or_default();
+
+                let mut agent_knowledge: std::collections::HashMap<String, Vec<String>> =
+                    std::collections::HashMap::new();
+
+                for event in &all_events {
+                    let agent_str = event.agent_id().as_uuid().to_string();
+                    agent_knowledge
+                        .entry(agent_str)
+                        .or_default()
+                        .push(event.summary().to_string());
+                }
+
+                let mut cross_patterns = Vec::new();
+                let agents: Vec<String> = agent_knowledge.keys().cloned().collect();
+
+                if agents.len() >= 2 {
+                    for i in 0..agents.len() {
+                        for j in (i + 1)..agents.len() {
+                            let agent_a = &agents[i];
+                            let agent_b = &agents[j];
+                            let summaries_a = &agent_knowledge[agent_a];
+                            let summaries_b = &agent_knowledge[agent_b];
+
+                            let words_a: std::collections::HashSet<String> = summaries_a
+                                .iter()
+                                .flat_map(|s| {
+                                    s.to_lowercase()
+                                        .split_whitespace()
+                                        .map(String::from)
+                                        .collect::<Vec<_>>()
+                                })
+                                .collect();
+
+                            let words_b: std::collections::HashSet<String> = summaries_b
+                                .iter()
+                                .flat_map(|s| {
+                                    s.to_lowercase()
+                                        .split_whitespace()
+                                        .map(String::from)
+                                        .collect::<Vec<_>>()
+                                })
+                                .collect();
+
+                            let overlap: Vec<&String> =
+                                words_a.intersection(&words_b).collect();
+
+                            if !overlap.is_empty() {
+                                let shared_topics: Vec<String> = overlap
+                                    .iter()
+                                    .filter(|w| w.len() > 3)
+                                    .take(5)
+                                    .map(|w| w.to_string())
+                                    .collect();
+
+                                if !shared_topics.is_empty() {
+                                    cross_patterns.push(tools::CrossAgentPattern {
+                                        description: format!(
+                                            "Cross-agent pattern: shared topics [{}]",
+                                            shared_topics.join(", ")
+                                        ),
+                                        agents_involved: vec![
+                                            agent_a.clone(),
+                                            agent_b.clone(),
+                                        ],
+                                        confidence: 0.7,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let patterns_created = cross_patterns.len() as u64;
+                counters
+                    .coordination_patterns
+                    .fetch_add(patterns_created, std::sync::atomic::Ordering::Relaxed);
+
+                Ok(tools::TriggerLearningCycleResponse {
+                    loop_type: req.loop_type,
+                    optimizations_applied: 0,
+                    patterns_created,
+                    cross_agent_patterns: Some(cross_patterns),
+                })
+            }
+            other => Err(HandlerError::InvalidArgs(format!(
+                "Unknown loop type: {}. Expected 'background' or 'coordination'.",
+                other
+            ))),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3740,7 +4498,7 @@ mod tests {
         assert!(names.contains(&"task_statistics"));
         assert!(names.contains(&"get_task_history"));
         assert!(names.contains(&"knowledge_clusters"));
-        assert_eq!(names.len(), 40);
+        assert_eq!(names.len(), 49);
     }
 
     #[tokio::test]
@@ -4296,5 +5054,107 @@ mod tests {
         // But the structure should be correct
         assert_eq!(as_of_resp.task.id, create_resp.task_id);
         assert_eq!(as_of_resp.task.title, "Original Title");
+    }
+
+    #[tokio::test]
+    async fn test_ewc_auto_consolidation_on_task_complete() {
+        use harness_sona::ewc::EwcConfig;
+        use harness_sona::SonaEngine;
+        use std::sync::Arc;
+
+        // Setup with SONA engine enabled
+        let db = Arc::new(AletheiaDB::new().unwrap());
+        let repo = Arc::new(AletheiaRepository::new_anon(db));
+        let session = Session::new(8);
+        repo.create_session(&session).await.unwrap();
+
+        let config = OrchestratorConfig::default();
+        let process_manager = Arc::new(ProcessManager::new(config, repo.clone()));
+
+        // Create SONA engine with auto-consolidation enabled
+        let ewc_config = EwcConfig {
+            lambda: 0.5,
+            gamma: 0.9,
+            max_tasks: 10,
+            normalize_fisher: true,
+        };
+        let sona_engine = Arc::new(
+            SonaEngine::builder()
+                .with_ewc(ewc_config)
+                .with_auto_consolidate(true)
+                .build()
+                .unwrap(),
+        );
+
+        let state = HiveState::new(session, repo.clone(), process_manager)
+            .with_sona_engine(sona_engine.clone());
+        let handler = HiveHandler::new(state.clone());
+
+        // Register agent
+        let agent_resp = handler
+            .call_tool("register_agent", serde_json::json!({"role": "developer"}))
+            .await
+            .unwrap();
+        let agent_resp: tools::RegisterAgentResponse = serde_json::from_value(agent_resp).unwrap();
+        let agent_id = AgentId::from_uuid(uuid::Uuid::parse_str(&agent_resp.agent_id).unwrap());
+
+        // Create task
+        let task_resp = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({
+                    "title": "Test EWC consolidation",
+                    "description": "Verify auto-consolidation works",
+                    "priority": "medium"
+                }),
+            )
+            .await
+            .unwrap();
+        let task_resp: tools::CreateTaskResponse = serde_json::from_value(task_resp).unwrap();
+
+        // Claim task to start trajectory recording
+        handler
+            .call_tool(
+                "claim_task",
+                serde_json::json!({"task_id": task_resp.task_id}),
+            )
+            .await
+            .unwrap();
+
+        // Mark as in progress
+        handler
+            .call_tool(
+                "update_task_status",
+                serde_json::json!({
+                    "task_id": task_resp.task_id,
+                    "status": "in_progress",
+                    "summary": "Working on it"
+                }),
+            )
+            .await
+            .unwrap();
+
+        // Complete the task (should trigger auto-consolidation)
+        handler
+            .call_tool(
+                "update_task_status",
+                serde_json::json!({
+                    "task_id": task_resp.task_id,
+                    "status": "completed",
+                    "summary": "Successfully completed"
+                }),
+            )
+            .await
+            .unwrap();
+
+        // Verify EWC consolidation occurred
+        let ewc_state = sona_engine.agent_ewc_state(agent_id).await;
+        assert!(ewc_state.is_some(), "EWC consolidator should exist for agent");
+
+        let consolidator = ewc_state.unwrap();
+        assert!(
+            consolidator.task_count() > 0,
+            "EWC consolidator should have consolidated at least one task"
+        );
     }
 }

@@ -6,6 +6,11 @@ pub mod messages;
 pub mod planning;
 pub mod tasks;
 
+// SONA MicroLoRA
+pub mod micro_lora;
+// SONA integration (trajectory, reasoning bank, learning loops)
+pub mod sona;
+
 // Nova experimental features
 pub mod activity_resonance;
 pub mod concept_algebra;
@@ -25,6 +30,11 @@ pub use knowledge::*;
 pub use messages::*;
 pub use planning::*;
 pub use tasks::*;
+
+// SONA MicroLoRA
+pub use micro_lora::*;
+// SONA integration
+pub use sona::*;
 
 // Nova experimental features
 pub use activity_resonance::*;

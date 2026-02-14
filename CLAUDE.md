@@ -45,12 +45,13 @@ INFO harness_mcp::server: Graceful shutdown complete - session state persisted v
 
 ### Connecting from Claude Code
 
-The harness MCP server provides 21 tools across 5 categories:
+The harness MCP server provides 25 tools across 6 categories:
 - **Task Management** (7 tools): create, list, claim, update, assign, get context
 - **Knowledge Sharing** (3 tools): share, ask hive, fish (associative retrieval)
 - **Agent Management** (6 tools): register, list, status, spawn, disconnect
 - **Messaging** (3 tools): send DM, get messages, get thread messages
 - **Planning** (6 tools): products, projects, plans (hierarchical planning)
+- **SONA Learning** (4 tools): get trajectory, query patterns, learning status, trigger cycle
 
 ## Core Concepts
 
@@ -279,6 +280,409 @@ list_plans({
 })
 ```
 
+## 6. SONA Learning System
+
+SONA (Self-Optimizing Neural Architecture) provides adaptive learning capabilities for the harness hive mind. Agents learn from experience, share knowledge through collective learning, and avoid catastrophic forgetting of previous task knowledge.
+
+### Architecture Overview
+
+SONA combines three complementary learning mechanisms:
+
+- **MicroLoRA**: Per-agent adaptation based on personal experience
+- **BaseLoRA**: Collective hive learning aggregated from all agents
+- **EWC++**: Catastrophic forgetting prevention using Fisher Information Matrix
+
+All learning is driven by **trajectory events** recorded during hive activities with <100ns overhead.
+
+### MCP Tools
+
+#### `get_task_trajectory`
+
+Retrieve trajectory steps for a completed task to analyze agent behavior.
+
+```javascript
+// Get trajectory for debugging or pattern analysis
+const trajectory = await get_task_trajectory({
+  task_id: "task-uuid",
+  _agent_id: "optional-agent-id"  // Optional multi-client support
+})
+
+// Response structure:
+{
+  task_id: "1883773d-a1c1-4e7b-bf41-62ee36b4d91e",
+  steps: [
+    {
+      kind: "task_outcome",
+      agent_id: "8059746a-...",
+      payload: {
+        success: true,
+        duration_secs: 120,
+        task_type: "optimization"
+      }
+    },
+    {
+      kind: "knowledge_acquired",
+      agent_id: "8059746a-...",
+      payload: {
+        knowledge_kind: "discovery",
+        content: "HNSW ef_construction=200 improves insert by 2×"
+      }
+    }
+  ],
+  event_count: 2
+}
+```
+
+**Use cases**:
+- Debugging task execution flow
+- Understanding agent decision-making
+- Identifying bottlenecks or failure patterns
+
+#### `query_reasoning_bank`
+
+Search learned patterns by semantic similarity to find solutions from past successes.
+
+```javascript
+// Search for similar solutions before starting work
+const patterns = await query_reasoning_bank({
+  query: "optimize HNSW vector search performance",
+  limit: 10,
+  _agent_id: "optional-agent-id"
+})
+
+// Response structure:
+{
+  patterns: [
+    {
+      id: "pattern-uuid",
+      task_type: "optimization",
+      agent_role: "developer",
+      success: true,
+      content: "Reduced ef_construction to 200, improved insert speed by 2×",
+      confidence: 0.89,
+      source_trajectory_id: "traj-uuid"
+    },
+    {
+      id: "pattern-uuid-2",
+      task_type: "optimization",
+      agent_role: "architect",
+      success: true,
+      content: "Used HNSW with m=16, ef_search=100 for balanced performance",
+      confidence: 0.76,
+      source_trajectory_id: "traj-uuid-2"
+    }
+  ],
+  total_patterns: 127
+}
+```
+
+**Performance**: <200µs retrieval with 1000+ patterns (HNSW vector search).
+
+**Use cases**:
+- Find similar past solutions before implementing
+- Avoid reinventing solutions
+- Learn from successful agent executions
+- Identify best practices discovered by the hive
+
+#### `get_learning_status`
+
+Check learning loop status and metrics for monitoring.
+
+```javascript
+// Check if learning is active and see progress
+const status = await get_learning_status({
+  loop_type: "base_lora",  // Options: "base_lora", "micro_lora", "ewc"
+  _agent_id: "optional-agent-id"
+})
+
+// Response structure:
+{
+  loop_type: "base_lora",
+  enabled: true,
+  patterns_learned: 127,
+  total_events: 543
+}
+```
+
+**Loop types**:
+- **`base_lora`**: Collective hive learning status
+- **`micro_lora`**: Per-agent adaptation status
+- **`ewc`**: Catastrophic forgetting prevention status
+
+**Use cases**:
+- Verify SONA is enabled and active
+- Monitor learning progress
+- Debug learning configuration
+
+#### `trigger_learning_cycle`
+
+Force an immediate learning cycle (normally runs every 5 minutes).
+
+```javascript
+// Force learning after major task completion
+const result = await trigger_learning_cycle({
+  loop_type: "base_lora",
+  _agent_id: "optional-agent-id"
+})
+
+// Response structure:
+{
+  loop_type: "base_lora",
+  optimizations_applied: 3,
+  patterns_created: 8,
+  cross_agent_patterns: [
+    {
+      description: "Coordinate HNSW optimization with memory profiling",
+      agents_involved: ["dev-1", "dev-2"],
+      confidence: 0.76
+    }
+  ]
+}
+```
+
+**Use cases**:
+- Force immediate pattern extraction after important work
+- Emergency learning cycle before session end
+- Testing learning pipeline
+
+### Configuration
+
+SONA is **disabled by default**. Enable via CLI flags or environment variables.
+
+#### CLI Flags
+
+```bash
+# Enable with defaults (lambda=0.4, gamma=0.9, rank=8)
+cargo run --bin harness-mcpd -- --enable-sona
+
+# Custom EWC parameters
+cargo run --bin harness-mcpd -- \
+  --enable-sona \
+  --ewc-lambda 0.6 \           # Forgetting penalty strength
+  --ewc-gamma 0.95 \           # Online decay factor
+  --ewc-max-tasks 20           # Max task snapshots
+
+# Custom BaseLoRA parameters
+cargo run --bin harness-mcpd -- \
+  --enable-sona \
+  --lora-rank 16 \             # LoRA rank (dimension)
+  --lora-alpha 32.0 \          # Scaling factor
+  --learning-interval 600      # Learning cycle interval (seconds)
+```
+
+#### Environment Variables
+
+```bash
+# Enable via environment
+HARNESS_SONA_ENABLED=true cargo run --bin harness-mcpd
+
+# Override parameters
+HARNESS_EWC_LAMBDA=0.5 \
+HARNESS_LORA_RANK=12 \
+HARNESS_LEARNING_INTERVAL=300 \
+  cargo run --bin harness-mcpd --enable-sona
+```
+
+#### Configuration Parameters
+
+| Parameter | Default | Range | Description |
+|-----------|---------|-------|-------------|
+| `ewc-lambda` | 0.4 | 0.0-1.0 | Catastrophic forgetting penalty strength. Higher = stronger protection of old knowledge. |
+| `ewc-gamma` | 0.9 | 0.0-1.0 | Online EWC decay factor. `F_new = gamma * F_old + F_task`. |
+| `ewc-max-tasks` | 10 | 1-100 | Maximum task snapshots to retain. |
+| `lora-rank` | 8 | 1-64 | BaseLoRA rank (dimension of adaptation). Higher = more capacity, slower updates. |
+| `lora-alpha` | 16.0 | >0 | BaseLoRA scaling factor. Typically `2 * rank`. |
+| `learning-interval` | 300 | 60-3600 | Learning cycle interval in seconds. |
+
+### Best Practices
+
+#### When to Enable SONA
+
+**Enable for**:
+- Long-running hive sessions (hours to days)
+- Repetitive task patterns (similar problems solved repeatedly)
+- >100 tasks completed (sufficient data for pattern extraction)
+- Multi-agent coordination (collective learning valuable)
+
+**Disable for**:
+- Short sessions (<1 hour)
+- Unique one-off tasks (no repetition)
+- <20 tasks total (insufficient data)
+- Single-agent workflows (no collective benefit)
+
+#### Parameter Tuning
+
+**EWC Lambda** (forgetting prevention strength):
+- **High (0.6-0.8)**: Use for stable task domains where previous knowledge remains relevant
+- **Low (0.2-0.4)**: Use for rapidly changing domains where old knowledge becomes stale
+- **Default (0.4)**: Moderate protection, good for mixed workloads
+
+**EWC Gamma** (decay factor):
+- **High (0.95)**: Slow decay, retain old task importance longer
+- **Low (0.85)**: Fast decay, prioritize recent tasks
+- **Default (0.9)**: 50% weight to task from 7 tasks ago
+
+**LoRA Rank**:
+- **High (16-32)**: Complex tasks requiring nuanced adaptation
+- **Low (4-8)**: Simple tasks, faster updates
+- **Default (8)**: Balanced capacity and speed
+
+**Learning Interval**:
+- **Short (60s)**: Rapid iteration, testing, development
+- **Long (600s)**: Batch jobs, production stability
+- **Default (300s)**: 5-minute cadence balances responsiveness and overhead
+
+#### Querying Patterns Effectively
+
+```javascript
+// Specific queries work better than vague ones
+// ❌ Bad: vague query
+query_reasoning_bank({query: "performance", limit: 10})
+
+// ✅ Good: specific context
+query_reasoning_bank({
+  query: "optimize HNSW vector search for 1000+ patterns with minimal memory",
+  limit: 5
+})
+
+// Filter to successful patterns only (implicit in ReasoningBank)
+// Only success=true patterns are indexed
+
+// Limit results to avoid overwhelming context
+// Default limit=10 is good for most use cases
+query_reasoning_bank({query: "...", limit: 5})  // Top 5 most relevant
+```
+
+#### Interpreting Trajectory Steps
+
+```javascript
+// Each step has a 'kind' indicating event type
+const trajectory = await get_task_trajectory({task_id: "..."})
+
+for (const step of trajectory.steps) {
+  switch (step.kind) {
+    case "task_outcome":
+      // Task completion (success/failure)
+      console.log("Task completed:", step.payload.success)
+      break
+    case "knowledge_acquired":
+      // Knowledge shared to hive
+      console.log("Knowledge:", step.payload.content)
+      break
+    case "project_consolidation":
+      // Project closed, patterns consolidated
+      console.log("Project stats:", step.payload.tasks_completed)
+      break
+  }
+}
+```
+
+### Performance Characteristics
+
+- **Trajectory recording**: <100ns overhead (hot path, in-memory buffer)
+- **Pattern storage**: 200µs insert, <200µs retrieval (HNSW index)
+- **Pattern search**: O(log N) with HNSW, 21× faster than naive at 1000 patterns
+- **Learning cycle**: Non-blocking background task, runs every 5 minutes (configurable)
+- **Memory overhead**: ~9-10 MB per 1000 patterns
+
+### Workflow Example: Strategoi Using SONA
+
+```javascript
+// 1. Start daemon with SONA enabled
+// cargo run --bin harness-mcpd -- --enable-sona
+
+// 2. Register as strategoi
+const agent = await register_agent({
+  role: "strategoi",
+  project_name: "harness"
+})
+
+// 3. Create tasks for developers
+const taskId = await create_task({
+  title: "Optimize HNSW vector search",
+  description: "Improve ReasoningBank pattern retrieval performance",
+  priority: "high"
+})
+
+// 4. Before assigning, check for learned patterns
+const patterns = await query_reasoning_bank({
+  query: "HNSW optimization vector search performance",
+  limit: 5
+})
+
+// 5. Incorporate pattern insights into task assignment
+if (patterns.patterns.length > 0) {
+  const topPattern = patterns.patterns[0]
+  await send_direct_message({
+    to_agent: "developer-uuid",
+    content: `Task assigned: ${taskId}
+
+Learned pattern from past success:
+"${topPattern.content}" (confidence: ${topPattern.confidence})
+
+Use this as a starting point.`,
+    task_id: taskId
+  })
+}
+
+// 6. Monitor learning progress
+const status = await get_learning_status({loop_type: "base_lora"})
+console.log(`Hive has learned ${status.patterns_learned} patterns from ${status.total_events} events`)
+
+// 7. Force learning after major milestone
+await trigger_learning_cycle({loop_type: "base_lora"})
+console.log("Learning cycle complete, new patterns available")
+```
+
+### Troubleshooting
+
+#### SONA Not Learning Patterns
+
+**Symptom**: `query_reasoning_bank` returns empty results or `total_patterns: 0`.
+
+**Diagnosis**:
+```javascript
+const status = await get_learning_status({loop_type: "base_lora"})
+// Check if enabled=true and total_events > 0
+```
+
+**Possible causes**:
+1. SONA not enabled: Restart daemon with `--enable-sona`
+2. No tasks completed yet: Complete 5-10 tasks to generate patterns
+3. All tasks failed: Only `success=true` tasks generate patterns
+4. Learning interval not elapsed: Wait 5 minutes or force cycle
+
+**Fix**:
+```javascript
+// Force immediate learning cycle
+await trigger_learning_cycle({loop_type: "base_lora"})
+```
+
+#### High Memory Usage
+
+**Symptom**: Daemon memory grows over time with SONA enabled.
+
+**Expected overhead**: ~9-10 MB per 1000 patterns (HNSW index).
+
+**Mitigation**:
+- Reduce `ewc-max-tasks` (default: 10) to limit task snapshots
+- Reduce `learning-interval` to batch process patterns more frequently
+- Monitor pattern count via `get_learning_status`
+
+#### Learning Cycle Too Slow
+
+**Symptom**: Pattern availability lags behind task completion by >5 minutes.
+
+**Diagnosis**: Check `learning-interval` configuration.
+
+**Fix**:
+```bash
+# Reduce interval to 60 seconds for rapid iteration
+cargo run --bin harness-mcpd -- --enable-sona --learning-interval 60
+```
+
+**Trade-off**: More frequent cycles = higher CPU usage.
+
 ## Multi-Agent Workflows
 
 ### Pattern 1: Strategoi + Developer Team
@@ -482,9 +886,11 @@ RUST_LOG=debug cargo test -- --nocapture
 - [AletheiaDB Documentation](../aletheiadb/README.md)
 - [MCP Protocol Spec](https://modelcontextprotocol.io)
 - [Harness Architecture ADRs](./docs/adr/)
+- [ADR 0006: SONA Integration](./docs/adr/0006-sona-integration.md)
 
 ---
 
-**Version**: 0.1.0
-**Last Updated**: 2026-02-13
+**Version**: 0.2.0
+**Last Updated**: 2026-02-14
 **Maintainer**: Mark Michaelis
+**Contributors**: Harness SONA Integration Team

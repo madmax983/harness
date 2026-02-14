@@ -1,0 +1,22 @@
+[package]
+name = "harness-sona"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+harness-persistence = { path = "../harness-persistence" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+rayon = "1.10"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "base_lora_aggregation"
+harness = false

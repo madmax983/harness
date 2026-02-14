@@ -26,6 +26,8 @@ pub struct InMemoryRepository {
     plans: RwLock<HashMap<PlanId, Plan>>,
     /// Task dependencies: TaskId -> Set of TaskIds it blocks
     task_dependencies: RwLock<HashMap<TaskId, HashSet<TaskId>>>,
+    /// Trajectory events per session
+    trajectory_events: RwLock<HashMap<SessionId, Vec<crate::trajectory::RawEvent>>>,
 }
 
 impl InMemoryRepository {
@@ -688,6 +690,37 @@ impl Repository for InMemoryRepository {
         Err(RepositoryError::Database(
             "InMemoryRepository does not support NodeId lookups".into(),
         ))
+    }
+
+    // === Trajectory operations ===
+
+    async fn create_trajectory_event(
+        &self,
+        event: &crate::trajectory::RawEvent,
+    ) -> RepositoryResult<()> {
+        let mut events = self
+            .trajectory_events
+            .write()
+            .map_err(|e| RepositoryError::Database(e.to_string()))?;
+
+        events
+            .entry(event.session_id)
+            .or_insert_with(Vec::new)
+            .push(event.clone());
+
+        Ok(())
+    }
+
+    async fn get_trajectory_events(
+        &self,
+        session_id: SessionId,
+    ) -> RepositoryResult<Vec<crate::trajectory::RawEvent>> {
+        let events = self
+            .trajectory_events
+            .read()
+            .map_err(|e| RepositoryError::Database(e.to_string()))?;
+
+        Ok(events.get(&session_id).cloned().unwrap_or_default())
     }
 }
 

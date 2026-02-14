@@ -46,6 +46,7 @@ edition.workspace = true
 harness-mcp = { path = "crates/harness-mcp" }
 harness-orchestrator = { path = "crates/harness-orchestrator" }
 harness-persistence = { path = "crates/harness-persistence" }
+harness-sona = { path = "crates/harness-sona" }
 harness-tui = { path = "crates/harness-tui" }
 aletheiadb.workspace = true
 tokio.workspace = true
@@ -57,3 +58,5 @@ uuid.workspace = true
 [dev-dependencies]
 futures = "0.3"
 serde_json.workspace = true
+chrono.workspace = true
+harness-sona = { path = "crates/harness-sona" }

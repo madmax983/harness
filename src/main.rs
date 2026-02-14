@@ -12,6 +12,7 @@ use anyhow::Result;
 use harness_mcp::{HiveState, start_mcp_server};
 use harness_orchestrator::{AgentRuntimeKind, McpServerConfig, OrchestratorConfig, ProcessManager};
 use harness_persistence::{AgentRole, AletheiaRepository, Repository, Session};
+use harness_sona::SonaConfig;
 use harness_tui::TuiRunner;
 use tracing_subscriber::EnvFilter;
 
@@ -33,6 +34,18 @@ struct Args {
     agent_cli: Option<String>,
     /// Runtime adapter override (claude, codex, gemini, claude_compatible).
     agent_runtime: Option<String>,
+    /// SONA: Enable or disable SONA features (default: enabled).
+    sona_enabled: Option<bool>,
+    /// SONA: EWC lambda (penalty strength, default: 0.4).
+    ewc_lambda: Option<f32>,
+    /// SONA: EWC gamma (online decay factor, default: 0.9).
+    ewc_gamma: Option<f32>,
+    /// SONA: BaseLoRA rank (default: 8).
+    lora_rank: Option<usize>,
+    /// SONA: Learning loop interval in seconds (default: 300).
+    learning_interval_secs: Option<u64>,
+    /// Display help message.
+    help: bool,
 }
 
 impl Args {
@@ -47,6 +60,12 @@ impl Args {
             ollama_url: None,
             agent_cli: None,
             agent_runtime: None,
+            sona_enabled: None,
+            ewc_lambda: None,
+            ewc_gamma: None,
+            lora_rank: None,
+            learning_interval_secs: None,
+            help: false,
         };
 
         while let Some(arg) = args.next() {
@@ -77,11 +96,97 @@ impl Args {
                 "--agent-runtime" => {
                     result.agent_runtime = args.next();
                 }
+                "--enable-sona" => {
+                    result.sona_enabled = Some(true);
+                }
+                "--disable-sona" => {
+                    result.sona_enabled = Some(false);
+                }
+                "--ewc-lambda" => {
+                    if let Some(v) = args.next().and_then(|s| s.parse().ok()) {
+                        result.ewc_lambda = Some(v);
+                    }
+                }
+                "--ewc-gamma" => {
+                    if let Some(v) = args.next().and_then(|s| s.parse().ok()) {
+                        result.ewc_gamma = Some(v);
+                    }
+                }
+                "--lora-rank" => {
+                    if let Some(v) = args.next().and_then(|s| s.parse().ok()) {
+                        result.lora_rank = Some(v);
+                    }
+                }
+                "--learning-interval-secs" => {
+                    if let Some(v) = args.next().and_then(|s| s.parse().ok()) {
+                        result.learning_interval_secs = Some(v);
+                    }
+                }
+                "--help" | "-h" => {
+                    result.help = true;
+                }
                 _ => {}
             }
         }
 
         result
+    }
+
+    /// Display help message and exit.
+    fn print_help() {
+        println!("Harness v2 - Hive Mind Orchestration System");
+        println!();
+        println!("USAGE:");
+        println!("    harness [OPTIONS]");
+        println!();
+        println!("OPTIONS:");
+        println!("    -w, --workers <N>              Number of worker agents to spawn (default: 3)");
+        println!("    -p, --prompt <TEXT>            Initial prompt/goal for the Strategoi");
+        println!("    --no-tui                       Disable the TUI dashboard (headless mode)");
+        println!();
+        println!("  MCP Server:");
+        println!("    --port <PORT>                  MCP server port (default: 3000)");
+        println!();
+        println!("  Semantic Search:");
+        println!("    -e, --embedding-model <MODEL>  Ollama model for embeddings (e.g., 'nomic-embed-text')");
+        println!("    --ollama-url <URL>             Ollama base URL (default: http://localhost:11434)");
+        println!();
+        println!("  Agent Configuration:");
+        println!("    --agent-cli <CLI>              Agent CLI to use (default: 'claude')");
+        println!("    --agent-runtime <RUNTIME>      Runtime adapter override (claude, codex, gemini, etc.)");
+        println!();
+        println!("  SONA (Self-Organizing Neural Architecture):");
+        println!("    --enable-sona                  Enable SONA features (default: enabled)");
+        println!("    --disable-sona                 Disable SONA features");
+        println!("    --ewc-lambda <FLOAT>           EWC penalty strength (default: 0.4)");
+        println!("    --ewc-gamma <FLOAT>            EWC online decay factor (default: 0.9, range: 0-1)");
+        println!("    --lora-rank <INT>              BaseLoRA rank dimension (default: 8)");
+        println!("    --learning-interval-secs <INT> Learning loop interval in seconds (default: 300)");
+        println!();
+        println!("  Environment Variables:");
+        println!("    HARNESS_SONA_ENABLED=0|1       Enable/disable SONA (overrides CLI)");
+        println!("    HARNESS_EWC_LAMBDA=<FLOAT>     EWC lambda (overrides CLI)");
+        println!("    HARNESS_EWC_GAMMA=<FLOAT>      EWC gamma (overrides CLI)");
+        println!("    HARNESS_LORA_RANK=<INT>        BaseLoRA rank (overrides CLI)");
+        println!("    HARNESS_LEARNING_INTERVAL=<INT> Learning interval in seconds (overrides CLI)");
+        println!("    RUST_LOG=info                  Set log level (debug, info, warn, error)");
+        println!();
+        println!("  Other:");
+        println!("    -h, --help                     Display this help message");
+        println!();
+        println!("EXAMPLES:");
+        println!("    # Start with 5 workers and custom prompt");
+        println!("    harness -w 5 -p \"Build a REST API for user management\"");
+        println!();
+        println!("    # Disable SONA and TUI (lightweight mode)");
+        println!("    harness --disable-sona --no-tui");
+        println!();
+        println!("    # Enable semantic search with custom EWC parameters");
+        println!("    harness -e nomic-embed-text --ewc-lambda 1.0 --ewc-gamma 0.95");
+        println!();
+        println!("    # Use Codex runtime with custom learning interval");
+        println!("    harness --agent-runtime codex --learning-interval-secs 600");
+        println!();
     }
 }
 
@@ -97,6 +202,57 @@ fn resolve_agent_runtime(agent_cli: &str, runtime_override: Option<&str>) -> Age
     }
 
     AgentRuntimeKind::infer_from_cli(agent_cli)
+}
+
+/// Build SONA configuration from CLI args and environment variables.
+///
+/// Priority: Environment variables > CLI flags > Defaults
+fn build_sona_config(args: &Args) -> SonaConfig {
+    let mut config = SonaConfig::default();
+
+    // Apply CLI flags first (lower priority)
+    if let Some(enabled) = args.sona_enabled {
+        config = config.with_enabled(enabled);
+    }
+    if let Some(lambda) = args.ewc_lambda {
+        config = config.with_ewc_lambda(lambda);
+    }
+    if let Some(gamma) = args.ewc_gamma {
+        config = config.with_ewc_gamma(gamma);
+    }
+    if let Some(rank) = args.lora_rank {
+        config = config.with_lora_rank(rank);
+    }
+    if let Some(interval) = args.learning_interval_secs {
+        config = config.with_learning_interval(interval);
+    }
+
+    // Apply environment variables last (highest priority - overrides CLI)
+    if let Ok(val) = std::env::var("HARNESS_SONA_ENABLED") {
+        config.enabled = val == "1" || val.eq_ignore_ascii_case("true");
+    }
+    if let Ok(val) = std::env::var("HARNESS_EWC_LAMBDA") {
+        if let Ok(lambda) = val.parse::<f32>() {
+            config = config.with_ewc_lambda(lambda);
+        }
+    }
+    if let Ok(val) = std::env::var("HARNESS_EWC_GAMMA") {
+        if let Ok(gamma) = val.parse::<f32>() {
+            config = config.with_ewc_gamma(gamma);
+        }
+    }
+    if let Ok(val) = std::env::var("HARNESS_LORA_RANK") {
+        if let Ok(rank) = val.parse::<usize>() {
+            config = config.with_lora_rank(rank);
+        }
+    }
+    if let Ok(val) = std::env::var("HARNESS_LEARNING_INTERVAL") {
+        if let Ok(interval) = val.parse::<u64>() {
+            config = config.with_learning_interval(interval);
+        }
+    }
+
+    config
 }
 
 /// Get the embedding dimensions for common Ollama models.
@@ -143,7 +299,31 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
+    // Display help if requested
+    if args.help {
+        Args::print_help();
+        return Ok(());
+    }
+
     tracing::info!("Harness v2 - Hive Mind Orchestration System");
+
+    // Build SONA configuration from CLI and environment
+    let sona_config = build_sona_config(&args);
+
+    // Validate SONA config
+    if let Err(e) = sona_config.validate() {
+        tracing::error!(error = %e, "Invalid SONA configuration");
+        anyhow::bail!("SONA configuration validation failed: {}", e);
+    }
+
+    tracing::info!(
+        enabled = sona_config.enabled,
+        ewc_lambda = sona_config.ewc.lambda,
+        ewc_gamma = sona_config.ewc.gamma,
+        lora_rank = sona_config.base_lora.rank,
+        learning_interval_secs = sona_config.learning_loop.interval_secs,
+        "SONA configuration loaded"
+    );
 
     // 1. Create repository with full persistence stack
     let db_path = std::env::current_dir()?.join(".harness-data");
@@ -223,9 +403,13 @@ async fn main() -> Result<()> {
 
     let process_manager = Arc::new(ProcessManager::new(config, repository.clone()));
 
-    // 5. Create HiveState with optional embedding service
-    let mut hive_state =
-        HiveState::new(session.clone(), repository.clone(), process_manager.clone());
+    // 5. Create HiveState with SONA config and optional embedding service
+    let mut hive_state = HiveState::with_sona_config(
+        session.clone(),
+        repository.clone(),
+        process_manager.clone(),
+        sona_config.clone(),
+    );
 
     if let Some(model) = &args.embedding_model {
         tracing::info!(model = %model, "Configuring Ollama embeddings");

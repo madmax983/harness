@@ -48,6 +48,7 @@ const LABEL_PRODUCT: &str = "Product";
 const LABEL_PROJECT: &str = "Project";
 const LABEL_PLAN: &str = "Plan";
 const LABEL_INDEX: &str = "HarnessIndex";
+const LABEL_TRAJECTORY: &str = "Trajectory";
 
 const EDGE_CONTAINS_AGENT: &str = "CONTAINS_AGENT";
 const EDGE_CONTAINS_TASK: &str = "CONTAINS_TASK";
@@ -62,6 +63,9 @@ const EDGE_BLOCKS: &str = "BLOCKS";
 const EDGE_SENT_DM: &str = "SENT_DM";
 const EDGE_DM_TO: &str = "DM_TO";
 const EDGE_DM_THREAD: &str = "DM_THREAD";
+const EDGE_AGENT_TRAJECTORY: &str = "AGENT_TRAJECTORY";
+const EDGE_TASK_TRAJECTORY: &str = "TASK_TRAJECTORY";
+const EDGE_CONTAINS_TRAJECTORY: &str = "CONTAINS_TRAJECTORY";
 
 const INDEX_KEY_SELF: &str = "_index_node_id";
 
@@ -238,6 +242,9 @@ impl AletheiaRepository {
     fn dm_key(id: DirectMessageId) -> String {
         format!("dm:{}", id.as_uuid())
     }
+    fn trajectory_key(id: crate::TrajectoryEventId) -> String {
+        format!("trajectory:{}", id.as_uuid())
+    }
 
     // --- Conversion helpers ---
 
@@ -403,6 +410,25 @@ impl AletheiaRepository {
         }
     }
 
+    fn trigger_kind_str(k: crate::TriggerKind) -> &'static str {
+        match k {
+            crate::TriggerKind::TaskComplete => "task_complete",
+            crate::TriggerKind::KnowledgeShare => "knowledge_share",
+            crate::TriggerKind::ProjectClose => "project_close",
+        }
+    }
+
+    fn parse_trigger_kind(s: &str) -> RepositoryResult<crate::TriggerKind> {
+        match s {
+            "task_complete" => Ok(crate::TriggerKind::TaskComplete),
+            "knowledge_share" => Ok(crate::TriggerKind::KnowledgeShare),
+            "project_close" => Ok(crate::TriggerKind::ProjectClose),
+            _ => Err(RepositoryError::Database(format!(
+                "Invalid trigger kind: {s}"
+            ))),
+        }
+    }
+
     // --- Node property helpers ---
 
     fn pstr<'a>(n: &'a Node, k: &str) -> RepositoryResult<&'a str> {
@@ -433,6 +459,12 @@ impl AletheiaRepository {
         n.get_property(k)
             .and_then(|v| v.as_vector())
             .map(|v| v.to_vec())
+    }
+
+    fn opt_usize(n: &Node, k: &str) -> Option<usize> {
+        n.get_property(k)
+            .and_then(|v| v.as_int())
+            .map(|v| v as usize)
     }
 
     // --- Node → Entity converters ---
@@ -555,6 +587,26 @@ impl AletheiaRepository {
             session_id: SessionId::from_uuid(Self::parse_uuid(Self::pstr(n, "session_id")?)?),
             created_at: Self::ts_to_dt(Self::pint(n, "created_at")?),
             embedding: Self::opt_vec(n, "embedding"),
+        })
+    }
+
+    fn node_to_trajectory(n: &Node) -> RepositoryResult<crate::RawEvent> {
+        Ok(crate::RawEvent {
+            id: crate::TrajectoryEventId::from_uuid(Self::parse_uuid(Self::pstr(n, "id")?)?),
+            session_id: SessionId::from_uuid(Self::parse_uuid(Self::pstr(n, "session_id")?)?),
+            trigger_kind: Self::parse_trigger_kind(Self::pstr(n, "trigger_kind")?)?,
+            agent_id: AgentId::from_uuid(Self::parse_uuid(Self::pstr(n, "agent_id")?)?),
+            task_id: Self::opt_str(n, "task_id")
+                .and_then(|s| Self::parse_uuid(s).ok())
+                .map(TaskId::from_uuid),
+            success: Self::pbool(n, "success")?,
+            summary: Self::pstr(n, "summary")?.to_string(),
+            knowledge_kind: Self::opt_str(n, "knowledge_kind")
+                .and_then(|s| Self::parse_kind(s).ok()),
+            project_name: Self::opt_str(n, "project_name").map(String::from),
+            tasks_completed: Self::opt_usize(n, "tasks_completed").unwrap_or(0),
+            tasks_failed: Self::opt_usize(n, "tasks_failed").unwrap_or(0),
+            created_at: Self::ts_to_dt(Self::pint(n, "created_at")?),
         })
     }
 
@@ -1667,6 +1719,99 @@ impl Repository for AletheiaRepository {
         agent_id: AgentId,
     ) -> RepositoryResult<aletheiadb::core::id::NodeId> {
         self.index_get(&Self::agent_key(agent_id))
+    }
+
+    // === Trajectory operations ===
+
+    async fn create_trajectory_event(
+        &self,
+        event: &crate::RawEvent,
+    ) -> RepositoryResult<()> {
+        let id_str = event.id.as_uuid().to_string();
+        let agent_id_str = event.agent_id.as_uuid().to_string();
+        let session_id_str = event.session_id.as_uuid().to_string();
+        let created_at = Self::dt_to_ts(event.created_at);
+        let trigger_kind = Self::trigger_kind_str(event.trigger_kind);
+
+        // Get node references
+        let agent_node = self.index_get(&Self::agent_key(event.agent_id))?;
+        let session_node = self.index_get(&Self::session_key(event.session_id))?;
+
+        // Create the trajectory node
+        let trajectory_node = self.db_write(|tx| {
+            let mut props = PropertyMapBuilder::new()
+                .insert("id", id_str.as_str())
+                .insert("session_id", session_id_str.as_str())
+                .insert("trigger_kind", trigger_kind)
+                .insert("agent_id", agent_id_str.as_str())
+                .insert("success", event.success)
+                .insert("summary", event.summary.as_str())
+                .insert("created_at", created_at);
+
+            // Optional fields
+            if let Some(task_id) = event.task_id {
+                let s = task_id.as_uuid().to_string();
+                props = props.insert("task_id", s.as_str());
+            }
+            if let Some(knowledge_kind) = event.knowledge_kind {
+                props = props.insert("knowledge_kind", Self::kind_str(knowledge_kind));
+            }
+            if let Some(ref project_name) = event.project_name {
+                props = props.insert("project_name", project_name.as_str());
+            }
+            if event.tasks_completed > 0 {
+                props = props.insert("tasks_completed", event.tasks_completed as i64);
+            }
+            if event.tasks_failed > 0 {
+                props = props.insert("tasks_failed", event.tasks_failed as i64);
+            }
+
+            let tn = tx.create_node(LABEL_TRAJECTORY, props.build())?;
+
+            // Create edges
+            tx.create_edge(
+                agent_node,
+                tn,
+                EDGE_AGENT_TRAJECTORY,
+                PropertyMapBuilder::new().build(),
+            )?;
+
+            tx.create_edge(
+                session_node,
+                tn,
+                EDGE_CONTAINS_TRAJECTORY,
+                PropertyMapBuilder::new().build(),
+            )?;
+
+            Ok(tn)
+        })?;
+
+        // Index the trajectory event
+        self.index_set(&Self::trajectory_key(event.id), trajectory_node)?;
+
+        // Create edge to task if task_id exists
+        if let Some(task_id) = event.task_id
+            && let Ok(task_node) = self.index_get(&Self::task_key(task_id))
+        {
+            self.db_write(|tx| {
+                Ok(tx.create_edge(
+                    trajectory_node,
+                    task_node,
+                    EDGE_TASK_TRAJECTORY,
+                    PropertyMapBuilder::new().build(),
+                )?)
+            })?;
+        }
+
+        Ok(())
+    }
+
+    async fn get_trajectory_events(
+        &self,
+        session_id: SessionId,
+    ) -> RepositoryResult<Vec<crate::RawEvent>> {
+        let session_node = self.index_get(&Self::session_key(session_id))?;
+        self.collect_outgoing(session_node, EDGE_CONTAINS_TRAJECTORY, Self::node_to_trajectory)
     }
 }
 
