@@ -42,6 +42,10 @@ name = "harness"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "harness-mcpd"
+path = "src/main.rs"
+
 [dependencies]
 harness-mcp = { path = "crates/harness-mcp" }
 harness-orchestrator = { path = "crates/harness-orchestrator" }

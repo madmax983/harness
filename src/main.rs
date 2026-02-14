@@ -1,207 +1,246 @@
-//! Harness v2 - Hive Mind Orchestration System
+//! Harness MCP daemon.
 //!
-//! A multi-Claude orchestration system where agents coordinate through
-//! a shared knowledge graph (AletheiaDB) using BMAD methodology.
+//! Runs only the MCP server and persistence layer without spawning orchestrator
+//! agents or launching the TUI dashboard.
 
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use aletheiadb::config::{HistoricalConfigBuilder, WalConfigBuilder};
 use aletheiadb::storage::index_persistence::PersistenceConfig;
 use aletheiadb::{AletheiaDB, AletheiaDBConfig};
-use anyhow::Result;
+use anyhow::{Context, Result, anyhow, bail};
 use harness_mcp::{HiveState, start_mcp_server};
-use harness_orchestrator::{AgentRuntimeKind, McpServerConfig, OrchestratorConfig, ProcessManager};
-use harness_persistence::{AgentRole, AletheiaRepository, Repository, Session};
+use harness_orchestrator::{OrchestratorConfig, ProcessManager};
+use harness_persistence::{AletheiaRepository, Repository, Session, SessionId};
 use harness_sona::SonaConfig;
-use harness_tui::TuiRunner;
 use tracing_subscriber::EnvFilter;
+use uuid::Uuid;
 
-/// CLI arguments for Harness.
+#[derive(Debug, Clone, PartialEq)]
 struct Args {
-    /// Number of worker agents to spawn.
-    workers: usize,
-    /// Whether to disable the TUI dashboard.
-    no_tui: bool,
-    /// Initial prompt/goal for the Strategoi.
-    prompt: Option<String>,
-    /// MCP server port.
+    host: String,
     port: u16,
-    /// Embedding model for semantic search (e.g., "nomic-embed-text").
+    population_cap: usize,
+    session_file: PathBuf,
     embedding_model: Option<String>,
-    /// Ollama base URL (default: http://localhost:11434).
     ollama_url: Option<String>,
-    /// Agent CLI to use (default: "claude", alternatives: "gemini", "gpt-4").
-    agent_cli: Option<String>,
-    /// Runtime adapter override (claude, codex, gemini, claude_compatible).
-    agent_runtime: Option<String>,
-    /// SONA: Enable or disable SONA features (default: enabled).
+    // SONA configuration
     sona_enabled: Option<bool>,
-    /// SONA: EWC lambda (penalty strength, default: 0.4).
     ewc_lambda: Option<f32>,
-    /// SONA: EWC gamma (online decay factor, default: 0.9).
     ewc_gamma: Option<f32>,
-    /// SONA: BaseLoRA rank (default: 8).
     lora_rank: Option<usize>,
-    /// SONA: Learning loop interval in seconds (default: 300).
     learning_interval_secs: Option<u64>,
-    /// Display help message.
-    help: bool,
 }
 
-impl Args {
-    fn parse() -> Self {
-        let mut args = std::env::args().skip(1);
-        let mut result = Self {
-            workers: 3,
-            no_tui: false,
-            prompt: None,
+impl Default for Args {
+    fn default() -> Self {
+        Self {
+            host: "127.0.0.1".to_string(),
             port: 3000,
+            population_cap: 16,
+            session_file: PathBuf::from(".harness-mcp-session"),
             embedding_model: None,
             ollama_url: None,
-            agent_cli: None,
-            agent_runtime: None,
             sona_enabled: None,
             ewc_lambda: None,
             ewc_gamma: None,
             lora_rank: None,
             learning_interval_secs: None,
-            help: false,
-        };
-
-        while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--workers" | "-w" => {
-                    if let Some(n) = args.next().and_then(|s| s.parse().ok()) {
-                        result.workers = n;
-                    }
-                }
-                "--no-tui" => result.no_tui = true,
-                "-p" | "--prompt" => {
-                    result.prompt = args.next();
-                }
-                "--port" => {
-                    if let Some(p) = args.next().and_then(|s| s.parse().ok()) {
-                        result.port = p;
-                    }
-                }
-                "--embedding-model" | "-e" => {
-                    result.embedding_model = args.next();
-                }
-                "--ollama-url" => {
-                    result.ollama_url = args.next();
-                }
-                "--agent-cli" => {
-                    result.agent_cli = args.next();
-                }
-                "--agent-runtime" => {
-                    result.agent_runtime = args.next();
-                }
-                "--enable-sona" => {
-                    result.sona_enabled = Some(true);
-                }
-                "--disable-sona" => {
-                    result.sona_enabled = Some(false);
-                }
-                "--ewc-lambda" => {
-                    if let Some(v) = args.next().and_then(|s| s.parse().ok()) {
-                        result.ewc_lambda = Some(v);
-                    }
-                }
-                "--ewc-gamma" => {
-                    if let Some(v) = args.next().and_then(|s| s.parse().ok()) {
-                        result.ewc_gamma = Some(v);
-                    }
-                }
-                "--lora-rank" => {
-                    if let Some(v) = args.next().and_then(|s| s.parse().ok()) {
-                        result.lora_rank = Some(v);
-                    }
-                }
-                "--learning-interval-secs" => {
-                    if let Some(v) = args.next().and_then(|s| s.parse().ok()) {
-                        result.learning_interval_secs = Some(v);
-                    }
-                }
-                "--help" | "-h" => {
-                    result.help = true;
-                }
-                _ => {}
-            }
         }
-
-        result
-    }
-
-    /// Display help message and exit.
-    fn print_help() {
-        println!("Harness v2 - Hive Mind Orchestration System");
-        println!();
-        println!("USAGE:");
-        println!("    harness [OPTIONS]");
-        println!();
-        println!("OPTIONS:");
-        println!("    -w, --workers <N>              Number of worker agents to spawn (default: 3)");
-        println!("    -p, --prompt <TEXT>            Initial prompt/goal for the Strategoi");
-        println!("    --no-tui                       Disable the TUI dashboard (headless mode)");
-        println!();
-        println!("  MCP Server:");
-        println!("    --port <PORT>                  MCP server port (default: 3000)");
-        println!();
-        println!("  Semantic Search:");
-        println!("    -e, --embedding-model <MODEL>  Ollama model for embeddings (e.g., 'nomic-embed-text')");
-        println!("    --ollama-url <URL>             Ollama base URL (default: http://localhost:11434)");
-        println!();
-        println!("  Agent Configuration:");
-        println!("    --agent-cli <CLI>              Agent CLI to use (default: 'claude')");
-        println!("    --agent-runtime <RUNTIME>      Runtime adapter override (claude, codex, gemini, etc.)");
-        println!();
-        println!("  SONA (Self-Organizing Neural Architecture):");
-        println!("    --enable-sona                  Enable SONA features (default: enabled)");
-        println!("    --disable-sona                 Disable SONA features");
-        println!("    --ewc-lambda <FLOAT>           EWC penalty strength (default: 0.4)");
-        println!("    --ewc-gamma <FLOAT>            EWC online decay factor (default: 0.9, range: 0-1)");
-        println!("    --lora-rank <INT>              BaseLoRA rank dimension (default: 8)");
-        println!("    --learning-interval-secs <INT> Learning loop interval in seconds (default: 300)");
-        println!();
-        println!("  Environment Variables:");
-        println!("    HARNESS_SONA_ENABLED=0|1       Enable/disable SONA (overrides CLI)");
-        println!("    HARNESS_EWC_LAMBDA=<FLOAT>     EWC lambda (overrides CLI)");
-        println!("    HARNESS_EWC_GAMMA=<FLOAT>      EWC gamma (overrides CLI)");
-        println!("    HARNESS_LORA_RANK=<INT>        BaseLoRA rank (overrides CLI)");
-        println!("    HARNESS_LEARNING_INTERVAL=<INT> Learning interval in seconds (overrides CLI)");
-        println!("    RUST_LOG=info                  Set log level (debug, info, warn, error)");
-        println!();
-        println!("  Other:");
-        println!("    -h, --help                     Display this help message");
-        println!();
-        println!("EXAMPLES:");
-        println!("    # Start with 5 workers and custom prompt");
-        println!("    harness -w 5 -p \"Build a REST API for user management\"");
-        println!();
-        println!("    # Disable SONA and TUI (lightweight mode)");
-        println!("    harness --disable-sona --no-tui");
-        println!();
-        println!("    # Enable semantic search with custom EWC parameters");
-        println!("    harness -e nomic-embed-text --ewc-lambda 1.0 --ewc-gamma 0.95");
-        println!();
-        println!("    # Use Codex runtime with custom learning interval");
-        println!("    harness --agent-runtime codex --learning-interval-secs 600");
-        println!();
     }
 }
 
-fn resolve_agent_runtime(agent_cli: &str, runtime_override: Option<&str>) -> AgentRuntimeKind {
-    if let Some(value) = runtime_override {
-        if let Some(kind) = AgentRuntimeKind::from_flag(value) {
-            return kind;
-        }
-        tracing::warn!(
-            runtime_override = %value,
-            "Unknown --agent-runtime override, inferring runtime from --agent-cli"
-        );
+impl Args {
+    fn parse() -> Result<Self> {
+        Self::parse_from(std::env::args().skip(1))
     }
 
-    AgentRuntimeKind::infer_from_cli(agent_cli)
+    fn parse_from<I>(iter: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let mut args = Self::default();
+        let mut it = iter.into_iter();
+
+        while let Some(arg) = it.next() {
+            match arg.as_str() {
+                "--host" => {
+                    args.host = it
+                        .next()
+                        .ok_or_else(|| anyhow!("--host requires a value"))?;
+                }
+                "--port" => {
+                    let raw = it
+                        .next()
+                        .ok_or_else(|| anyhow!("--port requires a value"))?;
+                    args.port = raw
+                        .parse()
+                        .with_context(|| format!("invalid --port value: {raw}"))?;
+                }
+                "--population-cap" => {
+                    let raw = it
+                        .next()
+                        .ok_or_else(|| anyhow!("--population-cap requires a value"))?;
+                    args.population_cap = raw
+                        .parse()
+                        .with_context(|| format!("invalid --population-cap value: {raw}"))?;
+                }
+                "--session-file" => {
+                    let raw = it
+                        .next()
+                        .ok_or_else(|| anyhow!("--session-file requires a value"))?;
+                    args.session_file = PathBuf::from(raw);
+                }
+                "--embedding-model" | "-e" => {
+                    args.embedding_model = Some(
+                        it.next()
+                            .ok_or_else(|| anyhow!("--embedding-model requires a value"))?,
+                    );
+                }
+                "--ollama-url" => {
+                    args.ollama_url = Some(
+                        it.next()
+                            .ok_or_else(|| anyhow!("--ollama-url requires a value"))?,
+                    );
+                }
+                "--enable-sona" => {
+                    args.sona_enabled = Some(true);
+                }
+                "--disable-sona" => {
+                    args.sona_enabled = Some(false);
+                }
+                "--ewc-lambda" => {
+                    let raw = it.next().ok_or_else(|| anyhow!("--ewc-lambda requires a value"))?;
+                    args.ewc_lambda = Some(raw.parse().with_context(|| format!("invalid --ewc-lambda value: {raw}"))?);
+                }
+                "--ewc-gamma" => {
+                    let raw = it.next().ok_or_else(|| anyhow!("--ewc-gamma requires a value"))?;
+                    args.ewc_gamma = Some(raw.parse().with_context(|| format!("invalid --ewc-gamma value: {raw}"))?);
+                }
+                "--lora-rank" => {
+                    let raw = it.next().ok_or_else(|| anyhow!("--lora-rank requires a value"))?;
+                    args.lora_rank = Some(raw.parse().with_context(|| format!("invalid --lora-rank value: {raw}"))?);
+                }
+                "--learning-interval" => {
+                    let raw = it.next().ok_or_else(|| anyhow!("--learning-interval requires a value"))?;
+                    args.learning_interval_secs = Some(raw.parse().with_context(|| format!("invalid --learning-interval value: {raw}"))?);
+                }
+                "-h" | "--help" => {
+                    print_usage();
+                    std::process::exit(0);
+                }
+                _ => bail!("unknown argument: {arg}"),
+            }
+        }
+
+        Ok(args)
+    }
+}
+
+fn print_usage() {
+    println!(
+        "\
+Harness MCP daemon
+
+Usage:
+  cargo run --bin harness-mcpd -- [options]
+
+Options:
+  --host <HOST>               Bind host (default: 127.0.0.1)
+  --port <PORT>               MCP server port (default: 3000)
+  --population-cap <NUM>      Session population cap for tool metadata (default: 16)
+  --session-file <PATH>       Session ID file path (default: .harness-mcp-session)
+  --embedding-model, -e <M>   Enable semantic search embeddings using Ollama model M
+  --ollama-url <URL>          Ollama base URL (default provider default)
+
+SONA (Self-Optimizing Neural Architecture):
+  --enable-sona               Enable SONA adaptive learning (default: disabled)
+  --disable-sona              Explicitly disable SONA
+  --ewc-lambda <FLOAT>        EWC penalty strength (default: 0.4)
+  --ewc-gamma <FLOAT>         EWC online decay factor (default: 0.9)
+  --lora-rank <INT>           BaseLoRA rank (default: 8)
+  --learning-interval <SECS>  Learning cycle interval in seconds (default: 300)
+
+Environment variables (override CLI flags):
+  HARNESS_SONA_ENABLED        1/true to enable, 0/false to disable
+  HARNESS_EWC_LAMBDA          EWC lambda value
+  HARNESS_EWC_GAMMA           EWC gamma value
+  HARNESS_LORA_RANK           LoRA rank value
+  HARNESS_LEARNING_INTERVAL   Learning interval in seconds
+
+  -h, --help                  Show this help
+"
+    );
+}
+
+fn ollama_model_dimensions(model: &str) -> usize {
+    match model {
+        "nomic-embed-text" => 768,
+        "mxbai-embed-large" => 1024,
+        "all-minilm" => 384,
+        "snowflake-arctic-embed" => 1024,
+        _ => {
+            tracing::warn!(
+                model = %model,
+                "Unknown model, defaulting to 768 dimensions."
+            );
+            768
+        }
+    }
+}
+
+fn create_ollama_embedding_service(
+    model: &str,
+    base_url: Option<&str>,
+) -> Result<aletheiadb::embeddings::EmbeddingService> {
+    use aletheiadb::embeddings::EmbeddingService;
+    use aletheiadb::embeddings::providers::ollama::{OllamaConfig, OllamaProvider};
+
+    let dimensions = ollama_model_dimensions(model);
+    let mut config = OllamaConfig::new(model.to_string(), dimensions);
+    if let Some(url) = base_url {
+        config = config.with_base_url(url.to_string());
+    }
+
+    let provider = Arc::new(OllamaProvider::new(config)?);
+    Ok(EmbeddingService::new(provider))
+}
+
+fn read_session_id(path: &Path) -> Result<Option<SessionId>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("failed reading session file: {}", path.display()))?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let uuid = Uuid::parse_str(trimmed)
+        .with_context(|| format!("invalid session UUID in {}: {trimmed}", path.display()))?;
+
+    Ok(Some(SessionId::from_uuid(uuid)))
+}
+
+fn write_session_id(path: &Path, session_id: SessionId) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed creating directory for session file: {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    fs::write(path, session_id.as_uuid().to_string())
+        .with_context(|| format!("failed writing session file: {}", path.display()))?;
+    Ok(())
 }
 
 /// Build SONA configuration from CLI args and environment variables.
@@ -255,79 +294,56 @@ fn build_sona_config(args: &Args) -> SonaConfig {
     config
 }
 
-/// Get the embedding dimensions for common Ollama models.
-fn ollama_model_dimensions(model: &str) -> usize {
-    match model {
-        "nomic-embed-text" => 768,
-        "mxbai-embed-large" => 1024,
-        "all-minilm" => 384,
-        "snowflake-arctic-embed" => 1024,
-        _ => {
-            tracing::warn!(
-                model = %model,
-                "Unknown model, defaulting to 768 dimensions. Use --embedding-dims to override."
-            );
-            768
+async fn ensure_session<R: Repository + 'static>(
+    repository: &Arc<R>,
+    session_file: &Path,
+    population_cap: usize,
+) -> Result<Session> {
+    if let Some(session_id) = read_session_id(session_file)? {
+        match repository.get_session(session_id).await {
+            Ok(session) => {
+                tracing::info!(
+                    session_id = %session.id,
+                    session_file = %session_file.display(),
+                    "Loaded existing session"
+                );
+                return Ok(session);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    session_id = %session_id,
+                    "Session in file not found, creating a new one"
+                );
+            }
         }
     }
-}
 
-/// Create an Ollama embedding service with the specified model.
-fn create_ollama_embedding_service(
-    model: &str,
-    base_url: Option<&str>,
-) -> Result<aletheiadb::embeddings::EmbeddingService> {
-    use aletheiadb::embeddings::EmbeddingService;
-    use aletheiadb::embeddings::providers::ollama::{OllamaConfig, OllamaProvider};
+    let session = Session::new(population_cap);
+    repository
+        .create_session(&session)
+        .await
+        .context("failed creating session")?;
+    write_session_id(session_file, session.id)?;
 
-    let dimensions = ollama_model_dimensions(model);
-    let mut config = OllamaConfig::new(model.to_string(), dimensions);
-    if let Some(url) = base_url {
-        config = config.with_base_url(url.to_string());
-    }
+    tracing::info!(
+        session_id = %session.id,
+        session_file = %session_file.display(),
+        "Created and persisted new session"
+    );
 
-    let provider = Arc::new(OllamaProvider::new(config)?);
-    Ok(EmbeddingService::new(provider))
+    Ok(session)
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-    let args = Args::parse();
+    let args = Args::parse()?;
 
-    // Display help if requested
-    if args.help {
-        Args::print_help();
-        return Ok(());
-    }
-
-    tracing::info!("Harness v2 - Hive Mind Orchestration System");
-
-    // Build SONA configuration from CLI and environment
-    let sona_config = build_sona_config(&args);
-
-    // Validate SONA config
-    if let Err(e) = sona_config.validate() {
-        tracing::error!(error = %e, "Invalid SONA configuration");
-        anyhow::bail!("SONA configuration validation failed: {}", e);
-    }
-
-    tracing::info!(
-        enabled = sona_config.enabled,
-        ewc_lambda = sona_config.ewc.lambda,
-        ewc_gamma = sona_config.ewc.gamma,
-        lora_rank = sona_config.base_lora.rank,
-        learning_interval_secs = sona_config.learning_loop.interval_secs,
-        "SONA configuration loaded"
-    );
-
-    // 1. Create repository with full persistence stack
     let db_path = std::env::current_dir()?.join(".harness-data");
-
     let config = AletheiaDBConfig::builder()
         .wal(WalConfigBuilder::new().wal_dir(db_path.join("wal")).build())
         .persistence(PersistenceConfig {
@@ -340,155 +356,76 @@ async fn main() -> Result<()> {
             HistoricalConfigBuilder::new()
                 .enable_cold_storage(true)
                 .cold_storage_path(db_path.join("cold.redb"))
-                .migration_age_threshold(std::time::Duration::from_secs(3600)) // 1 hour
+                .migration_age_threshold(std::time::Duration::from_secs(3600))
                 .max_hot_versions(1000)
                 .build(),
         )
         .build();
 
     let db = Arc::new(AletheiaDB::with_unified_config(config)?);
-
     let mut repository = AletheiaRepository::new(db);
 
-    // Add vector index if embeddings are enabled
-    if let Some(ref model) = args.embedding_model {
-        let dimensions = ollama_model_dimensions(model);
-        tracing::info!(
-            dimensions = dimensions,
-            "Enabling vector index for semantic search"
-        );
-        repository = repository.with_vector_index(dimensions)?;
+    if let Some(model) = args.embedding_model.as_deref() {
+        repository = repository.with_vector_index(ollama_model_dimensions(model))?;
     }
 
     let repository = Arc::new(repository);
+    let session = ensure_session(&repository, &args.session_file, args.population_cap).await?;
 
-    tracing::info!(
-        db_path = %db_path.display(),
-        "AletheiaDB initialized: WAL + Index Persistence + Cold Storage"
-    );
-
-    // 2. Create session
-    let session = Session::new(args.workers + 1); // +1 for Strategoi
-    repository.create_session(&session).await?;
-    let session_id = session.id;
-
-    tracing::info!(
-        session_id = %session_id,
-        workers = args.workers,
-        "Session created"
-    );
-
-    // 3. Build session context for agent prompts
-    let session_context = match &args.prompt {
-        Some(prompt) => format!("Session {session_id}. Goal: {prompt}"),
-        None => format!("Session {session_id}. Awaiting instructions from the human operator."),
+    // Initialize ProcessManager
+    let cli_path = if cfg!(windows) {
+        std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string())
+    } else {
+        "sh".to_string()
     };
 
-    // 4. Configure orchestrator with MCP server URL
-    let mcp_url = format!("http://localhost:{}/sse", args.port);
-    let agent_cli = args.agent_cli.as_deref().unwrap_or("claude");
-    let agent_runtime = resolve_agent_runtime(agent_cli, args.agent_runtime.as_deref());
-    let config = OrchestratorConfig {
-        population_cap: args.workers + 1,
-        agent_cli_path: agent_cli.into(),
-        agent_runtime,
-        mcp_config: McpServerConfig::http_sse(&mcp_url),
+    let orchestrator_config = OrchestratorConfig {
+        population_cap: args.population_cap,
+        agent_cli_path: cli_path,
+        ..Default::default()
     };
 
-    tracing::info!(
-        agent_cli = %agent_cli,
-        agent_runtime = ?agent_runtime,
-        "Agent CLI configured"
-    );
+    let process_manager = Arc::new(ProcessManager::new(orchestrator_config, repository.clone()));
 
-    let process_manager = Arc::new(ProcessManager::new(config, repository.clone()));
+    // Build SONA configuration
+    let sona_config = build_sona_config(&args);
 
-    // 5. Create HiveState with SONA config and optional embedding service
     let mut hive_state = HiveState::with_sona_config(
         session.clone(),
-        repository.clone(),
-        process_manager.clone(),
+        repository,
+        process_manager,
         sona_config.clone(),
     );
 
-    if let Some(model) = &args.embedding_model {
-        tracing::info!(model = %model, "Configuring Ollama embeddings");
-
-        match create_ollama_embedding_service(model, args.ollama_url.as_deref()) {
-            Ok(service) => {
-                hive_state = hive_state.with_embedding_service(Arc::new(service));
-                tracing::info!("Embedding service enabled for semantic knowledge search");
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to create embedding service, continuing without embeddings");
-            }
-        }
-    } else {
-        tracing::info!("No embedding model specified, semantic search disabled");
+    if let Some(model) = args.embedding_model.as_deref() {
+        let svc = create_ollama_embedding_service(model, args.ollama_url.as_deref())?;
+        hive_state = hive_state.with_embedding_service(Arc::new(svc));
+        tracing::info!(model = %model, "Embedding service enabled");
     }
 
-    let hive_state = Arc::new(hive_state);
-
-    // 6. Start MCP server (background task)
-    let mcp_state = hive_state.clone();
-    let mcp_port = args.port;
-    tokio::spawn(async move {
-        tracing::info!(port = mcp_port, "Starting MCP server");
-        if let Err(e) = start_mcp_server(mcp_state, "127.0.0.1", mcp_port).await {
-            tracing::error!(error = %e, "MCP server failed");
-        }
-    });
-
-    // Give MCP server time to start
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-    // 7. Spawn Strategoi
-    let strategoi_id = process_manager
-        .spawn_strategoi(session_id, &session_context)
-        .await?;
-    tracing::info!(agent_id = %strategoi_id, "Strategoi spawned");
-
-    // 8. Spawn worker agents
-    let worker_roles = default_worker_roles(args.workers);
-    for role in worker_roles {
-        let worker_id = process_manager
-            .spawn_worker(role, session_id, &session_context)
-            .await?;
-        tracing::info!(agent_id = %worker_id, role = %role, "Worker spawned");
+    // Initialize SONA engine if enabled
+    if sona_config.enabled {
+        tracing::info!(
+            ewc_lambda = sona_config.ewc.lambda,
+            ewc_gamma = sona_config.ewc.gamma,
+            lora_rank = sona_config.base_lora.rank,
+            learning_interval = sona_config.learning_loop.interval_secs,
+            "SONA adaptive learning enabled"
+        );
     }
 
-    // 9. Start TUI or wait
-    if args.no_tui {
-        tracing::info!("Running in headless mode (no TUI). Press Ctrl+C to stop.");
-        tokio::signal::ctrl_c().await?;
-    } else {
-        let mut tui = TuiRunner::new(repository.clone(), session_id);
-        tui.run().await?;
-    }
+    tracing::info!(
+        host = %args.host,
+        port = args.port,
+        session_id = %session.id,
+        "Starting standalone harness MCP daemon"
+    );
 
-    // 10. Graceful shutdown
-    tracing::info!("Shutting down...");
+    start_mcp_server(Arc::new(hive_state), &args.host, args.port)
+        .await
+        .map_err(|e| anyhow!("MCP server exited with error: {e}"))?;
 
     Ok(())
-}
-
-/// Select worker roles based on the number of workers requested.
-///
-/// With 1 worker: Developer
-/// With 2: Developer, Tester
-/// With 3: Developer, Tester, Architect
-/// With 4+: Developer, Tester, Architect, BA, PM, Developer...
-fn default_worker_roles(count: usize) -> Vec<AgentRole> {
-    let role_order = [
-        AgentRole::Developer,
-        AgentRole::Tester,
-        AgentRole::Architect,
-        AgentRole::BusinessAnalyst,
-        AgentRole::ProductManager,
-        AgentRole::Developer, // extra devs after all roles filled
-    ];
-
-    role_order.iter().copied().cycle().take(count).collect()
 }
 
 #[cfg(test)]
@@ -496,61 +433,66 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_roles_for_3_workers() {
-        let roles = default_worker_roles(3);
-        assert_eq!(roles.len(), 3);
-        assert_eq!(roles[0], AgentRole::Developer);
-        assert_eq!(roles[1], AgentRole::Tester);
-        assert_eq!(roles[2], AgentRole::Architect);
+    fn args_parse_defaults() {
+        let parsed = Args::parse_from(Vec::<String>::new()).expect("default parse");
+        assert_eq!(parsed.host, "127.0.0.1");
+        assert_eq!(parsed.port, 3000);
+        assert_eq!(parsed.population_cap, 16);
+        assert_eq!(parsed.session_file, PathBuf::from(".harness-mcp-session"));
+        assert!(parsed.embedding_model.is_none());
+        assert!(parsed.ollama_url.is_none());
     }
 
     #[test]
-    fn default_roles_for_5_workers() {
-        let roles = default_worker_roles(5);
-        assert_eq!(roles.len(), 5);
-        assert_eq!(roles[0], AgentRole::Developer);
-        assert_eq!(roles[1], AgentRole::Tester);
-        assert_eq!(roles[2], AgentRole::Architect);
-        assert_eq!(roles[3], AgentRole::BusinessAnalyst);
-        assert_eq!(roles[4], AgentRole::ProductManager);
+    fn args_parse_overrides() {
+        let parsed = Args::parse_from(vec![
+            "--host".into(),
+            "0.0.0.0".into(),
+            "--port".into(),
+            "4001".into(),
+            "--population-cap".into(),
+            "24".into(),
+            "--session-file".into(),
+            "tmp/session-id.txt".into(),
+            "--embedding-model".into(),
+            "nomic-embed-text".into(),
+            "--ollama-url".into(),
+            "http://localhost:11434".into(),
+        ])
+        .expect("override parse");
+
+        assert_eq!(parsed.host, "0.0.0.0");
+        assert_eq!(parsed.port, 4001);
+        assert_eq!(parsed.population_cap, 24);
+        assert_eq!(parsed.session_file, PathBuf::from("tmp/session-id.txt"));
+        assert_eq!(parsed.embedding_model.as_deref(), Some("nomic-embed-text"));
+        assert_eq!(parsed.ollama_url.as_deref(), Some("http://localhost:11434"));
     }
 
     #[test]
-    fn default_roles_for_1_worker() {
-        let roles = default_worker_roles(1);
-        assert_eq!(roles.len(), 1);
-        assert_eq!(roles[0], AgentRole::Developer);
+    fn args_parse_rejects_unknown_flag() {
+        let err = Args::parse_from(vec!["--wat".into()]).expect_err("must fail");
+        assert!(err.to_string().contains("unknown argument"));
     }
 
     #[test]
-    fn runtime_inferred_from_cli_name() {
-        assert_eq!(
-            resolve_agent_runtime("codex", None),
-            AgentRuntimeKind::Codex
-        );
-        assert_eq!(
-            resolve_agent_runtime("gemini", None),
-            AgentRuntimeKind::Gemini
-        );
-        assert_eq!(
-            resolve_agent_runtime("claude", None),
-            AgentRuntimeKind::Claude
-        );
+    fn args_parse_rejects_invalid_port() {
+        let err = Args::parse_from(vec!["--port".into(), "abc".into()]).expect_err("must fail");
+        assert!(err.to_string().contains("invalid --port value"));
     }
 
     #[test]
-    fn runtime_override_wins_when_valid() {
-        assert_eq!(
-            resolve_agent_runtime("claude", Some("codex")),
-            AgentRuntimeKind::Codex
-        );
-    }
+    fn session_file_roundtrip() {
+        let temp_dir = std::env::temp_dir().join(format!("harness-mcpd-{}", Uuid::new_v4()));
+        let session_file = temp_dir.join("session.txt");
+        let session_id = SessionId::new();
 
-    #[test]
-    fn runtime_override_falls_back_when_invalid() {
-        assert_eq!(
-            resolve_agent_runtime("gemini", Some("unknown")),
-            AgentRuntimeKind::Gemini
-        );
+        write_session_id(&session_file, session_id).expect("write");
+        let loaded = read_session_id(&session_file).expect("read");
+
+        assert_eq!(loaded, Some(session_id));
+
+        let _ = fs::remove_file(&session_file);
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }
