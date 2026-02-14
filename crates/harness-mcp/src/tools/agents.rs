@@ -112,6 +112,9 @@ pub struct SpawnAgentRequest {
     /// Custom instructions to include in the generated system prompt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_prompt: Option<String>,
+    /// Strategoi directive appended to the standard agent template.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directive: Option<String>,
     /// Polling interval in seconds for auto-polling get_messages and get_hive_status.
     #[serde(default = "default_poll_interval")]
     pub poll_interval_secs: u64,
@@ -125,6 +128,52 @@ pub struct SpawnAgentRequest {
 
 fn default_poll_interval() -> u64 {
     30
+}
+
+fn default_handshake_mode() -> String {
+    "ring".to_string()
+}
+
+/// Request to spawn a team of agents and seed handshake DMs between them.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SpawnTeamAndHandshakeRequest {
+    /// Role for spawned agents (MVP: only "developer" supported).
+    pub role: String,
+    /// Number of agents to spawn.
+    pub agent_count: usize,
+    /// CLI command to execute (e.g., "claude", "codex", "gemini").
+    pub cli_command: String,
+    /// CLI arguments with {PROMPT} placeholder for system prompt injection.
+    pub cli_args: Vec<String>,
+    /// Custom instructions to include in each generated system prompt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_prompt: Option<String>,
+    /// Strategoi directive appended to each agent template.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directive: Option<String>,
+    /// Polling interval in seconds for auto-polling get_messages and get_hive_status.
+    #[serde(default = "default_poll_interval")]
+    pub poll_interval_secs: u64,
+    /// Handshake topology: "ring" or "full_mesh".
+    #[serde(default = "default_handshake_mode")]
+    pub handshake_mode: String,
+    /// Optional custom message body used for seeded handshake DMs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handshake_message: Option<String>,
+    /// Optional agent ID for multi-client support.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
+
+/// Response from spawn_team_and_handshake.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SpawnTeamAndHandshakeResponse {
+    /// Spawned Harness agent IDs.
+    pub agent_ids: Vec<String>,
+    /// IDs of direct messages created to establish handshake links.
+    pub message_ids: Vec<String>,
+    /// Handshake topology used.
+    pub handshake_mode: String,
 }
 
 /// Request to list running processes.
@@ -202,7 +251,13 @@ pub struct GetProcessOutputResponse {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CommandAgentRequest {
     pub agent_id: String,
-    pub prompt: String,
+    /// Raw prompt to send to the agent (legacy path).
+    /// Optional when using `directive`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    /// Strategoi directive to wrap with the command prompt template.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directive: Option<String>,
     pub cli_command: String,
     pub cli_args: Vec<String>,
     /// Optional agent ID for multi-client support

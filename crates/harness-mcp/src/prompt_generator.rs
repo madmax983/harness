@@ -92,6 +92,45 @@ Remember: You are part of a coordinated team!
     )
 }
 
+/// Generate a command prompt template where strategoi only supplies a directive.
+///
+/// This keeps command prompts consistent and ensures required agent identity
+/// details are included for MCP tool calls.
+pub fn generate_strategoi_directive_prompt(
+    agent_id: &str,
+    directive: &str,
+    context: Option<&str>,
+) -> String {
+    let context_section = context
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(|c| format!("\nOptional Context:\n{}\n", c))
+        .unwrap_or_default();
+
+    format!(
+        r#"You are a Harness worker agent receiving an execution directive from strategoi.
+Your agent_id is: {agent_id}
+
+CRITICAL RULES:
+1. Do NOT call register_agent.
+2. Include _agent_id: "{agent_id}" in all mcp__harness__* calls.
+3. Execute first, then summarize.
+4. If a task_id is provided, claim it before implementation.
+{context_section}
+DIRECTIVE (execute now):
+{directive}
+
+When done, report:
+- actions_taken
+- current_status
+- blockers
+"#,
+        agent_id = agent_id,
+        directive = directive.trim(),
+        context_section = context_section,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,5 +267,31 @@ mod tests {
             prompt.contains("_agent_id"),
             "Should mention _agent_id parameter"
         );
+    }
+
+    #[test]
+    fn test_strategoi_directive_prompt_contains_agent_and_directive() {
+        let prompt = generate_strategoi_directive_prompt(
+            "agent-123",
+            "Claim task t1 and start implementation",
+            None,
+        );
+
+        assert!(prompt.contains("agent-123"));
+        assert!(prompt.contains("DIRECTIVE (execute now):"));
+        assert!(prompt.contains("Claim task t1 and start implementation"));
+        assert!(prompt.contains("_agent_id"));
+    }
+
+    #[test]
+    fn test_strategoi_directive_prompt_includes_context_when_provided() {
+        let prompt = generate_strategoi_directive_prompt(
+            "agent-456",
+            "Work task",
+            Some("Task is latency-sensitive."),
+        );
+
+        assert!(prompt.contains("Optional Context:"));
+        assert!(prompt.contains("Task is latency-sensitive."));
     }
 }

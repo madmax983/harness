@@ -58,6 +58,28 @@ pub struct ProcessManager<R: Repository> {
     processes: RwLock<HashMap<AgentId, ProcessHandle>>,
 }
 
+fn requires_windows_cmd_wrapper(cli_command: &str) -> bool {
+    cfg!(windows)
+        && (cli_command.ends_with(".cmd")
+            || cli_command.ends_with(".bat")
+            || (!cli_command.contains('\\')
+                && !cli_command.contains('/')
+                && !cli_command.ends_with(".exe")))
+}
+
+fn prepare_prompt_for_cli_arg(prompt: &str, uses_cmd_wrapper: bool) -> String {
+    if !uses_cmd_wrapper {
+        return prompt.to_string();
+    }
+
+    // `cmd.exe` treats raw newlines as command separators, so keep content but
+    // collapse line breaks into a single argument-safe string.
+    prompt
+        .replace("\r\n", "\n")
+        .replace('\n', " | ")
+        .replace('\r', " | ")
+}
+
 impl<R: Repository + 'static> ProcessManager<R> {
     /// Create a new process manager.
     pub fn new(config: OrchestratorConfig, repository: Arc<R>) -> Self {
@@ -282,28 +304,35 @@ impl<R: Repository + 'static> ProcessManager<R> {
     ) -> ProcessResult<()> {
         // Build full prompt with MCP connection instructions
         let full_prompt = self.build_mcp_prompt(prompt);
+        let uses_cmd_wrapper = requires_windows_cmd_wrapper(cli_command);
+        let prompt_for_arg = prepare_prompt_for_cli_arg(&full_prompt, uses_cmd_wrapper);
 
         // Replace {PROMPT} placeholder in args with actual prompt
         let mut resolved_args: Vec<String> = cli_args
             .iter()
-            .map(|arg| arg.replace("{PROMPT}", &full_prompt))
+            .map(|arg| arg.replace("{PROMPT}", &prompt_for_arg))
             .collect();
 
         // Platform-aware command resolution
-        let (program, args) = if cfg!(windows) && (cli_command.ends_with(".cmd") || cli_command.ends_with(".bat")) {
-            // Windows batch files need cmd.exe wrapper
-            let mut cmd_args = vec!["/c".to_string(), cli_command.to_string()];
-            cmd_args.append(&mut resolved_args);
-            ("cmd.exe".to_string(), cmd_args)
-        } else if cfg!(windows) && !cli_command.contains('\\') && !cli_command.contains('/') && !cli_command.ends_with(".exe") {
-            // Bare command on Windows - might be .cmd in PATH, try cmd.exe wrapper
-            let mut cmd_args = vec!["/c".to_string(), cli_command.to_string()];
-            cmd_args.append(&mut resolved_args);
-            ("cmd.exe".to_string(), cmd_args)
-        } else {
-            // Direct execution (Unix or Windows .exe)
-            (cli_command.to_string(), resolved_args)
-        };
+        let (program, args) =
+            if cfg!(windows) && (cli_command.ends_with(".cmd") || cli_command.ends_with(".bat")) {
+                // Windows batch files need cmd.exe wrapper
+                let mut cmd_args = vec!["/c".to_string(), cli_command.to_string()];
+                cmd_args.append(&mut resolved_args);
+                ("cmd.exe".to_string(), cmd_args)
+            } else if cfg!(windows)
+                && !cli_command.contains('\\')
+                && !cli_command.contains('/')
+                && !cli_command.ends_with(".exe")
+            {
+                // Bare command on Windows - might be .cmd in PATH, try cmd.exe wrapper
+                let mut cmd_args = vec!["/c".to_string(), cli_command.to_string()];
+                cmd_args.append(&mut resolved_args);
+                ("cmd.exe".to_string(), cmd_args)
+            } else {
+                // Direct execution (Unix or Windows .exe)
+                (cli_command.to_string(), resolved_args)
+            };
 
         let child = Command::new(&program)
             .args(&args)
@@ -311,7 +340,9 @@ impl<R: Repository + 'static> ProcessManager<R> {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| ProcessError::SpawnFailed(format!("Failed to spawn '{}': {}", program, e)))?;
+            .map_err(|e| {
+                ProcessError::SpawnFailed(format!("Failed to spawn '{}': {}", program, e))
+            })?;
 
         // Create process handle with output capture
         let handle = Self::create_process_handle(child);
@@ -374,7 +405,11 @@ impl<R: Repository + 'static> ProcessManager<R> {
     /// For codex: looks for thread_id in JSON output.
     /// For claude: looks for session_id pattern.
     /// For gemini: looks for session_id pattern.
-    async fn extract_session_id(&self, agent_id: AgentId, runtime_kind: AgentRuntimeKind) -> Option<String> {
+    async fn extract_session_id(
+        &self,
+        agent_id: AgentId,
+        runtime_kind: AgentRuntimeKind,
+    ) -> Option<String> {
         let processes = self.processes.read().await;
         let handle = processes.get(&agent_id)?;
 
@@ -412,9 +447,12 @@ impl<R: Repository + 'static> ProcessManager<R> {
                 if let Some(start) = combined.find("session id: ") {
                     let id_start = start + "session id: ".len();
                     // UUID format: 8-4-4-4-12 hex chars with dashes
-                    if let Some(end) = combined[id_start..].find(|c: char| !c.is_ascii_hexdigit() && c != '-') {
+                    if let Some(end) =
+                        combined[id_start..].find(|c: char| !c.is_ascii_hexdigit() && c != '-')
+                    {
                         let candidate = &combined[id_start..id_start + end];
-                        if candidate.len() == 36 {  // Standard UUID length
+                        if candidate.len() == 36 {
+                            // Standard UUID length
                             return Some(candidate.to_string());
                         }
                     }
@@ -424,7 +462,9 @@ impl<R: Repository + 'static> ProcessManager<R> {
                 // Look for "Session ID: <uuid>" pattern in Gemini output
                 if let Some(start) = combined.find("Session ID: ") {
                     let id_start = start + "Session ID: ".len();
-                    if let Some(end) = combined[id_start..].find(|c: char| !c.is_ascii_hexdigit() && c != '-') {
+                    if let Some(end) =
+                        combined[id_start..].find(|c: char| !c.is_ascii_hexdigit() && c != '-')
+                    {
                         let candidate = &combined[id_start..id_start + end];
                         if candidate.len() == 36 {
                             return Some(candidate.to_string());
@@ -465,6 +505,8 @@ impl<R: Repository + 'static> ProcessManager<R> {
 
         // Build MCP-augmented prompt
         let full_prompt = self.build_mcp_prompt(prompt);
+        let uses_cmd_wrapper = requires_windows_cmd_wrapper(cli_command);
+        let prompt_for_arg = prepare_prompt_for_cli_arg(&full_prompt, uses_cmd_wrapper);
 
         // Build resume command with runtime-specific logic
         let mut resolved_args: Vec<String> = match (runtime_kind, session_id.as_ref()) {
@@ -474,7 +516,7 @@ impl<R: Repository + 'static> ProcessManager<R> {
                     "exec".to_string(),
                     "resume".to_string(),
                     sid.clone(),
-                    full_prompt.clone(),
+                    prompt_for_arg.clone(),
                 ];
                 // Preserve flags like --json from original cli_args
                 args.extend(
@@ -486,27 +528,30 @@ impl<R: Repository + 'static> ProcessManager<R> {
                 args
             }
             // Claude/Gemini with session: not implemented yet, fall back to fresh
-            (AgentRuntimeKind::Claude | AgentRuntimeKind::Gemini | AgentRuntimeKind::ClaudeCompatible, Some(_sid)) => {
+            (
+                AgentRuntimeKind::Claude
+                | AgentRuntimeKind::Gemini
+                | AgentRuntimeKind::ClaudeCompatible,
+                Some(_sid),
+            ) => {
                 tracing::warn!(
                     runtime = ?runtime_kind,
                     "Session resume not implemented for this runtime, spawning fresh"
                 );
-                cli_args.iter().map(|arg| arg.replace("{PROMPT}", &full_prompt)).collect()
+                cli_args
+                    .iter()
+                    .map(|arg| arg.replace("{PROMPT}", &prompt_for_arg))
+                    .collect()
             }
             // No session: use original args with prompt replacement
-            (_, None) => {
-                cli_args.iter().map(|arg| arg.replace("{PROMPT}", &full_prompt)).collect()
-            }
+            (_, None) => cli_args
+                .iter()
+                .map(|arg| arg.replace("{PROMPT}", &prompt_for_arg))
+                .collect(),
         };
 
         // Platform-aware command resolution (same as spawn_process_with_cli)
-        let (program, args) = if cfg!(windows)
-            && (cli_command.ends_with(".cmd")
-                || cli_command.ends_with(".bat")
-                || (!cli_command.contains('\\')
-                    && !cli_command.contains('/')
-                    && !cli_command.ends_with(".exe")))
-        {
+        let (program, args) = if uses_cmd_wrapper {
             let mut cmd_args = vec!["/c".to_string(), cli_command.to_string()];
             cmd_args.append(&mut resolved_args);
             ("cmd.exe".to_string(), cmd_args)
@@ -521,7 +566,9 @@ impl<R: Repository + 'static> ProcessManager<R> {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| ProcessError::SpawnFailed(format!("Failed to command '{}': {}", program, e)))?;
+            .map_err(|e| {
+                ProcessError::SpawnFailed(format!("Failed to command '{}': {}", program, e))
+            })?;
 
         let mut handle = Self::create_process_handle(child);
 
@@ -568,6 +615,37 @@ mod tests {
             std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string())
         } else {
             "sh".to_string()
+        }
+    }
+
+    #[test]
+    fn test_prepare_prompt_for_cli_arg_preserves_newlines_without_cmd_wrapper() {
+        let prompt = "line1\nline2\r\nline3";
+        let prepared = prepare_prompt_for_cli_arg(prompt, false);
+        assert_eq!(prepared, prompt);
+    }
+
+    #[test]
+    fn test_prepare_prompt_for_cli_arg_flattens_newlines_for_cmd_wrapper() {
+        let prompt = "line1\nline2\r\nline3";
+        let prepared = prepare_prompt_for_cli_arg(prompt, true);
+        assert!(!prepared.contains('\n'));
+        assert!(!prepared.contains('\r'));
+        assert!(prepared.contains("line1"));
+        assert!(prepared.contains("line2"));
+        assert!(prepared.contains("line3"));
+    }
+
+    #[test]
+    fn test_requires_windows_cmd_wrapper_detection() {
+        if cfg!(windows) {
+            assert!(requires_windows_cmd_wrapper("codex"));
+            assert!(requires_windows_cmd_wrapper("tool.cmd"));
+            assert!(!requires_windows_cmd_wrapper("tool.exe"));
+        } else {
+            assert!(!requires_windows_cmd_wrapper("codex"));
+            assert!(!requires_windows_cmd_wrapper("tool.cmd"));
+            assert!(!requires_windows_cmd_wrapper("tool.exe"));
         }
     }
 
@@ -682,13 +760,20 @@ mod tests {
         // Inject codex-style output
         {
             let mut buf = handle.stdout_buffer.write().await;
-            buf.push_str(r#"{"thread_id": "019c5833-db2e-73d3-8b81-3faa95772466", "status": "active"}"#);
+            buf.push_str(
+                r#"{"thread_id": "019c5833-db2e-73d3-8b81-3faa95772466", "status": "active"}"#,
+            );
         }
 
         manager.processes.write().await.insert(agent.id, handle);
 
-        let session_id = manager.extract_session_id(agent.id, AgentRuntimeKind::Codex).await;
-        assert_eq!(session_id, Some("019c5833-db2e-73d3-8b81-3faa95772466".to_string()));
+        let session_id = manager
+            .extract_session_id(agent.id, AgentRuntimeKind::Codex)
+            .await;
+        assert_eq!(
+            session_id,
+            Some("019c5833-db2e-73d3-8b81-3faa95772466".to_string())
+        );
     }
 
     #[tokio::test]
@@ -726,7 +811,9 @@ mod tests {
         manager.processes.write().await.insert(agent.id, handle);
 
         // Should return stored ID without parsing output
-        let session_id = manager.extract_session_id(agent.id, AgentRuntimeKind::Codex).await;
+        let session_id = manager
+            .extract_session_id(agent.id, AgentRuntimeKind::Codex)
+            .await;
         assert_eq!(session_id, Some("stored-session-123".to_string()));
     }
 
@@ -767,7 +854,9 @@ mod tests {
 
         manager.processes.write().await.insert(agent.id, handle);
 
-        let session_id = manager.extract_session_id(agent.id, AgentRuntimeKind::Codex).await;
+        let session_id = manager
+            .extract_session_id(agent.id, AgentRuntimeKind::Codex)
+            .await;
         assert_eq!(session_id, Some("abc-123-def".to_string()));
     }
 

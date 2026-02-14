@@ -164,6 +164,35 @@ impl Default for AgentRuntime {
 mod tests {
     use super::*;
 
+    fn quick_command_with_prompt() -> (&'static str, Vec<String>) {
+        if cfg!(windows) {
+            (
+                "cmd",
+                vec!["/C".to_string(), "echo".to_string(), "{PROMPT}".to_string()],
+            )
+        } else {
+            (
+                "sh",
+                vec!["-c".to_string(), "echo \"{PROMPT}\"".to_string()],
+            )
+        }
+    }
+
+    fn long_running_command() -> (&'static str, Vec<String>) {
+        if cfg!(windows) {
+            (
+                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                vec![
+                    "-NoProfile".to_string(),
+                    "-Command".to_string(),
+                    "Start-Sleep -Seconds 30".to_string(),
+                ],
+            )
+        } else {
+            ("sleep", vec!["30".to_string()])
+        }
+    }
+
     #[test]
     fn test_new_runtime_is_empty() {
         let runtime = AgentRuntime::new();
@@ -173,12 +202,12 @@ mod tests {
     #[test]
     fn test_spawn_cli_agent_basic() {
         let mut runtime = AgentRuntime::new();
+        let (cli_command, cli_args) = quick_command_with_prompt();
 
-        // Spawn a simple echo process
         let result = runtime.spawn_cli_agent(
             "test-agent-1".to_string(),
-            "echo",
-            &["Hello from {PROMPT}".to_string()],
+            cli_command,
+            &cli_args,
             "agent-1",
         );
 
@@ -190,50 +219,48 @@ mod tests {
     #[test]
     fn test_spawn_replaces_prompt_placeholder() {
         let mut runtime = AgentRuntime::new();
+        let (cli_command, cli_args) = quick_command_with_prompt();
+        let prompt = "custom system prompt";
 
-        // This will fail because we're checking if {PROMPT} gets replaced
-        // We'll need to verify the substitution happened somehow
-        let result = runtime.spawn_cli_agent(
-            "test-agent-2".to_string(),
-            "echo",
-            &["{PROMPT}".to_string()],
-            "custom system prompt",
-        );
+        let result =
+            runtime.spawn_cli_agent("test-agent-2".to_string(), cli_command, &cli_args, prompt);
 
         assert!(result.is_ok());
+        let process_info = runtime.get_process_info("test-agent-2").unwrap();
+        let joined = process_info.cli_args.join(" ");
+        assert!(!joined.contains("{PROMPT}"));
+        assert!(joined.contains(prompt));
     }
 
     #[test]
     fn test_list_running_agents() {
         let mut runtime = AgentRuntime::new();
+        let (cli_command, cli_args) = long_running_command();
 
-        // Spawn a long-running process (sleep)
         runtime
-            .spawn_cli_agent("agent-1".to_string(), "sleep", &["10".to_string()], "test")
+            .spawn_cli_agent("agent-1".to_string(), cli_command, &cli_args, "test")
             .unwrap();
 
         runtime
-            .spawn_cli_agent("agent-2".to_string(), "sleep", &["10".to_string()], "test")
+            .spawn_cli_agent("agent-2".to_string(), cli_command, &cli_args, "test")
             .unwrap();
 
         let running = runtime.list_running();
         assert_eq!(running.len(), 2);
         assert!(running.contains(&"agent-1".to_string()));
         assert!(running.contains(&"agent-2".to_string()));
+
+        runtime.kill_agent("agent-1").unwrap();
+        runtime.kill_agent("agent-2").unwrap();
     }
 
     #[test]
     fn test_kill_agent() {
         let mut runtime = AgentRuntime::new();
+        let (cli_command, cli_args) = long_running_command();
 
-        // Spawn a process
         runtime
-            .spawn_cli_agent(
-                "agent-to-kill".to_string(),
-                "sleep",
-                &["30".to_string()],
-                "test",
-            )
+            .spawn_cli_agent("agent-to-kill".to_string(), cli_command, &cli_args, "test")
             .unwrap();
 
         assert!(runtime.is_running("agent-to-kill"));
@@ -261,13 +288,15 @@ mod tests {
     #[test]
     fn test_is_running() {
         let mut runtime = AgentRuntime::new();
+        let (cli_command, cli_args) = long_running_command();
 
         assert!(!runtime.is_running("agent-1"));
 
         runtime
-            .spawn_cli_agent("agent-1".to_string(), "sleep", &["10".to_string()], "test")
+            .spawn_cli_agent("agent-1".to_string(), cli_command, &cli_args, "test")
             .unwrap();
 
         assert!(runtime.is_running("agent-1"));
+        runtime.kill_agent("agent-1").unwrap();
     }
 }

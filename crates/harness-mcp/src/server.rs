@@ -171,10 +171,7 @@ async fn cleanup_zombie_agents<R: Repository + 'static>(state: &HiveState<R>) {
     let mut cleaned_count = 0;
     for agent in agents {
         // Only check agents that should be running
-        if !matches!(
-            agent.status,
-            AgentStatus::Active | AgentStatus::Starting
-        ) {
+        if !matches!(agent.status, AgentStatus::Active | AgentStatus::Starting) {
             continue;
         }
 
@@ -726,7 +723,10 @@ pub fn tool_definitions() -> Vec<Tool> {
             with_agent_id(HashMap::from([
                 (
                     "role".into(),
-                    prop("string", "Role for spawned agent (e.g., developer, architect, tester)"),
+                    prop(
+                        "string",
+                        "Role for spawned agent (e.g., developer, architect, tester)",
+                    ),
                 ),
                 (
                     "name".into(),
@@ -734,31 +734,125 @@ pub fn tool_definitions() -> Vec<Tool> {
                 ),
                 (
                     "cli_command".into(),
-                    prop("string", "CLI command to execute (e.g., 'claude', 'codex', 'gemini')"),
+                    prop(
+                        "string",
+                        "CLI command to execute (e.g., 'claude', 'codex', 'gemini')",
+                    ),
                 ),
-                (
-                    "cli_args".into(),
-                    {
-                        let mut m = serde_json::Map::new();
-                        m.insert("type".into(), serde_json::Value::String("array".into()));
-                        m.insert("description".into(), serde_json::Value::String("CLI arguments with {PROMPT} placeholder for system prompt injection".into()));
-                        let mut items = serde_json::Map::new();
-                        items.insert("type".into(), serde_json::Value::String("string".into()));
-                        m.insert("items".into(), serde_json::Value::Object(items));
-                        m
-                    },
-                ),
+                ("cli_args".into(), {
+                    let mut m = serde_json::Map::new();
+                    m.insert("type".into(), serde_json::Value::String("array".into()));
+                    m.insert(
+                        "description".into(),
+                        serde_json::Value::String(
+                            "CLI arguments with {PROMPT} placeholder for system prompt injection"
+                                .into(),
+                        ),
+                    );
+                    let mut items = serde_json::Map::new();
+                    items.insert("type".into(), serde_json::Value::String("string".into()));
+                    m.insert("items".into(), serde_json::Value::Object(items));
+                    m
+                }),
                 (
                     "custom_prompt".into(),
-                    prop("string", "Custom instructions to include in the generated system prompt"),
+                    prop(
+                        "string",
+                        "Custom instructions to include in the generated system prompt",
+                    ),
+                ),
+                (
+                    "directive".into(),
+                    prop(
+                        "string",
+                        "Strategoi directive appended to the standard agent template",
+                    ),
                 ),
                 (
                     "poll_interval_secs".into(),
-                    prop_with_default("number", "Polling interval in seconds for auto-polling get_messages and get_hive_status", serde_json::Value::Number(30.into())),
+                    prop_with_default(
+                        "number",
+                        "Polling interval in seconds for auto-polling get_messages and get_hive_status",
+                        serde_json::Value::Number(30.into()),
+                    ),
                 ),
                 (
                     "initial_task_id".into(),
                     prop("string", "Optional task to assign immediately"),
+                ),
+            ])),
+        ),
+        make_tool(
+            "spawn_team_and_handshake",
+            "Spawn n agents and seed handshake direct messages between them (strategoi only).",
+            vec!["role", "agent_count", "cli_command", "cli_args"],
+            with_agent_id(HashMap::from([
+                (
+                    "role".into(),
+                    prop(
+                        "string",
+                        "Role for spawned agents (MVP supports 'developer')",
+                    ),
+                ),
+                (
+                    "agent_count".into(),
+                    prop("integer", "Number of agents to spawn (minimum 2)"),
+                ),
+                (
+                    "cli_command".into(),
+                    prop(
+                        "string",
+                        "CLI command to execute for each agent (e.g., 'claude', 'codex', 'gemini')",
+                    ),
+                ),
+                ("cli_args".into(), {
+                    let mut m = serde_json::Map::new();
+                    m.insert("type".into(), serde_json::Value::String("array".into()));
+                    m.insert(
+                        "description".into(),
+                        serde_json::Value::String(
+                            "CLI arguments with {PROMPT} placeholder for system prompt injection"
+                                .into(),
+                        ),
+                    );
+                    let mut items = serde_json::Map::new();
+                    items.insert("type".into(), serde_json::Value::String("string".into()));
+                    m.insert("items".into(), serde_json::Value::Object(items));
+                    m
+                }),
+                (
+                    "custom_prompt".into(),
+                    prop(
+                        "string",
+                        "Custom instructions to include in each generated system prompt",
+                    ),
+                ),
+                (
+                    "directive".into(),
+                    prop(
+                        "string",
+                        "Strategoi directive appended to each spawned agent template",
+                    ),
+                ),
+                (
+                    "poll_interval_secs".into(),
+                    prop_with_default(
+                        "number",
+                        "Polling interval in seconds for auto-polling get_messages and get_hive_status",
+                        serde_json::Value::Number(30.into()),
+                    ),
+                ),
+                (
+                    "handshake_mode".into(),
+                    prop_with_default(
+                        "string",
+                        "Handshake topology to seed: 'ring' or 'full_mesh'",
+                        serde_json::Value::String("ring".into()),
+                    ),
+                ),
+                (
+                    "handshake_message".into(),
+                    prop("string", "Optional custom body for seeded handshake DMs"),
                 ),
             ])),
         ),
@@ -806,37 +900,38 @@ pub fn tool_definitions() -> Vec<Tool> {
         ),
         make_tool(
             "command_agent",
-            "Command a spawned agent to continue with a new prompt (strategoi-centric orchestration). Uses CLI-specific resume functionality.",
-            vec!["agent_id", "prompt", "cli_command", "cli_args"],
+            "Command a spawned agent using either a raw prompt or a templated strategoi directive.",
+            vec!["agent_id", "cli_command", "cli_args"],
             with_agent_id(HashMap::from([
-                (
-                    "agent_id".into(),
-                    prop("string", "Agent ID to command"),
-                ),
+                ("agent_id".into(), prop("string", "Agent ID to command")),
                 (
                     "prompt".into(),
-                    prop("string", "New prompt to send to the agent"),
+                    prop(
+                        "string",
+                        "Raw prompt to send to the agent (optional when using `directive`)",
+                    ),
+                ),
+                (
+                    "directive".into(),
+                    prop(
+                        "string",
+                        "Strategoi directive to inject into the standard command template",
+                    ),
                 ),
                 (
                     "cli_command".into(),
                     prop("string", "CLI command (e.g., 'codex', 'gemini')"),
                 ),
-                (
-                    "cli_args".into(),
-                    {
-                        let mut args_prop = serde_json::Map::new();
-                        args_prop.insert("type".to_string(), serde_json::json!("array"));
-                        args_prop.insert(
-                            "items".to_string(),
-                            serde_json::json!({"type": "string"}),
-                        );
-                        args_prop.insert(
+                ("cli_args".into(), {
+                    let mut args_prop = serde_json::Map::new();
+                    args_prop.insert("type".to_string(), serde_json::json!("array"));
+                    args_prop.insert("items".to_string(), serde_json::json!({"type": "string"}));
+                    args_prop.insert(
                             "description".to_string(),
                             serde_json::json!("CLI arguments array (session resume will be added automatically for codex)"),
                         );
-                        args_prop
-                    },
-                ),
+                    args_prop
+                }),
             ])),
         ),
         // --- Message tools ---
@@ -1187,7 +1282,10 @@ pub fn tool_definitions() -> Vec<Tool> {
                 ),
                 (
                     "property_name".into(),
-                    prop("string", "Optional property name for vector lookup (auto-detected if omitted)"),
+                    prop(
+                        "string",
+                        "Optional property name for vector lookup (auto-detected if omitted)",
+                    ),
                 ),
             ])),
         ),
@@ -1214,7 +1312,10 @@ pub fn tool_definitions() -> Vec<Tool> {
                 ),
                 (
                     "property_name".into(),
-                    prop("string", "Optional vector property name for semantic scoring"),
+                    prop(
+                        "string",
+                        "Optional vector property name for semantic scoring",
+                    ),
                 ),
             ])),
         ),
@@ -1229,11 +1330,17 @@ pub fn tool_definitions() -> Vec<Tool> {
                 ),
                 (
                     "axes".into(),
-                    prop("array", "Array of axis definitions, each with 'name' and 'reference_id' fields"),
+                    prop(
+                        "array",
+                        "Array of axis definitions, each with 'name' and 'reference_id' fields",
+                    ),
                 ),
                 (
                     "vector_property".into(),
-                    prop("string", "Optional vector property name (auto-detected if omitted)"),
+                    prop(
+                        "string",
+                        "Optional vector property name (auto-detected if omitted)",
+                    ),
                 ),
                 (
                     "orthogonalize".into(),
@@ -1248,7 +1355,13 @@ pub fn tool_definitions() -> Vec<Tool> {
         make_tool(
             "predict_semantic_trajectory",
             "Predict future semantic evolution using Dreamer temporal analysis. Analyzes historical vector changes to extrapolate where a concept is heading (e.g., 'Apple' moved from Fruit to Tech, where next?).",
-            vec!["entity_type", "entity_id", "property", "history_window_seconds", "future_horizon_seconds"],
+            vec![
+                "entity_type",
+                "entity_id",
+                "property",
+                "history_window_seconds",
+                "future_horizon_seconds",
+            ],
             with_agent_id(HashMap::from([
                 (
                     "entity_type".into(),
@@ -1260,11 +1373,17 @@ pub fn tool_definitions() -> Vec<Tool> {
                 ),
                 (
                     "property".into(),
-                    prop("string", "Vector property name to track (e.g., 'embedding')"),
+                    prop(
+                        "string",
+                        "Vector property name to track (e.g., 'embedding')",
+                    ),
                 ),
                 (
                     "history_window_seconds".into(),
-                    prop("integer", "Time window in seconds to analyze for trajectory calculation"),
+                    prop(
+                        "integer",
+                        "Time window in seconds to analyze for trajectory calculation",
+                    ),
                 ),
                 (
                     "future_horizon_seconds".into(),
@@ -1301,17 +1420,27 @@ pub fn tool_definitions() -> Vec<Tool> {
             "Record a trajectory (sequence of action-context-outcome-reward steps) for an agent. Used to train per-agent MicroLoRA models.",
             vec!["agent_id", "trajectory"],
             with_agent_id(HashMap::from([
-                ("agent_id".into(), prop("string", "Agent UUID to record trajectory for")),
-                ("trajectory".into(), prop("array", "Array of trajectory steps, each with action, context, outcome, and reward fields")),
+                (
+                    "agent_id".into(),
+                    prop("string", "Agent UUID to record trajectory for"),
+                ),
+                (
+                    "trajectory".into(),
+                    prop(
+                        "array",
+                        "Array of trajectory steps, each with action, context, outcome, and reward fields",
+                    ),
+                ),
             ])),
         ),
         make_tool(
             "get_agent_lora_state",
             "Get the current MicroLoRA state for an agent including trajectories ingested, mean reward, and action-specific statistics.",
             vec!["agent_id"],
-            with_agent_id(HashMap::from([
-                ("agent_id".into(), prop("string", "Agent UUID to get LoRA state for")),
-            ])),
+            with_agent_id(HashMap::from([(
+                "agent_id".into(),
+                prop("string", "Agent UUID to get LoRA state for"),
+            )])),
         ),
         make_tool(
             "apply_agent_optimization",
@@ -1319,59 +1448,89 @@ pub fn tool_definitions() -> Vec<Tool> {
             vec!["agent_id", "context", "candidate_actions"],
             with_agent_id(HashMap::from([
                 ("agent_id".into(), prop("string", "Agent UUID to optimize")),
-                ("context".into(), prop("string", "Current context/situation description")),
-                ("candidate_actions".into(), prop("array", "Array of possible actions to rank by learned preferences")),
+                (
+                    "context".into(),
+                    prop("string", "Current context/situation description"),
+                ),
+                (
+                    "candidate_actions".into(),
+                    prop(
+                        "array",
+                        "Array of possible actions to rank by learned preferences",
+                    ),
+                ),
             ])),
         ),
         make_tool(
             "persist_agent_lora",
             "Persist an agent's MicroLoRA state to durable storage for later restoration.",
             vec!["agent_id"],
-            with_agent_id(HashMap::from([
-                ("agent_id".into(), prop("string", "Agent UUID whose LoRA state to persist")),
-            ])),
+            with_agent_id(HashMap::from([(
+                "agent_id".into(),
+                prop("string", "Agent UUID whose LoRA state to persist"),
+            )])),
         ),
         make_tool(
             "restore_agent_lora",
             "Restore an agent's MicroLoRA state from durable storage.",
             vec!["agent_id"],
-            with_agent_id(HashMap::from([
-                ("agent_id".into(), prop("string", "Agent UUID whose LoRA state to restore")),
-            ])),
+            with_agent_id(HashMap::from([(
+                "agent_id".into(),
+                prop("string", "Agent UUID whose LoRA state to restore"),
+            )])),
         ),
         // --- SONA Integration tools ---
         make_tool(
             "get_task_trajectory",
             "Retrieve trajectory steps recorded for a specific task, including all learning events triggered by task completion.",
             vec!["task_id"],
-            with_agent_id(HashMap::from([
-                ("task_id".into(), prop("string", "Task UUID to get trajectory for")),
-            ])),
+            with_agent_id(HashMap::from([(
+                "task_id".into(),
+                prop("string", "Task UUID to get trajectory for"),
+            )])),
         ),
         make_tool(
             "query_reasoning_bank",
             "Search learned patterns from the reasoning bank using text similarity. Returns patterns with confidence scores.",
             vec!["query"],
             with_agent_id(HashMap::from([
-                ("query".into(), prop("string", "Search query for finding similar patterns")),
-                ("limit".into(), prop_with_default("integer", "Maximum number of results to return", serde_json::Value::Number(10.into()))),
+                (
+                    "query".into(),
+                    prop("string", "Search query for finding similar patterns"),
+                ),
+                (
+                    "limit".into(),
+                    prop_with_default(
+                        "integer",
+                        "Maximum number of results to return",
+                        serde_json::Value::Number(10.into()),
+                    ),
+                ),
             ])),
         ),
         make_tool(
             "get_learning_status",
             "Check the status of a SONA learning loop including patterns learned and total events recorded.",
             vec!["loop_type"],
-            with_agent_id(HashMap::from([
-                ("loop_type".into(), prop("string", "Learning loop type: instant, background, or coordination")),
-            ])),
+            with_agent_id(HashMap::from([(
+                "loop_type".into(),
+                prop(
+                    "string",
+                    "Learning loop type: instant, background, or coordination",
+                ),
+            )])),
         ),
         make_tool(
             "trigger_learning_cycle",
             "Force a learning cycle for a specific loop type. Flushes buffered events and runs optimization.",
             vec!["loop_type"],
-            with_agent_id(HashMap::from([
-                ("loop_type".into(), prop("string", "Learning loop type: instant, background, or coordination")),
-            ])),
+            with_agent_id(HashMap::from([(
+                "loop_type".into(),
+                prop(
+                    "string",
+                    "Learning loop type: instant, background, or coordination",
+                ),
+            )])),
         ),
     ]
 }
@@ -1385,7 +1544,7 @@ mod tests {
     #[test]
     fn test_tool_definitions_returns_40_tools() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 59);
+        assert_eq!(tools.len(), 60);
     }
 
     #[test]

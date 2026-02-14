@@ -110,16 +110,17 @@ impl AgentRuntime for ClaudeRuntime {
         &self,
         cli_path: &str,
         prompt: &str,
-        mcp_config: &McpServerConfig,
+        _mcp_config: &McpServerConfig,
     ) -> Result<CommandSpec, RuntimeError> {
-        let mcp_json = mcp_config.to_json();
         Ok(CommandSpec::new(
             cli_path,
             vec![
                 "-p".to_string(),
                 prompt.to_string(),
-                "--mcp-config".to_string(),
-                mcp_json,
+                "--output-format".to_string(),
+                "json".to_string(),
+                "--allowedTools".to_string(),
+                r#""Bash,Read,Edit""#.to_string(),
             ],
         ))
     }
@@ -142,7 +143,12 @@ impl AgentRuntime for CodexRuntime {
 
         Ok(CommandSpec::new(
             cli_path,
-            vec!["exec".to_string(), prompt.to_string(), "--json".to_string()],
+            vec![
+                "e".to_string(),
+                prompt.to_string(),
+                "--json".to_string(),
+                "--yolo".to_string(),
+            ],
         ))
     }
 }

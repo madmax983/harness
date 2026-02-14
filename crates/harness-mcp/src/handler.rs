@@ -49,6 +49,21 @@ pub struct HiveHandler<R: Repository> {
     mcp_session_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HandshakeMode {
+    Ring,
+    FullMesh,
+}
+
+impl HandshakeMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ring => "ring",
+            Self::FullMesh => "full_mesh",
+        }
+    }
+}
+
 impl<R: Repository + 'static> HiveHandler<R> {
     /// Create a new handler.
     pub fn new(state: Arc<HiveState<R>>) -> Self {
@@ -232,6 +247,12 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 let resp = self.handle_spawn_agent(req).await?;
                 Ok(serde_json::to_value(resp).unwrap())
             }
+            "spawn_team_and_handshake" => {
+                let req: tools::SpawnTeamAndHandshakeRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_spawn_team_and_handshake(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
             "disconnect_agent" => {
                 let req: tools::DisconnectAgentRequest = serde_json::from_value(arguments)
                     .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
@@ -371,8 +392,9 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 Ok(serde_json::to_value(resp).unwrap())
             }
             "predict_missing_connections" => {
-                let req: tools::PredictMissingConnectionsRequest = serde_json::from_value(arguments)
-                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let req: tools::PredictMissingConnectionsRequest =
+                    serde_json::from_value(arguments)
+                        .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
                 let resp = self.handle_predict_missing_connections(req).await?;
                 Ok(serde_json::to_value(resp).unwrap())
             }
@@ -383,8 +405,9 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 Ok(serde_json::to_value(resp).unwrap())
             }
             "predict_semantic_trajectory" => {
-                let req: tools::PredictSemanticTrajectoryRequest = serde_json::from_value(arguments)
-                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let req: tools::PredictSemanticTrajectoryRequest =
+                    serde_json::from_value(arguments)
+                        .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
                 let resp = self.handle_predict_semantic_trajectory(req).await?;
                 Ok(serde_json::to_value(resp).unwrap())
             }
@@ -409,8 +432,9 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 Ok(serde_json::to_value(resp).unwrap())
             }
             "apply_agent_optimization" => {
-                let req: tools::ApplyAgentOptimizationRequest = serde_json::from_value(arguments)
-                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let req: tools::ApplyAgentOptimizationRequest =
+                    serde_json::from_value(arguments)
+                        .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
                 let resp = self.handle_apply_agent_optimization(req).await?;
                 Ok(serde_json::to_value(resp).unwrap())
             }
@@ -484,6 +508,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
             "list_agents",
             "get_hive_status",
             "spawn_agent",
+            "spawn_team_and_handshake",
             "disconnect_agent",
             "send_direct_message",
             "get_messages",
@@ -549,6 +574,24 @@ impl<R: Repository + 'static> HiveHandler<R> {
         Ok(agent_id)
     }
 
+    fn merge_spawn_custom_and_directive(
+        custom_prompt: Option<&str>,
+        directive: Option<&str>,
+    ) -> Option<String> {
+        match (custom_prompt, directive) {
+            (None, None) => None,
+            (Some(custom), None) => Some(custom.to_string()),
+            (None, Some(dir)) => Some(format!(
+                "IMMEDIATE DIRECTIVE FROM STRATEGOI (execute now):\n{}",
+                dir
+            )),
+            (Some(custom), Some(dir)) => Some(format!(
+                "{}\n\nIMMEDIATE DIRECTIVE FROM STRATEGOI (execute now):\n{}",
+                custom, dir
+            )),
+        }
+    }
+
     fn parse_agent_id(s: &str) -> HandlerResult<AgentId> {
         let uuid = uuid::Uuid::parse_str(s)
             .map_err(|_| HandlerError::Parse(format!("Invalid agent ID: {s}")))?;
@@ -582,6 +625,79 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 "Invalid task status: {s}"
             ))),
         }
+    }
+
+    async fn require_strategoi(&self, provided: Option<&str>) -> HandlerResult<AgentId> {
+        let caller_id = self.resolve_agent_id(provided).await?;
+        let caller = self.state.repository().get_agent(caller_id).await?;
+        if !caller.is_strategoi {
+            return Err(HandlerError::InvalidArgs(
+                "Only strategoi can spawn agents".into(),
+            ));
+        }
+        Ok(caller_id)
+    }
+
+    fn parse_handshake_mode(s: &str) -> HandlerResult<HandshakeMode> {
+        match s.to_ascii_lowercase().as_str() {
+            "ring" => Ok(HandshakeMode::Ring),
+            "full_mesh" | "fullmesh" => Ok(HandshakeMode::FullMesh),
+            _ => Err(HandlerError::InvalidArgs(format!(
+                "Invalid handshake_mode: {s}. Use 'ring' or 'full_mesh'"
+            ))),
+        }
+    }
+
+    async fn spawn_worker_agent(
+        &self,
+        role: &str,
+        cli_command: &str,
+        cli_args: &[String],
+        custom_prompt: Option<&str>,
+        directive: Option<&str>,
+        poll_interval_secs: u64,
+        initial_task_id: Option<&str>,
+    ) -> HandlerResult<AgentId> {
+        // For MVP, only support developer role
+        let parsed_role = Self::parse_role(role)?;
+        if parsed_role != AgentRole::Developer {
+            return Err(HandlerError::InvalidArgs(
+                "MVP only supports spawning developer agents".into(),
+            ));
+        }
+
+        // Create agent entity with Starting status
+        let agent = Agent::new(parsed_role, self.state.session_id());
+        let agent_id = agent.id;
+        let agent_id_str = agent_id.as_uuid().to_string();
+        self.state.repository().create_agent(&agent).await?;
+
+        // Assign initial task if provided
+        if let Some(task_id_str) = initial_task_id {
+            let task_id = Self::parse_task_id(task_id_str)?;
+            self.state
+                .repository()
+                .assign_task(task_id, agent_id)
+                .await?;
+        }
+
+        // Generate system prompt with auto-polling instructions
+        let merged_custom_prompt = Self::merge_spawn_custom_and_directive(custom_prompt, directive);
+        let system_prompt = crate::generate_agent_system_prompt(
+            &agent_id_str,
+            "developer",
+            merged_custom_prompt.as_deref(),
+            poll_interval_secs,
+        );
+
+        // Spawn CLI process using ProcessManager with custom CLI command
+        self.state
+            .process_manager()
+            .spawn_with_cli(agent_id, cli_command, cli_args, &system_prompt)
+            .await
+            .map_err(|e| HandlerError::InternalError(format!("Failed to spawn process: {}", e)))?;
+
+        Ok(agent_id)
     }
 
     fn parse_role(s: &str) -> HandlerResult<AgentRole> {
@@ -1774,10 +1890,9 @@ impl<R: Repository + 'static> HiveHandler<R> {
 
         // SONA: Fire KnowledgeShare learning trigger.
         {
-            let mut trigger =
-                LearningTrigger::new(TriggerKind::KnowledgeShare, agent_id)
-                    .with_knowledge_kind(kind)
-                    .with_summary(&req.content);
+            let mut trigger = LearningTrigger::new(TriggerKind::KnowledgeShare, agent_id)
+                .with_knowledge_kind(kind)
+                .with_summary(&req.content);
 
             if let Some(tid) = task_id {
                 trigger = trigger.with_task_id(tid);
@@ -2397,62 +2512,116 @@ impl<R: Repository + 'static> HiveHandler<R> {
         &self,
         req: tools::SpawnAgentRequest,
     ) -> HandlerResult<tools::SpawnAgentResponse> {
-        // Validate caller is strategoi
-        let caller_id = self.resolve_agent_id(req._agent_id.as_deref()).await?;
-        let caller = self.state.repository().get_agent(caller_id).await?;
-        if !caller.is_strategoi {
-            return Err(HandlerError::InvalidArgs(
-                "Only strategoi can spawn agents".into(),
-            ));
-        }
+        self.require_strategoi(req._agent_id.as_deref()).await?;
 
-        // For MVP, only support developer role
-        let role = Self::parse_role(&req.role)?;
-        if role != AgentRole::Developer {
-            return Err(HandlerError::InvalidArgs(
-                "MVP only supports spawning developer agents".into(),
-            ));
-        }
-
-        // Create agent entity with Starting status
-        let agent = Agent::new(role, self.state.session_id());
-        let agent_id = agent.id;
+        let agent_id = self
+            .spawn_worker_agent(
+                &req.role,
+                &req.cli_command,
+                &req.cli_args,
+                req.custom_prompt.as_deref(),
+                req.directive.as_deref(),
+                req.poll_interval_secs,
+                req.initial_task_id.as_deref(),
+            )
+            .await?;
         let agent_id_str = agent_id.as_uuid().to_string();
 
-        self.state.repository().create_agent(&agent).await?;
-
-        // Assign initial task if provided
-        if let Some(ref task_id_str) = req.initial_task_id {
-            let task_id = Self::parse_task_id(task_id_str)?;
-            self.state
-                .repository()
-                .assign_task(task_id, agent_id)
-                .await?;
-        }
-
-        // Generate system prompt with auto-polling instructions
-        let system_prompt = crate::generate_agent_system_prompt(
-            &agent_id_str,
-            &req.role,
-            req.custom_prompt.as_deref(),
-            req.poll_interval_secs,
-        );
-
-        // Spawn CLI process using ProcessManager with custom CLI command
-        self.state
-            .process_manager()
-            .spawn_with_cli(agent_id, &req.cli_command, &req.cli_args, &system_prompt)
-            .await
-            .map_err(|e| HandlerError::InternalError(format!("Failed to spawn process: {}", e)))?;
-
         // Build CLI command string for response
-        let cli_command = format!("{} {}", req.cli_command, req.cli_args.join(" "));
+        let cli_command = if req.cli_args.is_empty() {
+            req.cli_command.clone()
+        } else {
+            format!("{} {}", req.cli_command, req.cli_args.join(" "))
+        };
 
         Ok(tools::SpawnAgentResponse {
             agent_id: agent_id_str,
             process_id: None, // ProcessManager doesn't expose PID currently
             cli_command: Some(cli_command),
             teammate_id: None, // Deprecated - actual process spawned
+        })
+    }
+
+    async fn handle_spawn_team_and_handshake(
+        &self,
+        req: tools::SpawnTeamAndHandshakeRequest,
+    ) -> HandlerResult<tools::SpawnTeamAndHandshakeResponse> {
+        self.require_strategoi(req._agent_id.as_deref()).await?;
+
+        if req.agent_count < 2 {
+            return Err(HandlerError::InvalidArgs(
+                "agent_count must be at least 2".into(),
+            ));
+        }
+
+        let handshake_mode = Self::parse_handshake_mode(&req.handshake_mode)?;
+
+        let mut agent_ids = Vec::with_capacity(req.agent_count);
+        for _ in 0..req.agent_count {
+            let agent_id = self
+                .spawn_worker_agent(
+                    &req.role,
+                    &req.cli_command,
+                    &req.cli_args,
+                    req.custom_prompt.as_deref(),
+                    req.directive.as_deref(),
+                    req.poll_interval_secs,
+                    None,
+                )
+                .await?;
+            agent_ids.push(agent_id);
+        }
+
+        let message_body = req.handshake_message.unwrap_or_else(|| {
+            format!(
+                "Handshake seeded by spawn_team_and_handshake (mode: {}).",
+                handshake_mode.as_str()
+            )
+        });
+
+        let mut message_ids = Vec::new();
+        match handshake_mode {
+            HandshakeMode::Ring => {
+                for (idx, from_agent) in agent_ids.iter().enumerate() {
+                    let to_agent = agent_ids[(idx + 1) % agent_ids.len()];
+                    let dm = DirectMessage::new(
+                        *from_agent,
+                        to_agent,
+                        &message_body,
+                        self.state.session_id(),
+                    );
+                    let mid = dm.id.as_uuid().to_string();
+                    self.state.repository().create_direct_message(&dm).await?;
+                    message_ids.push(mid);
+                }
+            }
+            HandshakeMode::FullMesh => {
+                for from_agent in &agent_ids {
+                    for to_agent in &agent_ids {
+                        if from_agent == to_agent {
+                            continue;
+                        }
+                        let dm = DirectMessage::new(
+                            *from_agent,
+                            *to_agent,
+                            &message_body,
+                            self.state.session_id(),
+                        );
+                        let mid = dm.id.as_uuid().to_string();
+                        self.state.repository().create_direct_message(&dm).await?;
+                        message_ids.push(mid);
+                    }
+                }
+            }
+        }
+
+        Ok(tools::SpawnTeamAndHandshakeResponse {
+            agent_ids: agent_ids
+                .iter()
+                .map(|id| id.as_uuid().to_string())
+                .collect(),
+            message_ids,
+            handshake_mode: handshake_mode.as_str().to_string(),
         })
     }
 
@@ -2578,10 +2747,23 @@ impl<R: Repository + 'static> HiveHandler<R> {
         req: tools::CommandAgentRequest,
     ) -> HandlerResult<tools::CommandAgentResponse> {
         let agent_id = Self::parse_agent_id(&req.agent_id)?;
+        let prompt = match (req.prompt.as_deref(), req.directive.as_deref()) {
+            (_, Some(directive)) => crate::generate_strategoi_directive_prompt(
+                &req.agent_id,
+                directive,
+                req.prompt.as_deref(),
+            ),
+            (Some(raw_prompt), None) => raw_prompt.to_string(),
+            (None, None) => {
+                return Err(HandlerError::InvalidArgs(
+                    "command_agent requires either `prompt` or `directive`".into(),
+                ));
+            }
+        };
 
         self.state
             .process_manager()
-            .command_agent(agent_id, &req.cli_command, &req.cli_args, &req.prompt)
+            .command_agent(agent_id, &req.cli_command, &req.cli_args, &prompt)
             .await
             .map_err(|e| HandlerError::InternalError(format!("Failed to command agent: {}", e)))?;
 
@@ -3463,9 +3645,8 @@ impl<R: Repository + 'static> HiveHandler<R> {
             let id_u64: u64 = id_part
                 .parse()
                 .map_err(|_| HandlerError::InvalidArgs(format!("Invalid node ID: {}", id_str)))?;
-            NodeId::new(id_u64).map_err(|_| {
-                HandlerError::InvalidArgs(format!("Invalid node ID: {}", id_str))
-            })
+            NodeId::new(id_u64)
+                .map_err(|_| HandlerError::InvalidArgs(format!("Invalid node ID: {}", id_str)))
         };
 
         let target_id = parse_node_id(&req.target_id)?;
@@ -3495,7 +3676,8 @@ impl<R: Repository + 'static> HiveHandler<R> {
             .map_err(|e| HandlerError::Repository(RepositoryError::Database(e.to_string())))?;
 
         // Generate explanation
-        let mut axis_scores: Vec<(String, f32)> = spectrum.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        let mut axis_scores: Vec<(String, f32)> =
+            spectrum.iter().map(|(k, v)| (k.clone(), *v)).collect();
         axis_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let explanation = if axis_scores.is_empty() {
@@ -3525,7 +3707,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
         req: tools::PredictSemanticTrajectoryRequest,
     ) -> HandlerResult<tools::PredictSemanticTrajectoryResponse> {
         use aletheiadb::core::hlc::HybridTimestamp;
-        use aletheiadb::core::temporal::{time, TimeRange};
+        use aletheiadb::core::temporal::{TimeRange, time};
         use aletheiadb::experimental::dreamer::Dreamer;
         use std::time::Duration;
 
@@ -3558,8 +3740,9 @@ impl<R: Repository + 'static> HiveHandler<R> {
 
         // Define time window for history
         let now = time::now();
-        let history_start_wallclock =
-            now.wallclock().saturating_sub(req.history_window_seconds as i64 * 1_000_000);
+        let history_start_wallclock = now
+            .wallclock()
+            .saturating_sub(req.history_window_seconds as i64 * 1_000_000);
         let history_start = HybridTimestamp::new(history_start_wallclock, 0)
             .map_err(|e| HandlerError::Repository(RepositoryError::Database(e.to_string())))?;
         let history_window = TimeRange::new(history_start, now)
@@ -3569,7 +3752,13 @@ impl<R: Repository + 'static> HiveHandler<R> {
 
         // Predict future trajectory
         let results = dreamer
-            .predict_future(node_id, &req.property, history_window, future_horizon, req.k)
+            .predict_future(
+                node_id,
+                &req.property,
+                history_window,
+                future_horizon,
+                req.k,
+            )
             .map_err(|e| HandlerError::Repository(RepositoryError::Database(e.to_string())))?;
 
         // Convert results
@@ -3584,7 +3773,9 @@ impl<R: Repository + 'static> HiveHandler<R> {
 
         let description = format!(
             "Analyzed {}-second history window, projected {} seconds forward. Found {} semantically similar entities.",
-            req.history_window_seconds, req.future_horizon_seconds, predictions.len()
+            req.history_window_seconds,
+            req.future_horizon_seconds,
+            predictions.len()
         );
 
         Ok(tools::PredictSemanticTrajectoryResponse {
@@ -3650,7 +3841,13 @@ impl<R: Repository + 'static> HiveHandler<R> {
         } else {
             format!(
                 "{} {} evolved through {} versions from {} to {}",
-                req.entity_type.chars().next().unwrap().to_uppercase().to_string() + &req.entity_type[1..],
+                req.entity_type
+                    .chars()
+                    .next()
+                    .unwrap()
+                    .to_uppercase()
+                    .to_string()
+                    + &req.entity_type[1..],
                 req.entity_id,
                 narrative_events.len(),
                 narrative_events.first().unwrap().timestamp,
@@ -3761,7 +3958,11 @@ impl<R: Repository + 'static> HiveHandler<R> {
             .collect();
 
         // Sort by confidence descending
-        ranked.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+        ranked.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         Ok(tools::ApplyAgentOptimizationResponse {
             ranked_actions: ranked,
@@ -3777,8 +3978,9 @@ impl<R: Repository + 'static> HiveHandler<R> {
         let lora_map = self.state.micro_lora().read().await;
         if let Some(data) = lora_map.get(&agent_id) {
             // Persist as knowledge entry with special kind
-            let serialized = serde_json::to_string(data)
-                .map_err(|e| HandlerError::InternalError(format!("Failed to serialize LoRA state: {e}")))?;
+            let serialized = serde_json::to_string(data).map_err(|e| {
+                HandlerError::InternalError(format!("Failed to serialize LoRA state: {e}"))
+            })?;
 
             let knowledge = Knowledge::new(
                 format!("__micro_lora_state__:{}", req.agent_id),
@@ -3822,13 +4024,15 @@ impl<R: Repository + 'static> HiveHandler<R> {
         // but we search for the matching prefix regardless
         let persisted_entry = knowledge_entries
             .iter()
-            .find(|k| k.content.starts_with('{') && {
-                // Try to deserialize -- if it works and was stored with the right agent, use it
-                if let Ok(data) = serde_json::from_str::<AgentLoraData>(&k.content) {
-                    // Verify it belongs to this agent by checking the author
-                    k.author_id == agent_id && data.trajectories_ingested() > 0
-                } else {
-                    false
+            .find(|k| {
+                k.content.starts_with('{') && {
+                    // Try to deserialize -- if it works and was stored with the right agent, use it
+                    if let Ok(data) = serde_json::from_str::<AgentLoraData>(&k.content) {
+                        // Verify it belongs to this agent by checking the author
+                        k.author_id == agent_id && data.trajectories_ingested() > 0
+                    } else {
+                        false
+                    }
                 }
             })
             .or_else(|| {
@@ -3857,19 +4061,13 @@ impl<R: Repository + 'static> HiveHandler<R> {
 
     /// Record a trajectory event and associate it with a task.
     /// Called internally by task/knowledge handlers for auto-recording.
-    async fn record_sona_trajectory(
-        &self,
-        trigger: LearningTrigger,
-        task_id: Option<TaskId>,
-    ) {
+    async fn record_sona_trajectory(&self, trigger: LearningTrigger, task_id: Option<TaskId>) {
         let recorder = self.state.trajectory_recorder();
         match recorder.record(trigger).await {
             Ok(event_id) => {
                 if let Some(tid) = task_id {
                     let mut map = self.state.task_trajectories().write().await;
-                    map.entry(tid)
-                        .or_default()
-                        .push(event_id.to_string());
+                    map.entry(tid).or_default().push(event_id.to_string());
                 }
                 self.state
                     .learning_counters()
@@ -3883,15 +4081,9 @@ impl<R: Repository + 'static> HiveHandler<R> {
     }
 
     /// Auto-store a pattern in the reasoning bank from a completed task.
-    async fn auto_store_pattern(
-        &self,
-        task: &Task,
-        agent_id: AgentId,
-    ) {
+    async fn auto_store_pattern(&self, task: &Task, agent_id: AgentId) {
         let agent = self.state.repository().get_agent(agent_id).await.ok();
-        let role = agent
-            .map(|a| a.role)
-            .unwrap_or(AgentRole::Developer);
+        let role = agent.map(|a| a.role).unwrap_or(AgentRole::Developer);
 
         let description = format!(
             "{}. {}",
@@ -3899,12 +4091,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
             task.summary.as_deref().unwrap_or(&task.description)
         );
 
-        let pattern = TaskPattern::new(
-            &task.title,
-            role,
-            true,
-            &description,
-        );
+        let pattern = TaskPattern::new(&task.title, role, true, &description);
 
         let bank = self.state.reasoning_bank();
         match bank.store_pattern(pattern).await {
@@ -3921,11 +4108,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
     }
 
     /// Auto-consolidate EWC++ weights from task trajectory on completion.
-    async fn auto_consolidate_ewc(
-        &self,
-        task_id: TaskId,
-        agent_id: AgentId,
-    ) {
+    async fn auto_consolidate_ewc(&self, task_id: TaskId, agent_id: AgentId) {
         if let Some(engine) = self.state.sona_engine() {
             // Get trajectory events for this task
             let recorder = self.state.trajectory_recorder();
@@ -3961,12 +4144,15 @@ impl<R: Repository + 'static> HiveHandler<R> {
             let weights = vec![0.0f32; WEIGHT_DIM];
 
             // Consolidate
-            match engine.on_task_complete(
-                agent_id,
-                &task_id.as_uuid().to_string(),
-                &weights,
-                &gradients,
-            ).await {
+            match engine
+                .on_task_complete(
+                    agent_id,
+                    &task_id.as_uuid().to_string(),
+                    &weights,
+                    &gradients,
+                )
+                .await
+            {
                 Ok(()) => {
                     tracing::info!(
                         task_id = %task_id,
@@ -4085,9 +4271,9 @@ impl<R: Repository + 'static> HiveHandler<R> {
                     .iter()
                     .filter(|qw| {
                         let prefix = &qw[..qw.len().min(4)];
-                        content_words
-                            .iter()
-                            .any(|cw| cw.starts_with(prefix) || qw.starts_with(&cw[..cw.len().min(4)]))
+                        content_words.iter().any(|cw| {
+                            cw.starts_with(prefix) || qw.starts_with(&cw[..cw.len().min(4)])
+                        })
                     })
                     .count();
 
@@ -4230,8 +4416,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
                                 })
                                 .collect();
 
-                            let overlap: Vec<&String> =
-                                words_a.intersection(&words_b).collect();
+                            let overlap: Vec<&String> = words_a.intersection(&words_b).collect();
 
                             if !overlap.is_empty() {
                                 let shared_topics: Vec<String> = overlap
@@ -4247,10 +4432,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
                                             "Cross-agent pattern: shared topics [{}]",
                                             shared_topics.join(", ")
                                         ),
-                                        agents_involved: vec![
-                                            agent_a.clone(),
-                                            agent_b.clone(),
-                                        ],
+                                        agents_involved: vec![agent_a.clone(), agent_b.clone()],
                                         confidence: 0.7,
                                     });
                                 }
@@ -4282,8 +4464,9 @@ impl<R: Repository + 'static> HiveHandler<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aletheiadb::AletheiaDB;
     use harness_orchestrator::{OrchestratorConfig, ProcessManager};
-    use harness_persistence::{InMemoryRepository, Session};
+    use harness_persistence::{AletheiaRepository, InMemoryRepository, Session};
 
     async fn setup() -> (
         Arc<HiveState<InMemoryRepository>>,
@@ -4498,7 +4681,62 @@ mod tests {
         assert!(names.contains(&"task_statistics"));
         assert!(names.contains(&"get_task_history"));
         assert!(names.contains(&"knowledge_clusters"));
-        assert_eq!(names.len(), 49);
+        assert!(names.contains(&"spawn_team_and_handshake"));
+        assert_eq!(names.len(), 50);
+    }
+
+    #[tokio::test]
+    async fn test_spawn_team_and_handshake_requires_minimum_two_agents() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let err = handler
+            .call_tool(
+                "spawn_team_and_handshake",
+                serde_json::json!({
+                    "role": "developer",
+                    "agent_count": 1,
+                    "cli_command": "codex",
+                    "cli_args": ["exec", "{PROMPT}"]
+                }),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("agent_count must be at least 2"));
+    }
+
+    #[tokio::test]
+    async fn test_spawn_team_and_handshake_validates_mode() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let err = handler
+            .call_tool(
+                "spawn_team_and_handshake",
+                serde_json::json!({
+                    "role": "developer",
+                    "agent_count": 2,
+                    "handshake_mode": "triangle",
+                    "cli_command": "codex",
+                    "cli_args": ["exec", "{PROMPT}"]
+                }),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("Invalid handshake_mode: triangle. Use 'ring' or 'full_mesh'")
+        );
     }
 
     #[tokio::test]
@@ -5058,8 +5296,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_ewc_auto_consolidation_on_task_complete() {
-        use harness_sona::ewc::EwcConfig;
         use harness_sona::SonaEngine;
+        use harness_sona::ewc::EwcConfig;
         use std::sync::Arc;
 
         // Setup with SONA engine enabled
@@ -5086,8 +5324,10 @@ mod tests {
                 .unwrap(),
         );
 
-        let state = HiveState::new(session, repo.clone(), process_manager)
-            .with_sona_engine(sona_engine.clone());
+        let state = Arc::new(
+            HiveState::new(session, repo.clone(), process_manager)
+                .with_sona_engine(sona_engine.clone()),
+        );
         let handler = HiveHandler::new(state.clone());
 
         // Register agent
@@ -5149,7 +5389,10 @@ mod tests {
 
         // Verify EWC consolidation occurred
         let ewc_state = sona_engine.agent_ewc_state(agent_id).await;
-        assert!(ewc_state.is_some(), "EWC consolidator should exist for agent");
+        assert!(
+            ewc_state.is_some(),
+            "EWC consolidator should exist for agent"
+        );
 
         let consolidator = ewc_state.unwrap();
         assert!(

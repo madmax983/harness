@@ -129,10 +129,7 @@ impl<R: Repository + 'static> HiveState<R> {
         process_manager: Arc<ProcessManager<R>>,
         sona_config: SonaConfig,
     ) -> Self {
-        let trajectory_recorder = Arc::new(TrajectoryRecorder::new(
-            repository.clone(),
-            session.id,
-        ));
+        let trajectory_recorder = Arc::new(TrajectoryRecorder::new(repository.clone(), session.id));
         let pattern_store = Arc::new(PatternStore::new());
         Self {
             session,
