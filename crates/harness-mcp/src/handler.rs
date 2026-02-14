@@ -253,6 +253,12 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 let resp = self.handle_spawn_team_and_handshake(req).await?;
                 Ok(serde_json::to_value(resp).unwrap())
             }
+            "refresh_session" => {
+                let req: tools::RefreshSessionRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_refresh_session(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
             "disconnect_agent" => {
                 let req: tools::DisconnectAgentRequest = serde_json::from_value(arguments)
                     .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
@@ -509,6 +515,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
             "get_hive_status",
             "spawn_agent",
             "spawn_team_and_handshake",
+            "refresh_session",
             "disconnect_agent",
             "send_direct_message",
             "get_messages",
@@ -2539,6 +2546,70 @@ impl<R: Repository + 'static> HiveHandler<R> {
             process_id: None, // ProcessManager doesn't expose PID currently
             cli_command: Some(cli_command),
             teammate_id: None, // Deprecated - actual process spawned
+        })
+    }
+
+    async fn handle_refresh_session(
+        &self,
+        req: tools::RefreshSessionRequest,
+    ) -> HandlerResult<tools::RefreshSessionResponse> {
+        let mcp_session_id = self.mcp_session_id.clone();
+
+        // Clear current in-memory binding first.
+        if let Some(ref sid) = mcp_session_id {
+            self.state.clear_session_agent(sid).await;
+        }
+        *self.agent_id.write().await = None;
+
+        // Resolve requested binding target:
+        // 1) explicit `agent_id`, 2) `_agent_id`, 3) persisted session agent.
+        let explicit_target = req.agent_id.or(req._agent_id);
+        let rebound_agent = if let Some(agent_id_str) = explicit_target {
+            let agent_id = Self::parse_agent_id(&agent_id_str)?;
+            // Validate explicit target exists.
+            self.state.repository().get_agent(agent_id).await?;
+            Some(agent_id)
+        } else {
+            let persisted = self
+                .state
+                .repository()
+                .get_session(self.state.session_id())
+                .await?
+                .agent_id;
+            if let Some(candidate) = persisted {
+                // Persisted binding may be stale; only rebind if agent still exists.
+                if self.state.repository().get_agent(candidate).await.is_ok() {
+                    Some(candidate)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        let mut rebound = false;
+        let mut bound_agent_id = None;
+        if let Some(agent_id) = rebound_agent {
+            if let Some(ref sid) = mcp_session_id {
+                self.state
+                    .register_session_agent(sid.clone(), agent_id)
+                    .await;
+            }
+            self.state
+                .repository()
+                .set_session_agent(self.state.session_id(), agent_id)
+                .await?;
+            *self.agent_id.write().await = Some(agent_id);
+            rebound = true;
+            bound_agent_id = Some(agent_id.as_uuid().to_string());
+        }
+
+        Ok(tools::RefreshSessionResponse {
+            session_id: self.state.session_id().as_uuid().to_string(),
+            mcp_session_id,
+            agent_id: bound_agent_id,
+            rebound,
         })
     }
 
@@ -4682,7 +4753,8 @@ mod tests {
         assert!(names.contains(&"get_task_history"));
         assert!(names.contains(&"knowledge_clusters"));
         assert!(names.contains(&"spawn_team_and_handshake"));
-        assert_eq!(names.len(), 50);
+        assert!(names.contains(&"refresh_session"));
+        assert_eq!(names.len(), 51);
     }
 
     #[tokio::test]
@@ -4736,6 +4808,31 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("Invalid handshake_mode: triangle. Use 'ring' or 'full_mesh'")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_refresh_session_rebinds_from_persisted_session_agent() {
+        let (state, _handler) = setup().await;
+        let handler = HiveHandler::new(state.clone()).with_mcp_session("mcp-test-refresh".into());
+
+        let reg = handler
+            .call_tool("register_agent", serde_json::json!({"role": "developer"}))
+            .await
+            .unwrap();
+        let reg: tools::RegisterAgentResponse = serde_json::from_value(reg).unwrap();
+
+        let refreshed = handler
+            .call_tool("refresh_session", serde_json::json!({}))
+            .await
+            .unwrap();
+        let refreshed: tools::RefreshSessionResponse = serde_json::from_value(refreshed).unwrap();
+
+        assert!(refreshed.rebound);
+        assert_eq!(refreshed.agent_id, Some(reg.agent_id));
+        assert_eq!(
+            refreshed.mcp_session_id,
+            Some("mcp-test-refresh".to_string())
         );
     }
 

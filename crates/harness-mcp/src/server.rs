@@ -111,6 +111,25 @@ impl<R: Repository + 'static> ServerHandler for HiveMcpServer<R> {
                     agent_id = %agent_id,
                     "Restored agent context from MCP session"
                 );
+            } else if let Ok(session) = self
+                .state
+                .repository()
+                .get_session(self.state.session_id())
+                .await
+                && let Some(agent_id) = session.agent_id
+                && self.state.repository().get_agent(agent_id).await.is_ok()
+            {
+                // Auto-rebind after daemon restart: in-memory MCP session map is empty,
+                // but the session's last agent is persisted.
+                self.state
+                    .register_session_agent(session_id.clone(), agent_id)
+                    .await;
+                h.restore_agent_id(agent_id).await;
+                tracing::info!(
+                    session_id = %session_id,
+                    agent_id = %agent_id,
+                    "Recovered MCP session agent context from persisted session state"
+                );
             }
             h
         } else {
@@ -715,6 +734,18 @@ pub fn tool_definitions() -> Vec<Tool> {
             "Get comprehensive status of the hive including agents, task summary, and recent knowledge.",
             vec![],
             with_agent_id(HashMap::new()),
+        ),
+        make_tool(
+            "refresh_session",
+            "Refresh MCP session agent binding after daemon restart or transport reconnect.",
+            vec![],
+            with_agent_id(HashMap::from([(
+                "agent_id".into(),
+                prop(
+                    "string",
+                    "Optional explicit agent ID to bind for this MCP session",
+                ),
+            )])),
         ),
         make_tool(
             "spawn_agent",
@@ -1544,7 +1575,7 @@ mod tests {
     #[test]
     fn test_tool_definitions_returns_40_tools() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 60);
+        assert_eq!(tools.len(), 61);
     }
 
     #[test]

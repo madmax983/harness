@@ -98,6 +98,32 @@ pub struct DisconnectAgentResponse {
     pub success: bool,
 }
 
+/// Request to refresh MCP session context and rebind agent identity.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RefreshSessionRequest {
+    /// Optional explicit agent ID to bind to this session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// Optional agent ID for multi-client support.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
+
+/// Response from refresh_session.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RefreshSessionResponse {
+    /// Current Harness session ID.
+    pub session_id: String,
+    /// Current MCP transport session ID, if available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_session_id: Option<String>,
+    /// Bound agent ID after refresh, if one was restored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// Whether the refresh operation rebound an agent identity.
+    pub rebound: bool,
+}
+
 /// Request to spawn a new agent.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SpawnAgentRequest {
