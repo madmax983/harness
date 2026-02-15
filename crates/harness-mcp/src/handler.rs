@@ -172,6 +172,12 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 let resp = self.handle_assign_task(req).await?;
                 Ok(serde_json::to_value(resp).unwrap())
             }
+            "dispatch_ready_tasks" => {
+                let req: tools::DispatchReadyTasksRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_dispatch_ready_tasks(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
             "get_task_context" => {
                 let req: tools::GetTaskContextRequest = serde_json::from_value(arguments)
                     .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
@@ -338,6 +344,12 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 let req: tools::GetProcessOutputRequest = serde_json::from_value(arguments)
                     .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
                 let resp = self.handle_get_process_output(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "collect_agent_artifacts" => {
+                let req: tools::CollectAgentArtifactsRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_collect_agent_artifacts(req).await?;
                 Ok(serde_json::to_value(resp).unwrap())
             }
             "command_agent" => {
@@ -546,6 +558,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
             "claim_task",
             "update_task_status",
             "assign_task",
+            "dispatch_ready_tasks",
             "get_task_context",
             "add_task_dependency",
             "remove_task_dependency",
@@ -573,6 +586,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
             "get_messages",
             "get_thread_messages",
             "supervise_team",
+            "collect_agent_artifacts",
             "create_product",
             "list_products",
             "create_project",
@@ -1295,6 +1309,74 @@ impl<R: Repository + 'static> HiveHandler<R> {
             .await?;
 
         Ok(tools::AssignTaskResponse { success: true })
+    }
+
+    async fn handle_dispatch_ready_tasks(
+        &self,
+        req: tools::DispatchReadyTasksRequest,
+    ) -> HandlerResult<tools::DispatchReadyTasksResponse> {
+        self.require_strategoi(req._agent_id.as_deref()).await?;
+
+        let repo = self.state.repository();
+        let pending = repo
+            .list_tasks(self.state.session_id(), Some(TaskStatus::Pending))
+            .await?;
+
+        let mut ready_tasks = Vec::new();
+        for task in pending {
+            if task.assigned_to.is_some() {
+                continue;
+            }
+            let blockers = repo.get_blocking_tasks(task.id).await?;
+            let is_ready = blockers
+                .iter()
+                .all(|blocking| blocking.status == TaskStatus::Completed);
+            if is_ready {
+                ready_tasks.push(task);
+            }
+        }
+        let ready_task_count = ready_tasks.len();
+
+        ready_tasks.sort_by(|a, b| {
+            b.priority
+                .cmp(&a.priority)
+                .then_with(|| a.created_at.cmp(&b.created_at))
+        });
+
+        let mut eligible_agents: Vec<Agent> = repo
+            .list_active_agents(self.state.session_id())
+            .await?
+            .into_iter()
+            .filter(|agent| !agent.is_strategoi && agent.current_task.is_none())
+            .collect();
+        let eligible_agent_count = eligible_agents.len();
+        eligible_agents.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+
+        let max_assignments = req.max_assignments;
+        let assign_count = std::cmp::min(
+            max_assignments,
+            std::cmp::min(ready_tasks.len(), eligible_agents.len()),
+        );
+
+        let mut assignments = Vec::with_capacity(assign_count);
+        for idx in 0..assign_count {
+            let task = &ready_tasks[idx];
+            let agent = &eligible_agents[idx];
+
+            repo.assign_task(task.id, agent.id).await?;
+            assignments.push(tools::TaskDispatchAssignment {
+                task_id: task.id.as_uuid().to_string(),
+                agent_id: agent.id.as_uuid().to_string(),
+            });
+        }
+
+        Ok(tools::DispatchReadyTasksResponse {
+            inspected_at: Utc::now().to_rfc3339(),
+            ready_task_count,
+            eligible_agent_count,
+            assignment_count: assignments.len(),
+            assignments,
+        })
     }
 
     async fn handle_get_task_context(
@@ -3255,6 +3337,79 @@ impl<R: Repository + 'static> HiveHandler<R> {
         })
     }
 
+    async fn handle_collect_agent_artifacts(
+        &self,
+        req: tools::CollectAgentArtifactsRequest,
+    ) -> HandlerResult<tools::CollectAgentArtifactsResponse> {
+        self.require_strategoi(req._agent_id.as_deref()).await?;
+
+        let agent_id = Self::parse_agent_id(&req.agent_id)?;
+        let task_id = req
+            .task_id
+            .as_deref()
+            .map(Self::parse_task_id)
+            .transpose()?;
+        let is_running = self.state.process_manager().is_running(agent_id).await;
+        let (stdout, stderr) = self
+            .state
+            .process_manager()
+            .get_output(agent_id)
+            .await
+            .map_err(|e| HandlerError::InternalError(format!("Failed to get output: {}", e)))?;
+
+        let mut artifacts = Vec::new();
+        let outputs = [
+            ("stdout", KnowledgeKind::Discovery, stdout),
+            ("stderr", KnowledgeKind::Blocker, stderr),
+        ];
+
+        for (stream, kind, output) in outputs {
+            let trimmed = output.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let summary = if trimmed.chars().count() > req.max_chars {
+                let truncated: String = trimmed.chars().take(req.max_chars).collect();
+                format!("{truncated}...")
+            } else {
+                trimmed.to_string()
+            };
+
+            let content = format!(
+                "Agent {} {} output:\n{}",
+                agent_id.as_uuid(),
+                stream,
+                summary
+            );
+            let mut knowledge = Knowledge::new(
+                &content,
+                kind,
+                self.require_agent_id().await?,
+                self.state.session_id(),
+            );
+            if let Some(tid) = task_id {
+                knowledge = knowledge.with_task(tid);
+            }
+
+            let knowledge_id = knowledge.id.as_uuid().to_string();
+            self.state.repository().create_knowledge(&knowledge).await?;
+            artifacts.push(tools::AgentArtifact {
+                stream: stream.to_string(),
+                kind: format!("{kind:?}").to_lowercase(),
+                knowledge_id,
+                summary,
+            });
+        }
+
+        Ok(tools::CollectAgentArtifactsResponse {
+            agent_id: agent_id.as_uuid().to_string(),
+            is_running,
+            created_count: artifacts.len(),
+            artifacts,
+        })
+    }
+
     async fn handle_command_agent(
         &self,
         req: tools::CommandAgentRequest,
@@ -5194,11 +5349,306 @@ mod tests {
         assert!(names.contains(&"task_statistics"));
         assert!(names.contains(&"get_task_history"));
         assert!(names.contains(&"knowledge_clusters"));
+        assert!(names.contains(&"dispatch_ready_tasks"));
         assert!(names.contains(&"spawn_team_and_handshake"));
         assert!(names.contains(&"spawn_team_from_template"));
         assert!(names.contains(&"supervise_team"));
+        assert!(names.contains(&"collect_agent_artifacts"));
         assert!(names.contains(&"refresh_session"));
-        assert_eq!(names.len(), 53);
+        assert_eq!(names.len(), 55);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_ready_tasks_assigns_only_ready_unblocked_tasks() {
+        let (state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let idle_worker = Agent::new(AgentRole::Developer, state.session_id());
+        let idle_worker_id = idle_worker.id.as_uuid().to_string();
+        state.repository().create_agent(&idle_worker).await.unwrap();
+
+        let blocker = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({
+                    "title": "Blocker",
+                    "description": "Must finish first",
+                    "priority": "high"
+                }),
+            )
+            .await
+            .unwrap();
+        let blocker: tools::CreateTaskResponse = serde_json::from_value(blocker).unwrap();
+
+        let blocked = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({
+                    "title": "Blocked task",
+                    "description": "Waits on blocker",
+                    "priority": "critical"
+                }),
+            )
+            .await
+            .unwrap();
+        let blocked: tools::CreateTaskResponse = serde_json::from_value(blocked).unwrap();
+
+        let ready = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({
+                    "title": "Ready task",
+                    "description": "Should dispatch now",
+                    "priority": "medium"
+                }),
+            )
+            .await
+            .unwrap();
+        let ready: tools::CreateTaskResponse = serde_json::from_value(ready).unwrap();
+
+        handler
+            .call_tool(
+                "add_task_dependency",
+                serde_json::json!({
+                    "task_id": blocker.task_id,
+                    "blocked_task_id": blocked.task_id,
+                }),
+            )
+            .await
+            .unwrap();
+
+        // Keep the blocker out of the pending pool so this test isolates blocked-task filtering.
+        handler
+            .call_tool(
+                "update_task_status",
+                serde_json::json!({
+                    "task_id": blocker.task_id,
+                    "status": "in_progress"
+                }),
+            )
+            .await
+            .unwrap();
+
+        let resp = handler
+            .call_tool(
+                "dispatch_ready_tasks",
+                serde_json::json!({
+                    "max_assignments": 10
+                }),
+            )
+            .await
+            .unwrap();
+
+        let assignment_count = resp
+            .get("assignment_count")
+            .and_then(serde_json::Value::as_u64);
+        assert_eq!(assignment_count, Some(1));
+
+        let assignments = resp
+            .get("assignments")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(
+            assignments[0]
+                .get("task_id")
+                .and_then(serde_json::Value::as_str),
+            Some(ready.task_id.as_str())
+        );
+        assert_eq!(
+            assignments[0]
+                .get("agent_id")
+                .and_then(serde_json::Value::as_str),
+            Some(idle_worker_id.as_str())
+        );
+
+        let listed = handler
+            .call_tool("list_tasks", serde_json::json!({}))
+            .await
+            .unwrap();
+        let listed: tools::ListTasksResponse = serde_json::from_value(listed).unwrap();
+
+        let ready_task = listed.tasks.iter().find(|t| t.id == ready.task_id).unwrap();
+        let blocked_task = listed
+            .tasks
+            .iter()
+            .find(|t| t.id == blocked.task_id)
+            .unwrap();
+
+        assert_eq!(
+            ready_task.assigned_to.as_deref(),
+            Some(idle_worker_id.as_str())
+        );
+        assert_eq!(blocked_task.assigned_to, None);
+        assert_eq!(blocked_task.status, "pending");
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_ready_tasks_prefers_priority_then_oldest_task() {
+        let (state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let idle_worker = Agent::new(AgentRole::Developer, state.session_id());
+        state.repository().create_agent(&idle_worker).await.unwrap();
+
+        let first_high = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({
+                    "title": "High - oldest",
+                    "description": "Should be picked first among highs",
+                    "priority": "high"
+                }),
+            )
+            .await
+            .unwrap();
+        let first_high: tools::CreateTaskResponse = serde_json::from_value(first_high).unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
+
+        let second_high = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({
+                    "title": "High - newer",
+                    "description": "Should lose age tie-break",
+                    "priority": "high"
+                }),
+            )
+            .await
+            .unwrap();
+        let second_high: tools::CreateTaskResponse = serde_json::from_value(second_high).unwrap();
+
+        handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({
+                    "title": "Medium",
+                    "description": "Lower priority",
+                    "priority": "medium"
+                }),
+            )
+            .await
+            .unwrap();
+
+        let resp = handler
+            .call_tool(
+                "dispatch_ready_tasks",
+                serde_json::json!({
+                    "max_assignments": 1
+                }),
+            )
+            .await
+            .unwrap();
+
+        let assignments = resp
+            .get("assignments")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(
+            assignments[0]
+                .get("task_id")
+                .and_then(serde_json::Value::as_str),
+            Some(first_high.task_id.as_str())
+        );
+        assert_ne!(
+            assignments[0]
+                .get("task_id")
+                .and_then(serde_json::Value::as_str),
+            Some(second_high.task_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_ready_tasks_skips_busy_or_inactive_agents() {
+        let (state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let busy_agent = Agent::new(AgentRole::Developer, state.session_id());
+        state.repository().create_agent(&busy_agent).await.unwrap();
+
+        let busy_task = Task::new(
+            "Busy work",
+            "Marks worker as occupied",
+            Priority::Low,
+            state.session_id(),
+        );
+        state.repository().create_task(&busy_task).await.unwrap();
+        state
+            .repository()
+            .update_agent_task(busy_agent.id, Some(busy_task.id))
+            .await
+            .unwrap();
+
+        let inactive_agent = Agent::new(AgentRole::Developer, state.session_id());
+        state
+            .repository()
+            .create_agent(&inactive_agent)
+            .await
+            .unwrap();
+        state
+            .repository()
+            .update_agent_status(inactive_agent.id, AgentStatus::Killed)
+            .await
+            .unwrap();
+
+        let idle_agent = Agent::new(AgentRole::Developer, state.session_id());
+        let idle_agent_id = idle_agent.id.as_uuid().to_string();
+        state.repository().create_agent(&idle_agent).await.unwrap();
+
+        let ready = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({
+                    "title": "Dispatch me",
+                    "description": "Ready and unblocked",
+                    "priority": "high"
+                }),
+            )
+            .await
+            .unwrap();
+        let ready: tools::CreateTaskResponse = serde_json::from_value(ready).unwrap();
+
+        let resp = handler
+            .call_tool(
+                "dispatch_ready_tasks",
+                serde_json::json!({
+                    "max_assignments": 1
+                }),
+            )
+            .await
+            .unwrap();
+
+        let assignments = resp
+            .get("assignments")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(
+            assignments[0]
+                .get("task_id")
+                .and_then(serde_json::Value::as_str),
+            Some(ready.task_id.as_str())
+        );
+        assert_eq!(
+            assignments[0]
+                .get("agent_id")
+                .and_then(serde_json::Value::as_str),
+            Some(idle_agent_id.as_str())
+        );
     }
 
     #[tokio::test]
@@ -5300,6 +5750,148 @@ mod tests {
         assert!(resp.restarted_agents.is_empty());
         assert!(resp.issues.is_empty());
         assert!(resp.escalations.is_empty());
+    }
+
+    fn test_shell_for_output(stdout: &str, stderr: &str) -> (String, Vec<String>) {
+        if cfg!(windows) {
+            let command = format!("echo {stdout} && echo {stderr} 1>&2");
+            ("cmd.exe".to_string(), vec!["/c".to_string(), command])
+        } else {
+            let command = format!("echo {stdout}; echo {stderr} 1>&2");
+            ("sh".to_string(), vec!["-c".to_string(), command])
+        }
+    }
+
+    fn test_shell_for_empty_output() -> (String, Vec<String>) {
+        if cfg!(windows) {
+            (
+                "cmd.exe".to_string(),
+                vec!["/c".to_string(), "ver > nul".to_string()],
+            )
+        } else {
+            ("sh".to_string(), vec!["-c".to_string(), ":".to_string()])
+        }
+    }
+
+    #[tokio::test]
+    async fn test_collect_agent_artifacts_extracts_stdout_and_stderr_to_knowledge() {
+        let (state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let worker = Agent::new(AgentRole::Developer, state.session_id());
+        state.repository().create_agent(&worker).await.unwrap();
+
+        let task_resp = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({
+                    "title": "artifact task",
+                    "description": "collect worker output",
+                    "priority": "high"
+                }),
+            )
+            .await
+            .unwrap();
+        let task_resp: tools::CreateTaskResponse = serde_json::from_value(task_resp).unwrap();
+
+        let (command, args) = test_shell_for_output("artifact_done", "artifact_failed");
+        state
+            .process_manager()
+            .spawn_with_cli(worker.id, &command, &args, "capture artifacts")
+            .await
+            .unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        let response = handler
+            .call_tool(
+                "collect_agent_artifacts",
+                serde_json::json!({
+                    "agent_id": worker.id.as_uuid().to_string(),
+                    "task_id": task_resp.task_id,
+                }),
+            )
+            .await
+            .unwrap();
+
+        let created_count = response
+            .get("created_count")
+            .and_then(serde_json::Value::as_u64);
+        assert_eq!(created_count, Some(2));
+
+        let artifacts = response
+            .get("artifacts")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        assert_eq!(artifacts.len(), 2);
+
+        let streams: std::collections::HashSet<&str> = artifacts
+            .iter()
+            .filter_map(|a| a.get("stream").and_then(serde_json::Value::as_str))
+            .collect();
+        assert!(streams.contains("stdout"));
+        assert!(streams.contains("stderr"));
+
+        let context = handler
+            .call_tool(
+                "get_task_context",
+                serde_json::json!({
+                    "task_id": task_resp.task_id
+                }),
+            )
+            .await
+            .unwrap();
+        let context: tools::GetTaskContextResponse = serde_json::from_value(context).unwrap();
+
+        let kinds: std::collections::HashSet<String> =
+            context.knowledge.iter().map(|k| k.kind.clone()).collect();
+        assert!(kinds.contains("discovery"));
+        assert!(kinds.contains("blocker"));
+    }
+
+    #[tokio::test]
+    async fn test_collect_agent_artifacts_skips_empty_output() {
+        let (state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let worker = Agent::new(AgentRole::Developer, state.session_id());
+        state.repository().create_agent(&worker).await.unwrap();
+
+        let (command, args) = test_shell_for_empty_output();
+        state
+            .process_manager()
+            .spawn_with_cli(worker.id, &command, &args, "capture artifacts")
+            .await
+            .unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        let response = handler
+            .call_tool(
+                "collect_agent_artifacts",
+                serde_json::json!({
+                    "agent_id": worker.id.as_uuid().to_string()
+                }),
+            )
+            .await
+            .unwrap();
+
+        let created_count = response
+            .get("created_count")
+            .and_then(serde_json::Value::as_u64);
+        assert_eq!(created_count, Some(0));
+
+        let artifacts = response
+            .get("artifacts")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        assert!(artifacts.is_empty());
     }
 
     #[tokio::test]

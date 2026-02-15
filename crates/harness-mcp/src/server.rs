@@ -438,6 +438,19 @@ pub fn tool_definitions() -> Vec<Tool> {
             ])),
         ),
         make_tool(
+            "dispatch_ready_tasks",
+            "Auto-assign ready pending tasks to eligible active agents while respecting blocking dependencies.",
+            vec![],
+            with_agent_id(HashMap::from([(
+                "max_assignments".into(),
+                prop_with_default(
+                    "integer",
+                    "Maximum number of task assignments to create in this dispatch pass",
+                    serde_json::Value::Number(10.into()),
+                ),
+            )])),
+        ),
+        make_tool(
             "get_task_context",
             "Get full context for a task including knowledge and subtasks.",
             vec!["task_id"],
@@ -1018,6 +1031,35 @@ pub fn tool_definitions() -> Vec<Tool> {
                 "agent_id".into(),
                 prop("string", "Agent ID whose output to retrieve"),
             )])),
+        ),
+        make_tool(
+            "collect_agent_artifacts",
+            "Collect structured knowledge artifacts from a spawned agent's stdout/stderr output.",
+            vec!["agent_id"],
+            with_agent_id(HashMap::from([
+                (
+                    "agent_id".into(),
+                    prop(
+                        "string",
+                        "Agent ID whose output to summarize into knowledge",
+                    ),
+                ),
+                (
+                    "task_id".into(),
+                    prop(
+                        "string",
+                        "Optional task ID to associate extracted knowledge artifacts with",
+                    ),
+                ),
+                (
+                    "max_chars".into(),
+                    prop_with_default(
+                        "integer",
+                        "Maximum characters to retain per stream summary",
+                        serde_json::Value::Number(1200.into()),
+                    ),
+                ),
+            ])),
         ),
         make_tool(
             "command_agent",
@@ -1663,9 +1705,9 @@ mod tests {
     use harness_persistence::{InMemoryRepository, Session};
 
     #[test]
-    fn test_tool_definitions_returns_40_tools() {
+    fn test_tool_definitions_returns_expected_count() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 63);
+        assert_eq!(tools.len(), 65);
     }
 
     #[test]

@@ -111,6 +111,38 @@ pub struct AssignTaskResponse {
     pub success: bool,
 }
 
+/// Request to dispatch ready pending tasks to eligible agents.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DispatchReadyTasksRequest {
+    /// Maximum number of assignments to create in this pass.
+    #[serde(default = "default_dispatch_limit")]
+    pub max_assignments: usize,
+    /// Optional agent ID for multi-client support.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
+
+fn default_dispatch_limit() -> usize {
+    10
+}
+
+/// A single task dispatch assignment.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TaskDispatchAssignment {
+    pub task_id: String,
+    pub agent_id: String,
+}
+
+/// Response from dispatch_ready_tasks.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DispatchReadyTasksResponse {
+    pub inspected_at: String,
+    pub ready_task_count: usize,
+    pub eligible_agent_count: usize,
+    pub assignment_count: usize,
+    pub assignments: Vec<TaskDispatchAssignment>,
+}
+
 /// Request to get task context.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GetTaskContextRequest {

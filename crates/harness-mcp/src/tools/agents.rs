@@ -168,6 +168,10 @@ fn default_recent_knowledge_limit() -> usize {
     200
 }
 
+fn default_artifact_max_chars() -> usize {
+    1200
+}
+
 /// Request to spawn a team of agents and seed handshake DMs between them.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SpawnTeamAndHandshakeRequest {
@@ -367,6 +371,37 @@ pub struct GetProcessOutputResponse {
     pub stdout: String,
     pub stderr: String,
     pub is_running: bool,
+}
+
+/// Request to collect structured knowledge artifacts from an agent's stdout/stderr output.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CollectAgentArtifactsRequest {
+    pub agent_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(default = "default_artifact_max_chars")]
+    pub max_chars: usize,
+    /// Optional agent ID for multi-client support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
+
+/// Structured knowledge artifact extracted from one output stream.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AgentArtifact {
+    pub stream: String,
+    pub kind: String,
+    pub knowledge_id: String,
+    pub summary: String,
+}
+
+/// Response from collect_agent_artifacts.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CollectAgentArtifactsResponse {
+    pub agent_id: String,
+    pub is_running: bool,
+    pub created_count: usize,
+    pub artifacts: Vec<AgentArtifact>,
 }
 
 /// Request to command an agent with a new prompt.
