@@ -554,6 +554,15 @@ When feature scope is complete:
 2. Close RED/GREEN/REFACTOR + parent tasks with verification summary.
 3. Share a final knowledge entry with commands and outcomes.
 
+### 7. Lessons learned checklist (2026-02-15, tools 5-8 rollout)
+
+- Gate transitions on artifacts, not status-only updates.
+- Apply dependency-aware assignment so blocked tasks are not claimed early.
+- Keep file ownership exclusive by module; shared files default to Strategoi integrator.
+- If overlap occurs, stand down both workers immediately and integrate centrally.
+- Prefer command-derived evidence in completion gates over self-reported check fields.
+- Keep status/blocker/done reports machine-parseable for faster supervision automation.
+
 ---
 
 ## Reusable Strategoi Startup Prompt
