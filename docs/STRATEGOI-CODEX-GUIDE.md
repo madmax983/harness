@@ -585,6 +585,9 @@ Rules:
   - passing targeted tests
 - Require REFACTOR evidence before completion:
   - code review verdict (findings addressed or explicitly accepted)
+- Require retrieval evidence before implementation on each claimed task:
+  - run `query_reasoning_bank` with task-specific terms
+  - post one note describing reused or rejected patterns
 - Require final verification before closure:
   - cargo test -p harness-mcp --lib
   - cargo clippy -p harness-mcp --lib -- -D warnings
@@ -597,6 +600,12 @@ Operational loop:
 3) collect_agent_artifacts
 4) message blockers/unblockers
 5) close tasks only with evidence
+
+Tool cue sheet for workers:
+- `query_reasoning_bank`: prior solution/failure patterns for current task
+- `semantic_search_tasks`: similar completed tasks and summaries
+- `ask_hive`: broad discovery/decision/blocker search
+- `fish_knowledge`: connected context expansion from one knowledge item
 
 Now execute this directive:
 <paste current mission here>

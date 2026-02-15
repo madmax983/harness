@@ -6,6 +6,8 @@ pub fn team_runbook_protocol() -> &'static str {
 STARTUP HANDSHAKE
 - On startup, call get_hive_status and list_tasks with your _agent_id.
 - Post one activity note: "startup_complete" with task inventory.
+- Before implementation on each claimed task, call query_reasoning_bank with task-specific terms.
+- Summarize any reused or rejected pattern in one discovery note.
 
 STATUS CADENCE
 - Post a status update at least every 20 minutes while active.
@@ -17,7 +19,16 @@ BLOCKER FORMAT
 
 DONE FORMAT
 - Prefix completion with "DONE:".
-- Include: commands run, test/clippy results, code review verdict, files changed, and any residual risk."#
+- Include: commands run, test/clippy results, code review verdict, files changed, and any residual risk.
+
+TOOL QUICK GUIDE
+- query_reasoning_bank: retrieve prior success/failure patterns before coding.
+- semantic_search_tasks: find similar past tasks and completion summaries.
+- ask_hive: search shared knowledge across decisions/discoveries/blockers.
+- fish_knowledge: expand from one knowledge_id into related knowledge.
+- find_temporal_path: inspect historical linkage path between entities.
+- navigate_semantic_graph: inspect similarity-weighted graph path between entities.
+- hive_observability_snapshot: check throughput, stuck tasks, noisy agents, and coordination latency."#
 }
 
 /// Generate a complete system prompt for a spawned agent.
@@ -91,6 +102,13 @@ IMMEDIATELY on startup:
    }})
 
 5. Do the work and share discoveries:
+   mcp__harness__query_reasoning_bank({{
+     query: "task title + key terms + likely failure mode",
+     limit: 5,
+     _agent_id: "{agent_id}"
+   }})
+
+6. Do the work and share discoveries:
    mcp__harness__share_knowledge({{
      content: "your findings",
      kind: "discovery",
@@ -292,6 +310,10 @@ mod tests {
             prompt.contains("_agent_id"),
             "Should mention _agent_id parameter"
         );
+        assert!(
+            prompt.contains("query_reasoning_bank"),
+            "Should mention reasoning bank retrieval tool"
+        );
     }
 
     #[test]
@@ -329,6 +351,8 @@ mod tests {
         assert!(prompt.contains("STATUS CADENCE"));
         assert!(prompt.contains("BLOCKER FORMAT"));
         assert!(prompt.contains("DONE FORMAT"));
+        assert!(prompt.contains("TOOL QUICK GUIDE"));
+        assert!(prompt.contains("query_reasoning_bank"));
     }
 
     #[test]
@@ -339,5 +363,7 @@ mod tests {
         assert!(prompt.contains("STATUS CADENCE"));
         assert!(prompt.contains("BLOCKER FORMAT"));
         assert!(prompt.contains("DONE FORMAT"));
+        assert!(prompt.contains("TOOL QUICK GUIDE"));
+        assert!(prompt.contains("query_reasoning_bank"));
     }
 }
