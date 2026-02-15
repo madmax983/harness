@@ -784,6 +784,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
         vec![
             "cargo test -p harness-mcp --lib".to_string(),
             "cargo clippy -p harness-mcp --lib -- -D warnings".to_string(),
+            "code_review".to_string(),
         ]
     }
 
@@ -6322,16 +6323,20 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(
+        assert_eq!(
             resp.get("allowed")
                 .and_then(serde_json::Value::as_bool)
-                .is_some()
+                .unwrap(),
+            false
         );
-        assert!(
-            resp.get("missing_checks")
-                .and_then(serde_json::Value::as_array)
-                .is_some()
-        );
+        let missing_checks = resp
+            .get("missing_checks")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        assert!(missing_checks
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .any(|name| name == "code_review"));
         assert!(
             resp.get("failed_checks")
                 .and_then(serde_json::Value::as_array)

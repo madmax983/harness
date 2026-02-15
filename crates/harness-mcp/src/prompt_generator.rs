@@ -17,7 +17,7 @@ BLOCKER FORMAT
 
 DONE FORMAT
 - Prefix completion with "DONE:".
-- Include: commands run, test/clippy results, files changed, and any residual risk."#
+- Include: commands run, test/clippy results, code review verdict, files changed, and any residual risk."#
 }
 
 /// Generate a complete system prompt for a spawned agent.

@@ -544,7 +544,9 @@ pub fn tool_definitions() -> Vec<Tool> {
                     required_prop.insert("type".to_string(), serde_json::json!("array"));
                     required_prop.insert(
                         "description".to_string(),
-                        serde_json::json!("Required check names; defaults to cargo test/clippy"),
+                        serde_json::json!(
+                            "Required check names; defaults to cargo test/clippy/code_review"
+                        ),
                     );
                     required_prop
                         .insert("items".to_string(), serde_json::json!({"type": "string"}));

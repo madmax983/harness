@@ -526,6 +526,7 @@ Require these artifacts before moving phases:
 - REFACTOR gate:
   - final cleanup complete
   - no TODO/stub leftovers in touched area
+  - code review evidence recorded (reviewer + findings or "no findings")
 
 ### 4. Verification gate before closing parent tasks
 
@@ -582,6 +583,8 @@ Rules:
   - expected failure reason
 - Require GREEN evidence:
   - passing targeted tests
+- Require REFACTOR evidence before completion:
+  - code review verdict (findings addressed or explicitly accepted)
 - Require final verification before closure:
   - cargo test -p harness-mcp --lib
   - cargo clippy -p harness-mcp --lib -- -D warnings
