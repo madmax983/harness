@@ -1,7 +1,7 @@
 # Strategoi Guide: Working with Codex Agents
 
-**Version**: 1.0
-**Date**: 2026-02-14
+**Version**: 1.1
+**Date**: 2026-02-15
 **Author**: Harness SONA Integration Team
 
 ## Overview
@@ -482,6 +482,112 @@ setInterval(async () => {
   const status = await get_hive_status()
   console.log(`Progress: ${status.task_summary.completed}/${refactorTeam.length} tasks complete`)
 }, 60000)
+```
+
+---
+
+## Strategoi Runbook (TDD Orchestration)
+
+Use this runbook when coordinating multiple Codex workers on one feature set.
+
+### 1. Task decomposition and dependency wiring
+
+Before spawning workers:
+
+- Create parent task per feature.
+- Create `RED`, `GREEN`, and `REFACTOR` child tasks.
+- Add dependencies: `RED -> GREEN -> REFACTOR`.
+- Assign each lane to a single worker.
+
+### 2. File ownership boundaries (required)
+
+For each worker assignment, provide:
+
+- `owned_files`: files they are allowed to edit.
+- `do_not_touch`: files owned by other workers.
+- `integration_owner`: Strategoi (single integrator for shared files).
+
+If two workers touch the same file:
+
+1. Pause both workers immediately.
+2. Perform a single Strategoi integration pass.
+3. Reassign remaining work with fresh boundaries.
+
+### 3. Evidence gates (no status-only transitions)
+
+Require these artifacts before moving phases:
+
+- RED gate:
+  - exact test command
+  - failing test names
+  - expected failure reason
+- GREEN gate:
+  - passing targeted tests for the feature
+- REFACTOR gate:
+  - final cleanup complete
+  - no TODO/stub leftovers in touched area
+
+### 4. Verification gate before closing parent tasks
+
+Do not close feature parent tasks until both pass:
+
+```bash
+cargo test -p harness-mcp --lib
+cargo clippy -p harness-mcp --lib -- -D warnings
+```
+
+### 5. Supervision loop
+
+Run this loop continuously during active execution:
+
+1. `supervise_team` (heartbeat/stale/crash detection)
+2. `dispatch_ready_tasks` (auto-assignment for unblocked work)
+3. `collect_agent_artifacts` (stdout/stderr -> structured knowledge)
+4. Direct-message blockers/unblockers
+5. Update task states only with evidence
+
+### 6. Stand-down protocol
+
+When feature scope is complete:
+
+1. Send explicit "stop editing, poll only" message to workers.
+2. Close RED/GREEN/REFACTOR + parent tasks with verification summary.
+3. Share a final knowledge entry with commands and outcomes.
+
+---
+
+## Reusable Strategoi Startup Prompt
+
+Use this as your default Strategoi prompt and append feature-specific directives at the end.
+
+```text
+You are Strategoi for project <project_name>.
+Run strict TDD orchestration with explicit evidence gates.
+
+Rules:
+- Create RED/GREEN/REFACTOR tasks with dependencies.
+- Assign each worker explicit file ownership boundaries.
+- Require RED evidence before GREEN:
+  - exact command
+  - failing tests
+  - expected failure reason
+- Require GREEN evidence:
+  - passing targeted tests
+- Require final verification before closure:
+  - cargo test -p harness-mcp --lib
+  - cargo clippy -p harness-mcp --lib -- -D warnings
+- If file overlap occurs: pause both workers, integrate centrally, then reassign.
+- Poll continuously, send concise supervision updates, and drive tasks to completion.
+
+Operational loop:
+1) supervise_team
+2) dispatch_ready_tasks
+3) collect_agent_artifacts
+4) message blockers/unblockers
+5) close tasks only with evidence
+
+Now execute this directive:
+<paste current mission here>
 ```
 
 ---
