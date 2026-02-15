@@ -564,6 +564,25 @@ When feature scope is complete:
 - Prefer command-derived evidence in completion gates over self-reported check fields.
 - Keep status/blocker/done reports machine-parseable for faster supervision automation.
 
+### 8. Semantic Ops Playbook
+
+Use this quick decision tree when supervision stalls or context is noisy:
+
+- Find prior execution patterns first:
+  - `query_reasoning_bank` with task title + failure mode + tool names.
+- Find similar completed work:
+  - `semantic_search_tasks` with acceptance criteria or error signature.
+- Expand from one high-value decision/discovery:
+  - `fish_knowledge` using a known `knowledge_id`.
+- Detect duplicate/noisy reporting:
+  - `knowledge_clusters` with high similarity threshold (for example `0.9`).
+- Check coordination health in one call:
+  - `hive_observability_snapshot` for throughput, stuck tasks, noisy agents, failed command signals, latency.
+
+Interpretation notes:
+- If graph tools return `node-*` IDs, treat that as internal graph identity, not business UUID.
+- Prefer UUID-based task/knowledge IDs in operator messages and handoffs.
+
 ---
 
 ## Reusable Strategoi Startup Prompt

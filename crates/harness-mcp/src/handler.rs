@@ -788,6 +788,31 @@ impl<R: Repository + 'static> HiveHandler<R> {
         ]
     }
 
+    fn node_id_fallback(node_id: aletheiadb::core::id::NodeId) -> String {
+        format!("node-{}", node_id.as_u64())
+    }
+
+    fn node_id_to_entity_id(
+        db: &aletheiadb::AletheiaDB,
+        node_id: aletheiadb::core::id::NodeId,
+        entity_type: &str,
+    ) -> String {
+        match entity_type {
+            // These entity types are modeled with UUID-backed "id" properties.
+            "task" | "knowledge" | "agent" | "product" | "project" | "plan" => {
+                if let Ok(node) = db.get_node(node_id)
+                    && let Some(id) = node.properties.get("id").and_then(|v| v.as_str())
+                    && uuid::Uuid::parse_str(id).is_ok()
+                {
+                    return id.to_string();
+                }
+            }
+            _ => {}
+        }
+
+        Self::node_id_fallback(node_id)
+    }
+
     fn build_team_template_members(
         template: TeamTemplateKind,
         global_cli_command: Option<&str>,
@@ -4066,7 +4091,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
         let (path_option, description) = if let Some(node_path) = path_result {
             let path: Vec<String> = node_path
                 .iter()
-                .map(|&node_id| format!("node-{}", node_id.as_u64()))
+                .map(|&node_id| Self::node_id_to_entity_id(db, node_id, &req.entity_type))
                 .collect();
             let desc = format!(
                 "Path found with {} hops from {} to {} at valid_time={}",
@@ -4161,7 +4186,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
 
         let path: Vec<String> = node_path
             .iter()
-            .map(|&node_id| format!("node-{}", node_id.as_u64()))
+            .map(|&node_id| Self::node_id_to_entity_id(db, node_id, &req.entity_type))
             .collect();
         let description = format!(
             "Semantic path from {} to {} with {} hops and total cost {:.3}",
@@ -4199,7 +4224,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
             cluster_map
                 .entry(*cluster_id)
                 .or_default()
-                .push(format!("node-{}", node_id.as_u64()));
+                .push(Self::node_id_to_entity_id(db, *node_id, &req.entity_type));
         }
 
         let clusters: Vec<tools::ClusterInfo> = clustering
@@ -4326,7 +4351,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
         let mut positions: Vec<tools::NodePosition> = positions_map
             .iter()
             .map(|(&node_id, &pos)| tools::NodePosition {
-                entity_id: format!("node-{}", node_id.as_u64()),
+                entity_id: Self::node_id_to_entity_id(db, node_id, &req.entity_type),
                 x: pos.x,
                 y: pos.y,
             })
@@ -4431,7 +4456,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
             .filter(|(_, score)| *score >= req.min_similarity)
             .take(req.limit)
             .map(|&(node_id, score)| tools::ResonantEntity {
-                entity_id: format!("node-{}", node_id.as_u64()),
+                entity_id: Self::node_id_to_entity_id(db, node_id, &req.entity_type),
                 similarity_score: score,
                 fingerprint: tools::TemporalFingerprint {
                     bins: vec![],
@@ -4677,7 +4702,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
         let predictions: Vec<tools::LinkPrediction> = results
             .into_iter()
             .map(|(node_id, score)| tools::LinkPrediction {
-                target_entity_id: format!("node-{}", node_id.as_u64()),
+                target_entity_id: Self::node_id_to_entity_id(db, node_id, &req.entity_type),
                 target_entity_type: req.entity_type.clone(),
                 score,
                 reason: format!(
@@ -4830,7 +4855,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
         let predictions: Vec<tools::TrajectoryPrediction> = results
             .into_iter()
             .map(|(node_id, score)| tools::TrajectoryPrediction {
-                entity_id: format!("node-{}", node_id.as_u64()),
+                entity_id: Self::node_id_to_entity_id(db, node_id, &req.entity_type),
                 entity_type: req.entity_type.clone(),
                 similarity_score: score,
             })
@@ -7323,5 +7348,53 @@ mod tests {
             consolidator.task_count() > 0,
             "EWC consolidator should have consolidated at least one task"
         );
+    }
+
+    #[tokio::test]
+    async fn test_node_id_to_entity_id_maps_task_nodes_to_uuid() {
+        use std::sync::Arc;
+
+        let db = Arc::new(AletheiaDB::new().unwrap());
+        let repo = Arc::new(AletheiaRepository::new_anon(db.clone()));
+        let session = Session::new(8);
+        repo.create_session(&session).await.unwrap();
+
+        let task = Task::new(
+            "ID normalization test",
+            "Ensure semantic tools return UUIDs for task nodes",
+            Priority::Low,
+            session.id,
+        );
+        repo.create_task(&task).await.unwrap();
+
+        let node_id = repo.get_node_id_for_task(task.id).unwrap();
+        let mapped =
+            HiveHandler::<AletheiaRepository>::node_id_to_entity_id(db.as_ref(), node_id, "task");
+
+        assert_eq!(mapped, task.id.as_uuid().to_string());
+    }
+
+    #[tokio::test]
+    async fn test_node_id_to_entity_id_falls_back_for_non_uuid_entity_types() {
+        use std::sync::Arc;
+
+        let db = Arc::new(AletheiaDB::new().unwrap());
+        let repo = Arc::new(AletheiaRepository::new_anon(db.clone()));
+        let session = Session::new(8);
+        repo.create_session(&session).await.unwrap();
+
+        let task = Task::new(
+            "Node fallback test",
+            "Unknown entity types should preserve node-* IDs",
+            Priority::Low,
+            session.id,
+        );
+        repo.create_task(&task).await.unwrap();
+
+        let node_id = repo.get_node_id_for_task(task.id).unwrap();
+        let mapped =
+            HiveHandler::<AletheiaRepository>::node_id_to_entity_id(db.as_ref(), node_id, "edge");
+
+        assert_eq!(mapped, format!("node-{}", node_id.as_u64()));
     }
 }
