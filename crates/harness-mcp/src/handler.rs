@@ -3,8 +3,10 @@
 //! Each method implements a tool that can be called by Claude agents
 //! via the MCP protocol. The handler dispatches tool calls by name.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use harness_persistence::{
     Agent, AgentId, AgentRole, AgentStatus, DirectMessage, Knowledge, KnowledgeKind,
     LearningTrigger, PatternQuery, Plan, PlanStatus, Priority, Product, ProductId, ProductStatus,
@@ -13,7 +15,7 @@ use harness_persistence::{
 };
 use tokio::sync::RwLock;
 
-use crate::state::HiveState;
+use crate::state::{AgentSpawnSpec, HiveState};
 use crate::tools;
 
 /// Error type for tool handler operations.
@@ -62,6 +64,43 @@ impl HandshakeMode {
             Self::FullMesh => "full_mesh",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TeamTemplateKind {
+    Feature,
+    Bugfix,
+    Incident,
+}
+
+impl TeamTemplateKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Feature => "feature",
+            Self::Bugfix => "bugfix",
+            Self::Incident => "incident",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TeamTemplateMember {
+    name: String,
+    role: String,
+    cli_command: String,
+    cli_args: Vec<String>,
+    custom_prompt: Option<String>,
+    directive: Option<String>,
+}
+
+struct SpawnWorkerParams<'a> {
+    role: &'a str,
+    cli_command: &'a str,
+    cli_args: &'a [String],
+    custom_prompt: Option<&'a str>,
+    directive: Option<&'a str>,
+    poll_interval_secs: u64,
+    initial_task_id: Option<&'a str>,
 }
 
 impl<R: Repository + 'static> HiveHandler<R> {
@@ -253,6 +292,12 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 let resp = self.handle_spawn_team_and_handshake(req).await?;
                 Ok(serde_json::to_value(resp).unwrap())
             }
+            "spawn_team_from_template" => {
+                let req: tools::SpawnTeamFromTemplateRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_spawn_team_from_template(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
             "refresh_session" => {
                 let req: tools::RefreshSessionRequest = serde_json::from_value(arguments)
                     .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
@@ -281,6 +326,12 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 let req: tools::CleanupStaleAgentsRequest = serde_json::from_value(arguments)
                     .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
                 let resp = self.handle_cleanup_stale_agents(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "supervise_team" => {
+                let req: tools::SuperviseTeamRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_supervise_team(req).await?;
                 Ok(serde_json::to_value(resp).unwrap())
             }
             "get_process_output" => {
@@ -515,11 +566,13 @@ impl<R: Repository + 'static> HiveHandler<R> {
             "get_hive_status",
             "spawn_agent",
             "spawn_team_and_handshake",
+            "spawn_team_from_template",
             "refresh_session",
             "disconnect_agent",
             "send_direct_message",
             "get_messages",
             "get_thread_messages",
+            "supervise_team",
             "create_product",
             "list_products",
             "create_project",
@@ -655,23 +708,155 @@ impl<R: Repository + 'static> HiveHandler<R> {
         }
     }
 
-    async fn spawn_worker_agent(
-        &self,
-        role: &str,
-        cli_command: &str,
-        cli_args: &[String],
-        custom_prompt: Option<&str>,
-        directive: Option<&str>,
-        poll_interval_secs: u64,
-        initial_task_id: Option<&str>,
-    ) -> HandlerResult<AgentId> {
-        // For MVP, only support developer role
-        let parsed_role = Self::parse_role(role)?;
-        if parsed_role != AgentRole::Developer {
-            return Err(HandlerError::InvalidArgs(
-                "MVP only supports spawning developer agents".into(),
-            ));
+    fn parse_template_kind(s: &str) -> HandlerResult<TeamTemplateKind> {
+        match s.to_ascii_lowercase().as_str() {
+            "feature" => Ok(TeamTemplateKind::Feature),
+            "bugfix" => Ok(TeamTemplateKind::Bugfix),
+            "incident" => Ok(TeamTemplateKind::Incident),
+            _ => Err(HandlerError::InvalidArgs(format!(
+                "Invalid template: {s}. Use 'feature', 'bugfix', or 'incident'"
+            ))),
         }
+    }
+
+    fn build_team_template_members(
+        template: TeamTemplateKind,
+        global_cli_command: Option<&str>,
+        global_cli_args: Option<&[String]>,
+        global_directive: Option<&str>,
+    ) -> Vec<TeamTemplateMember> {
+        let default_cli_command = global_cli_command.unwrap_or("claude");
+        let default_cli_args = global_cli_args.map(|a| a.to_vec()).unwrap_or_else(|| {
+            vec![
+                "-p".into(),
+                "{PROMPT}".into(),
+                "--allowedTools".into(),
+                "Bash,Read,Edit".into(),
+            ]
+        });
+        let append_global = |base: &str| -> String {
+            if let Some(extra) = global_directive
+                && !extra.trim().is_empty()
+            {
+                format!("{}\n\nGlobal directive:\n{}", base, extra.trim())
+            } else {
+                base.to_string()
+            }
+        };
+
+        match template {
+            TeamTemplateKind::Feature => vec![
+                TeamTemplateMember {
+                    name: "feature-architect".to_string(),
+                    role: "architect".to_string(),
+                    cli_command: default_cli_command.to_string(),
+                    cli_args: default_cli_args.clone(),
+                    custom_prompt: Some(
+                        "Own technical decomposition, interface contracts, and risk checkpoints."
+                            .to_string(),
+                    ),
+                    directive: Some(append_global(
+                        "Define implementation slices and handoff criteria for coding and testing.",
+                    )),
+                },
+                TeamTemplateMember {
+                    name: "feature-developer".to_string(),
+                    role: "developer".to_string(),
+                    cli_command: default_cli_command.to_string(),
+                    cli_args: default_cli_args.clone(),
+                    custom_prompt: Some(
+                        "Implement high-confidence slices with tight feedback loops and test evidence."
+                            .to_string(),
+                    ),
+                    directive: Some(append_global(
+                        "Build core feature path first, then edge behavior and regression coverage.",
+                    )),
+                },
+                TeamTemplateMember {
+                    name: "feature-tester".to_string(),
+                    role: "tester".to_string(),
+                    cli_command: default_cli_command.to_string(),
+                    cli_args: default_cli_args,
+                    custom_prompt: Some(
+                        "Focus on behavior regressions, failure modes, and completion criteria."
+                            .to_string(),
+                    ),
+                    directive: Some(append_global(
+                        "Validate acceptance criteria and publish blockers quickly.",
+                    )),
+                },
+            ],
+            TeamTemplateKind::Bugfix => vec![
+                TeamTemplateMember {
+                    name: "bugfix-investigator".to_string(),
+                    role: "developer".to_string(),
+                    cli_command: default_cli_command.to_string(),
+                    cli_args: default_cli_args.clone(),
+                    custom_prompt: Some(
+                        "Prioritize root-cause analysis, minimal blast radius changes, and regression tests."
+                            .to_string(),
+                    ),
+                    directive: Some(append_global(
+                        "Reproduce issue, isolate root cause, and propose minimal corrective patch.",
+                    )),
+                },
+                TeamTemplateMember {
+                    name: "bugfix-reviewer".to_string(),
+                    role: "tester".to_string(),
+                    cli_command: default_cli_command.to_string(),
+                    cli_args: default_cli_args,
+                    custom_prompt: Some(
+                        "Act as independent validator for bugfix quality and side effects.".to_string(),
+                    ),
+                    directive: Some(append_global(
+                        "Confirm fix and verify no regressions in neighboring behavior.",
+                    )),
+                },
+            ],
+            TeamTemplateKind::Incident => vec![
+                TeamTemplateMember {
+                    name: "incident-commander".to_string(),
+                    role: "architect".to_string(),
+                    cli_command: default_cli_command.to_string(),
+                    cli_args: default_cli_args.clone(),
+                    custom_prompt: Some(
+                        "Coordinate triage order, mitigation actions, and communication cadence."
+                            .to_string(),
+                    ),
+                    directive: Some(append_global(
+                        "Drive immediate containment plan and assign concrete follow-ups.",
+                    )),
+                },
+                TeamTemplateMember {
+                    name: "incident-responder".to_string(),
+                    role: "developer".to_string(),
+                    cli_command: default_cli_command.to_string(),
+                    cli_args: default_cli_args.clone(),
+                    custom_prompt: Some(
+                        "Execute mitigations quickly and keep rollback path explicit.".to_string(),
+                    ),
+                    directive: Some(append_global(
+                        "Apply mitigation with explicit verification checks and report outcomes.",
+                    )),
+                },
+                TeamTemplateMember {
+                    name: "incident-validation".to_string(),
+                    role: "tester".to_string(),
+                    cli_command: default_cli_command.to_string(),
+                    cli_args: default_cli_args,
+                    custom_prompt: Some(
+                        "Continuously validate service health and recovery confidence.".to_string(),
+                    ),
+                    directive: Some(append_global(
+                        "Monitor mitigation impact and flag unresolved risk immediately.",
+                    )),
+                },
+            ],
+        }
+    }
+
+    async fn spawn_worker_agent(&self, params: SpawnWorkerParams<'_>) -> HandlerResult<AgentId> {
+        let parsed_role = Self::parse_role(params.role)?;
 
         // Create agent entity with Starting status
         let agent = Agent::new(parsed_role, self.state.session_id());
@@ -680,7 +865,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
         self.state.repository().create_agent(&agent).await?;
 
         // Assign initial task if provided
-        if let Some(task_id_str) = initial_task_id {
+        if let Some(task_id_str) = params.initial_task_id {
             let task_id = Self::parse_task_id(task_id_str)?;
             self.state
                 .repository()
@@ -689,22 +874,109 @@ impl<R: Repository + 'static> HiveHandler<R> {
         }
 
         // Generate system prompt with auto-polling instructions
-        let merged_custom_prompt = Self::merge_spawn_custom_and_directive(custom_prompt, directive);
+        let merged_custom_prompt =
+            Self::merge_spawn_custom_and_directive(params.custom_prompt, params.directive);
         let system_prompt = crate::generate_agent_system_prompt(
             &agent_id_str,
-            "developer",
+            params.role,
             merged_custom_prompt.as_deref(),
-            poll_interval_secs,
+            params.poll_interval_secs,
         );
 
         // Spawn CLI process using ProcessManager with custom CLI command
         self.state
             .process_manager()
-            .spawn_with_cli(agent_id, cli_command, cli_args, &system_prompt)
+            .spawn_with_cli(
+                agent_id,
+                params.cli_command,
+                params.cli_args,
+                &system_prompt,
+            )
             .await
             .map_err(|e| HandlerError::InternalError(format!("Failed to spawn process: {}", e)))?;
 
+        self.state
+            .set_agent_spawn_spec(
+                agent_id,
+                AgentSpawnSpec {
+                    role: params.role.to_string(),
+                    cli_command: params.cli_command.to_string(),
+                    cli_args: params.cli_args.to_vec(),
+                    custom_prompt: params.custom_prompt.map(ToString::to_string),
+                    directive: params.directive.map(ToString::to_string),
+                    poll_interval_secs: params.poll_interval_secs,
+                },
+            )
+            .await;
+
         Ok(agent_id)
+    }
+
+    async fn seed_handshake_messages(
+        &self,
+        agent_ids: &[AgentId],
+        handshake_mode: HandshakeMode,
+        message_body: &str,
+    ) -> HandlerResult<Vec<String>> {
+        let mut message_ids = Vec::new();
+        match handshake_mode {
+            HandshakeMode::Ring => {
+                for (idx, from_agent) in agent_ids.iter().enumerate() {
+                    let to_agent = agent_ids[(idx + 1) % agent_ids.len()];
+                    let dm = DirectMessage::new(
+                        *from_agent,
+                        to_agent,
+                        message_body,
+                        self.state.session_id(),
+                    );
+                    let mid = dm.id.as_uuid().to_string();
+                    self.state.repository().create_direct_message(&dm).await?;
+                    message_ids.push(mid);
+                }
+            }
+            HandshakeMode::FullMesh => {
+                for from_agent in agent_ids {
+                    for to_agent in agent_ids {
+                        if from_agent == to_agent {
+                            continue;
+                        }
+                        let dm = DirectMessage::new(
+                            *from_agent,
+                            *to_agent,
+                            message_body,
+                            self.state.session_id(),
+                        );
+                        let mid = dm.id.as_uuid().to_string();
+                        self.state.repository().create_direct_message(&dm).await?;
+                        message_ids.push(mid);
+                    }
+                }
+            }
+        }
+        Ok(message_ids)
+    }
+
+    async fn restart_agent_from_spec(
+        &self,
+        agent_id: AgentId,
+        spec: &AgentSpawnSpec,
+    ) -> HandlerResult<()> {
+        let merged_custom_prompt = Self::merge_spawn_custom_and_directive(
+            spec.custom_prompt.as_deref(),
+            spec.directive.as_deref(),
+        );
+        let system_prompt = crate::generate_agent_system_prompt(
+            &agent_id.as_uuid().to_string(),
+            &spec.role,
+            merged_custom_prompt.as_deref(),
+            spec.poll_interval_secs,
+        );
+
+        self.state
+            .process_manager()
+            .spawn_with_cli(agent_id, &spec.cli_command, &spec.cli_args, &system_prompt)
+            .await
+            .map_err(|e| HandlerError::InternalError(format!("Failed to restart process: {}", e)))
     }
 
     fn parse_role(s: &str) -> HandlerResult<AgentRole> {
@@ -2520,17 +2792,23 @@ impl<R: Repository + 'static> HiveHandler<R> {
         req: tools::SpawnAgentRequest,
     ) -> HandlerResult<tools::SpawnAgentResponse> {
         self.require_strategoi(req._agent_id.as_deref()).await?;
+        let role = Self::parse_role(&req.role)?;
+        if role != AgentRole::Developer {
+            return Err(HandlerError::InvalidArgs(
+                "MVP only supports spawning developer agents".into(),
+            ));
+        }
 
         let agent_id = self
-            .spawn_worker_agent(
-                &req.role,
-                &req.cli_command,
-                &req.cli_args,
-                req.custom_prompt.as_deref(),
-                req.directive.as_deref(),
-                req.poll_interval_secs,
-                req.initial_task_id.as_deref(),
-            )
+            .spawn_worker_agent(SpawnWorkerParams {
+                role: &req.role,
+                cli_command: &req.cli_command,
+                cli_args: &req.cli_args,
+                custom_prompt: req.custom_prompt.as_deref(),
+                directive: req.directive.as_deref(),
+                poll_interval_secs: req.poll_interval_secs,
+                initial_task_id: req.initial_task_id.as_deref(),
+            })
             .await?;
         let agent_id_str = agent_id.as_uuid().to_string();
 
@@ -2618,6 +2896,12 @@ impl<R: Repository + 'static> HiveHandler<R> {
         req: tools::SpawnTeamAndHandshakeRequest,
     ) -> HandlerResult<tools::SpawnTeamAndHandshakeResponse> {
         self.require_strategoi(req._agent_id.as_deref()).await?;
+        let role = Self::parse_role(&req.role)?;
+        if role != AgentRole::Developer {
+            return Err(HandlerError::InvalidArgs(
+                "MVP only supports spawning developer agents".into(),
+            ));
+        }
 
         if req.agent_count < 2 {
             return Err(HandlerError::InvalidArgs(
@@ -2630,15 +2914,15 @@ impl<R: Repository + 'static> HiveHandler<R> {
         let mut agent_ids = Vec::with_capacity(req.agent_count);
         for _ in 0..req.agent_count {
             let agent_id = self
-                .spawn_worker_agent(
-                    &req.role,
-                    &req.cli_command,
-                    &req.cli_args,
-                    req.custom_prompt.as_deref(),
-                    req.directive.as_deref(),
-                    req.poll_interval_secs,
-                    None,
-                )
+                .spawn_worker_agent(SpawnWorkerParams {
+                    role: &req.role,
+                    cli_command: &req.cli_command,
+                    cli_args: &req.cli_args,
+                    custom_prompt: req.custom_prompt.as_deref(),
+                    directive: req.directive.as_deref(),
+                    poll_interval_secs: req.poll_interval_secs,
+                    initial_task_id: None,
+                })
                 .await?;
             agent_ids.push(agent_id);
         }
@@ -2650,47 +2934,80 @@ impl<R: Repository + 'static> HiveHandler<R> {
             )
         });
 
-        let mut message_ids = Vec::new();
-        match handshake_mode {
-            HandshakeMode::Ring => {
-                for (idx, from_agent) in agent_ids.iter().enumerate() {
-                    let to_agent = agent_ids[(idx + 1) % agent_ids.len()];
-                    let dm = DirectMessage::new(
-                        *from_agent,
-                        to_agent,
-                        &message_body,
-                        self.state.session_id(),
-                    );
-                    let mid = dm.id.as_uuid().to_string();
-                    self.state.repository().create_direct_message(&dm).await?;
-                    message_ids.push(mid);
-                }
-            }
-            HandshakeMode::FullMesh => {
-                for from_agent in &agent_ids {
-                    for to_agent in &agent_ids {
-                        if from_agent == to_agent {
-                            continue;
-                        }
-                        let dm = DirectMessage::new(
-                            *from_agent,
-                            *to_agent,
-                            &message_body,
-                            self.state.session_id(),
-                        );
-                        let mid = dm.id.as_uuid().to_string();
-                        self.state.repository().create_direct_message(&dm).await?;
-                        message_ids.push(mid);
-                    }
-                }
-            }
-        }
+        let message_ids = self
+            .seed_handshake_messages(&agent_ids, handshake_mode, &message_body)
+            .await?;
 
         Ok(tools::SpawnTeamAndHandshakeResponse {
             agent_ids: agent_ids
                 .iter()
                 .map(|id| id.as_uuid().to_string())
                 .collect(),
+            message_ids,
+            handshake_mode: handshake_mode.as_str().to_string(),
+        })
+    }
+
+    async fn handle_spawn_team_from_template(
+        &self,
+        req: tools::SpawnTeamFromTemplateRequest,
+    ) -> HandlerResult<tools::SpawnTeamFromTemplateResponse> {
+        self.require_strategoi(req._agent_id.as_deref()).await?;
+        let template_kind = Self::parse_template_kind(&req.template)?;
+        let handshake_mode = Self::parse_handshake_mode(&req.handshake_mode)?;
+
+        let members = Self::build_team_template_members(
+            template_kind,
+            req.cli_command.as_deref(),
+            req.cli_args.as_deref(),
+            req.directive.as_deref(),
+        );
+        if members.len() < 2 {
+            return Err(HandlerError::InternalError(
+                "Template must contain at least 2 members".into(),
+            ));
+        }
+
+        let mut agent_ids = Vec::with_capacity(members.len());
+        let mut spawned_members = Vec::with_capacity(members.len());
+
+        for member in members {
+            let agent_id = self
+                .spawn_worker_agent(SpawnWorkerParams {
+                    role: &member.role,
+                    cli_command: &member.cli_command,
+                    cli_args: &member.cli_args,
+                    custom_prompt: member.custom_prompt.as_deref(),
+                    directive: member.directive.as_deref(),
+                    poll_interval_secs: req.poll_interval_secs,
+                    initial_task_id: None,
+                })
+                .await?;
+
+            agent_ids.push(agent_id);
+            spawned_members.push(tools::TemplateSpawnedMember {
+                agent_id: agent_id.as_uuid().to_string(),
+                name: member.name,
+                role: member.role,
+                cli_command: member.cli_command,
+            });
+        }
+
+        let message_body = req.handshake_message.unwrap_or_else(|| {
+            format!(
+                "Template '{}' handshake seeded (mode: {}).",
+                template_kind.as_str(),
+                handshake_mode.as_str()
+            )
+        });
+
+        let message_ids = self
+            .seed_handshake_messages(&agent_ids, handshake_mode, &message_body)
+            .await?;
+
+        Ok(tools::SpawnTeamFromTemplateResponse {
+            template: template_kind.as_str().to_string(),
+            members: spawned_members,
             message_ids,
             handshake_mode: handshake_mode.as_str().to_string(),
         })
@@ -2788,6 +3105,131 @@ impl<R: Repository + 'static> HiveHandler<R> {
         Ok(tools::CleanupStaleAgentsResponse {
             cleaned_count: cleaned_ids.len(),
             agent_ids: cleaned_ids,
+        })
+    }
+
+    async fn handle_supervise_team(
+        &self,
+        req: tools::SuperviseTeamRequest,
+    ) -> HandlerResult<tools::SuperviseTeamResponse> {
+        self.require_strategoi(req._agent_id.as_deref()).await?;
+
+        let now = Utc::now();
+        let stale_after_secs_i64 = std::cmp::min(req.stale_after_secs, i64::MAX as u64) as i64;
+        let stale_threshold = chrono::Duration::seconds(stale_after_secs_i64);
+
+        let all_agents = self
+            .state
+            .repository()
+            .list_agents(self.state.session_id())
+            .await?;
+        let agents: Vec<Agent> = all_agents.into_iter().filter(|a| !a.is_strategoi).collect();
+
+        let recent_knowledge = self
+            .state
+            .repository()
+            .get_recent_knowledge(self.state.session_id(), req.recent_knowledge_limit)
+            .await?;
+        let mut last_activity: HashMap<AgentId, DateTime<Utc>> = HashMap::new();
+        for k in recent_knowledge {
+            let entry = last_activity.entry(k.author_id).or_insert(k.created_at);
+            if k.created_at > *entry {
+                *entry = k.created_at;
+            }
+        }
+
+        let mut issues = Vec::new();
+        let mut escalations = Vec::new();
+        let mut restarted_agents = Vec::new();
+        let mut healthy_agents = 0usize;
+
+        for agent in agents {
+            let is_running = self.state.process_manager().is_running(agent.id).await;
+            let last_seen = last_activity
+                .get(&agent.id)
+                .copied()
+                .or(Some(agent.created_at));
+            let stale = if let Some(last) = last_seen {
+                now.signed_duration_since(last) > stale_threshold
+            } else {
+                false
+            };
+
+            let mut issue: Option<String> = None;
+            if !is_running
+                && matches!(
+                    agent.status,
+                    AgentStatus::Starting | AgentStatus::Active | AgentStatus::Idle
+                )
+            {
+                issue = Some("crashed_or_not_running".to_string());
+            } else if matches!(agent.status, AgentStatus::Crashed | AgentStatus::Killed) {
+                issue = Some("crashed_or_killed".to_string());
+            } else if stale && agent.current_task.is_some() {
+                issue = Some("blocked".to_string());
+            } else if stale {
+                issue = Some("stale".to_string());
+            } else if agent.status == AgentStatus::Idle {
+                issue = Some("idle".to_string());
+            }
+
+            if let Some(issue_kind) = issue {
+                let mut action_taken = None;
+                if req.auto_restart && !is_running {
+                    if let Some(spec) = self.state.get_agent_spawn_spec(agent.id).await {
+                        match self.restart_agent_from_spec(agent.id, &spec).await {
+                            Ok(()) => {
+                                let id = agent.id.as_uuid().to_string();
+                                restarted_agents.push(id.clone());
+                                action_taken = Some("restarted_from_spawn_spec".to_string());
+                            }
+                            Err(err) => {
+                                action_taken = Some(format!("restart_failed: {}", err));
+                            }
+                        }
+                    } else {
+                        action_taken = Some("restart_skipped_no_spawn_spec".to_string());
+                    }
+                }
+
+                let last_activity_at = last_seen.map(|d| d.to_rfc3339());
+                issues.push(tools::AgentSupervisionIssue {
+                    agent_id: agent.id.as_uuid().to_string(),
+                    role: format!("{}", agent.role),
+                    status: format!("{:?}", agent.status).to_lowercase(),
+                    is_running,
+                    issue: issue_kind.clone(),
+                    last_activity_at,
+                    action_taken: action_taken.clone(),
+                });
+
+                let escalation = if let Some(action) = action_taken {
+                    format!(
+                        "Agent {} reported '{}' (action: {}).",
+                        agent.id.as_uuid(),
+                        issue_kind,
+                        action
+                    )
+                } else {
+                    format!(
+                        "Agent {} reported '{}'; manual intervention recommended.",
+                        agent.id.as_uuid(),
+                        issue_kind
+                    )
+                };
+                escalations.push(escalation);
+            } else {
+                healthy_agents += 1;
+            }
+        }
+
+        Ok(tools::SuperviseTeamResponse {
+            inspected_at: now.to_rfc3339(),
+            total_agents: healthy_agents + issues.len(),
+            healthy_agents,
+            restarted_agents,
+            issues,
+            escalations,
         })
     }
 
@@ -4753,8 +5195,10 @@ mod tests {
         assert!(names.contains(&"get_task_history"));
         assert!(names.contains(&"knowledge_clusters"));
         assert!(names.contains(&"spawn_team_and_handshake"));
+        assert!(names.contains(&"spawn_team_from_template"));
+        assert!(names.contains(&"supervise_team"));
         assert!(names.contains(&"refresh_session"));
-        assert_eq!(names.len(), 51);
+        assert_eq!(names.len(), 53);
     }
 
     #[tokio::test]
@@ -4809,6 +5253,53 @@ mod tests {
             err.to_string()
                 .contains("Invalid handshake_mode: triangle. Use 'ring' or 'full_mesh'")
         );
+    }
+
+    #[tokio::test]
+    async fn test_spawn_team_from_template_validates_template() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let err = handler
+            .call_tool(
+                "spawn_team_from_template",
+                serde_json::json!({
+                    "template": "unknown"
+                }),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("Invalid template: unknown. Use 'feature', 'bugfix', or 'incident'")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_supervise_team_empty_when_no_workers() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let resp = handler
+            .call_tool("supervise_team", serde_json::json!({}))
+            .await
+            .unwrap();
+        let resp: tools::SuperviseTeamResponse = serde_json::from_value(resp).unwrap();
+
+        assert_eq!(resp.total_agents, 0);
+        assert_eq!(resp.healthy_agents, 0);
+        assert!(resp.restarted_agents.is_empty());
+        assert!(resp.issues.is_empty());
+        assert!(resp.escalations.is_empty());
     }
 
     #[tokio::test]

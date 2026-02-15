@@ -357,7 +357,7 @@ fn with_agent_id(
     props
 }
 
-/// Returns the full list of 40 tool definitions with JSON Schema input schemas.
+/// Returns the full list of tool definitions with JSON Schema input schemas.
 pub fn tool_definitions() -> Vec<Tool> {
     vec![
         // --- Task tools ---
@@ -884,6 +884,96 @@ pub fn tool_definitions() -> Vec<Tool> {
                 (
                     "handshake_message".into(),
                     prop("string", "Optional custom body for seeded handshake DMs"),
+                ),
+            ])),
+        ),
+        make_tool(
+            "spawn_team_from_template",
+            "Spawn a predefined team shape (feature, bugfix, incident) with role-specific defaults and seeded handshakes.",
+            vec!["template"],
+            with_agent_id(HashMap::from([
+                (
+                    "template".into(),
+                    prop("string", "Template name: feature, bugfix, incident"),
+                ),
+                (
+                    "cli_command".into(),
+                    prop(
+                        "string",
+                        "Optional global CLI command override for all template members",
+                    ),
+                ),
+                ("cli_args".into(), {
+                    let mut m = serde_json::Map::new();
+                    m.insert("type".into(), serde_json::Value::String("array".into()));
+                    m.insert(
+                        "description".into(),
+                        serde_json::Value::String(
+                            "Optional global CLI args override for all template members".into(),
+                        ),
+                    );
+                    let mut items = serde_json::Map::new();
+                    items.insert("type".into(), serde_json::Value::String("string".into()));
+                    m.insert("items".into(), serde_json::Value::Object(items));
+                    m
+                }),
+                (
+                    "directive".into(),
+                    prop(
+                        "string",
+                        "Optional directive appended to each template member's default directive",
+                    ),
+                ),
+                (
+                    "poll_interval_secs".into(),
+                    prop_with_default(
+                        "number",
+                        "Polling interval in seconds for auto-polling get_messages and get_hive_status",
+                        serde_json::Value::Number(30.into()),
+                    ),
+                ),
+                (
+                    "handshake_mode".into(),
+                    prop_with_default(
+                        "string",
+                        "Handshake topology to seed: 'ring' or 'full_mesh'",
+                        serde_json::Value::String("ring".into()),
+                    ),
+                ),
+                (
+                    "handshake_message".into(),
+                    prop("string", "Optional custom body for seeded handshake DMs"),
+                ),
+            ])),
+        ),
+        make_tool(
+            "supervise_team",
+            "Inspect worker health and optionally auto-restart unhealthy agents from stored spawn specs.",
+            vec![],
+            with_agent_id(HashMap::from([
+                (
+                    "stale_after_secs".into(),
+                    prop_with_default(
+                        "number",
+                        "Consider an agent stale if no heartbeat is observed for this many seconds",
+                        serde_json::Value::Number(300.into()),
+                    ),
+                ),
+                (
+                    "recent_knowledge_limit".into(),
+                    prop_with_default(
+                        "integer",
+                        "Number of recent knowledge entries to scan for heartbeat/activity",
+                        serde_json::Value::Number(200.into()),
+                    ),
+                ),
+                (
+                    "auto_restart".into(),
+                    prop_with_default(
+                        "boolean",
+                        "Restart non-running agents when spawn metadata is available",
+                        serde_json::Value::Bool(false),
+                    ),
                 ),
             ])),
         ),
@@ -1575,7 +1665,7 @@ mod tests {
     #[test]
     fn test_tool_definitions_returns_40_tools() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 61);
+        assert_eq!(tools.len(), 63);
     }
 
     #[test]

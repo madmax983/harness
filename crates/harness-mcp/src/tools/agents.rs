@@ -160,6 +160,14 @@ fn default_handshake_mode() -> String {
     "ring".to_string()
 }
 
+fn default_stale_after_secs() -> u64 {
+    300
+}
+
+fn default_recent_knowledge_limit() -> usize {
+    200
+}
+
 /// Request to spawn a team of agents and seed handshake DMs between them.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SpawnTeamAndHandshakeRequest {
@@ -200,6 +208,94 @@ pub struct SpawnTeamAndHandshakeResponse {
     pub message_ids: Vec<String>,
     /// Handshake topology used.
     pub handshake_mode: String,
+}
+
+/// Spawn summary for one template team member.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TemplateSpawnedMember {
+    pub agent_id: String,
+    pub name: String,
+    pub role: String,
+    pub cli_command: String,
+}
+
+/// Request to spawn a team from a named template.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SpawnTeamFromTemplateRequest {
+    /// Template name: feature, bugfix, incident.
+    pub template: String,
+    /// Optional global CLI override for all members.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cli_command: Option<String>,
+    /// Optional global CLI args override for all members.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cli_args: Option<Vec<String>>,
+    /// Optional directive appended to each member's default directive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directive: Option<String>,
+    /// Polling interval in seconds for auto-polling get_messages and get_hive_status.
+    #[serde(default = "default_poll_interval")]
+    pub poll_interval_secs: u64,
+    /// Handshake topology to seed after spawning.
+    #[serde(default = "default_handshake_mode")]
+    pub handshake_mode: String,
+    /// Optional custom handshake DM body.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handshake_message: Option<String>,
+    /// Optional agent ID for multi-client support.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
+
+/// Response from spawn_team_from_template.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SpawnTeamFromTemplateResponse {
+    pub template: String,
+    pub members: Vec<TemplateSpawnedMember>,
+    pub message_ids: Vec<String>,
+    pub handshake_mode: String,
+}
+
+/// Health issue found during supervision.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AgentSupervisionIssue {
+    pub agent_id: String,
+    pub role: String,
+    pub status: String,
+    pub is_running: bool,
+    pub issue: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_taken: Option<String>,
+}
+
+/// Request to supervise the current team and optionally auto-restart unhealthy agents.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SuperviseTeamRequest {
+    /// Consider an agent stale if no heartbeat is observed for this many seconds.
+    #[serde(default = "default_stale_after_secs")]
+    pub stale_after_secs: u64,
+    /// Number of recent knowledge entries to scan for heartbeat/activity.
+    #[serde(default = "default_recent_knowledge_limit")]
+    pub recent_knowledge_limit: usize,
+    /// Restart non-running agents when spawn metadata is available.
+    #[serde(default)]
+    pub auto_restart: bool,
+    /// Optional agent ID for multi-client support.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
+
+/// Response from supervise_team.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SuperviseTeamResponse {
+    pub inspected_at: String,
+    pub total_agents: usize,
+    pub healthy_agents: usize,
+    pub restarted_agents: Vec<String>,
+    pub issues: Vec<AgentSupervisionIssue>,
+    pub escalations: Vec<String>,
 }
 
 /// Request to list running processes.

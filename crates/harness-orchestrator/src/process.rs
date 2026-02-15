@@ -74,10 +74,7 @@ fn prepare_prompt_for_cli_arg(prompt: &str, uses_cmd_wrapper: bool) -> String {
 
     // `cmd.exe` treats raw newlines as command separators, so keep content but
     // collapse line breaks into a single argument-safe string.
-    prompt
-        .replace("\r\n", "\n")
-        .replace('\n', " | ")
-        .replace('\r', " | ")
+    prompt.replace("\r\n", "\n").replace(['\n', '\r'], " | ")
 }
 
 impl<R: Repository + 'static> ProcessManager<R> {

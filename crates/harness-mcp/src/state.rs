@@ -71,6 +71,17 @@ impl AgentLoraData {
     }
 }
 
+/// Stored spawn metadata used for supervised restarts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSpawnSpec {
+    pub role: String,
+    pub cli_command: String,
+    pub cli_args: Vec<String>,
+    pub custom_prompt: Option<String>,
+    pub directive: Option<String>,
+    pub poll_interval_secs: u64,
+}
+
 /// Counters for SONA learning loop status tracking.
 #[derive(Debug, Default)]
 pub struct LearningCounters {
@@ -98,6 +109,8 @@ pub struct HiveState<R: Repository> {
     session_agents: Arc<RwLock<HashMap<String, AgentId>>>,
     /// Per-agent MicroLoRA state (in-memory, persisted via tools).
     micro_lora: Arc<RwLock<HashMap<AgentId, AgentLoraData>>>,
+    /// Per-agent spawn metadata for supervision/restart flows.
+    agent_spawn_specs: Arc<RwLock<HashMap<AgentId, AgentSpawnSpec>>>,
     /// SONA: Trajectory recorder for capturing agent action sequences.
     trajectory_recorder: Arc<TrajectoryRecorder<R>>,
     /// SONA: Shared pattern store (persists across ReasoningBank instances).
@@ -138,6 +151,7 @@ impl<R: Repository + 'static> HiveState<R> {
             embedding_service: None,
             session_agents: Arc::new(RwLock::new(HashMap::new())),
             micro_lora: Arc::new(RwLock::new(HashMap::new())),
+            agent_spawn_specs: Arc::new(RwLock::new(HashMap::new())),
             trajectory_recorder,
             pattern_store,
             learning_counters: Arc::new(LearningCounters::default()),
@@ -190,6 +204,18 @@ impl<R: Repository + 'static> HiveState<R> {
     /// Get the MicroLoRA state store.
     pub fn micro_lora(&self) -> &Arc<RwLock<HashMap<AgentId, AgentLoraData>>> {
         &self.micro_lora
+    }
+
+    /// Record spawn metadata for an agent.
+    pub async fn set_agent_spawn_spec(&self, agent_id: AgentId, spec: AgentSpawnSpec) {
+        let mut specs = self.agent_spawn_specs.write().await;
+        specs.insert(agent_id, spec);
+    }
+
+    /// Retrieve spawn metadata for an agent.
+    pub async fn get_agent_spawn_spec(&self, agent_id: AgentId) -> Option<AgentSpawnSpec> {
+        let specs = self.agent_spawn_specs.read().await;
+        specs.get(&agent_id).cloned()
     }
 
     /// Get the SONA trajectory recorder.
