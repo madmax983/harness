@@ -25,8 +25,8 @@ use aletheiadb::core::Node;
 use aletheiadb::core::id::NodeId;
 use aletheiadb::core::property::PropertyMapBuilder;
 use aletheiadb::index::VectorIndex;
-use aletheiadb::index::vector::{DistanceMetric, HnswConfig, HnswIndex, HnswIndexBuilder};
 use aletheiadb::index::vector::temporal::TemporalVectorConfig;
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig, HnswIndex, HnswIndexBuilder};
 use aletheiadb::{AletheiaDB, ReadOps, WriteOps};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -122,7 +122,9 @@ impl AletheiaRepository {
             .hnsw(HnswConfig::new(dimensions, DistanceMetric::Cosine))
             .temporal(TemporalVectorConfig::default())
             .enable()
-            .map_err(|e| RepositoryError::Database(format!("AletheiaDB vector index enable failed: {e}")))?;
+            .map_err(|e| {
+                RepositoryError::Database(format!("AletheiaDB vector index enable failed: {e}"))
+            })?;
 
         Ok(self)
     }
@@ -1723,10 +1725,7 @@ impl Repository for AletheiaRepository {
 
     // === Trajectory operations ===
 
-    async fn create_trajectory_event(
-        &self,
-        event: &crate::RawEvent,
-    ) -> RepositoryResult<()> {
+    async fn create_trajectory_event(&self, event: &crate::RawEvent) -> RepositoryResult<()> {
         let id_str = event.id.as_uuid().to_string();
         let agent_id_str = event.agent_id.as_uuid().to_string();
         let session_id_str = event.session_id.as_uuid().to_string();
@@ -1811,7 +1810,11 @@ impl Repository for AletheiaRepository {
         session_id: SessionId,
     ) -> RepositoryResult<Vec<crate::RawEvent>> {
         let session_node = self.index_get(&Self::session_key(session_id))?;
-        self.collect_outgoing(session_node, EDGE_CONTAINS_TRAJECTORY, Self::node_to_trajectory)
+        self.collect_outgoing(
+            session_node,
+            EDGE_CONTAINS_TRAJECTORY,
+            Self::node_to_trajectory,
+        )
     }
 }
 

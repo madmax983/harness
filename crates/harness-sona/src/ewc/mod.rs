@@ -62,14 +62,10 @@ impl EwcConfig {
             ));
         }
         if self.gamma <= 0.0 || self.gamma > 1.0 {
-            return Err(EwcError::InvalidConfig(
-                "gamma must be in (0, 1]".into(),
-            ));
+            return Err(EwcError::InvalidConfig("gamma must be in (0, 1]".into()));
         }
         if self.max_tasks == 0 {
-            return Err(EwcError::InvalidConfig(
-                "max_tasks must be > 0".into(),
-            ));
+            return Err(EwcError::InvalidConfig("max_tasks must be > 0".into()));
         }
         Ok(())
     }
@@ -125,11 +121,7 @@ impl FisherInformationMatrix {
 
     /// Return a normalized copy with entries scaled to [0, 1].
     pub fn normalized(&self) -> Self {
-        let max_val = self
-            .diag
-            .iter()
-            .cloned()
-            .fold(f32::NEG_INFINITY, f32::max);
+        let max_val = self.diag.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
 
         if max_val <= 0.0 {
             return self.clone();

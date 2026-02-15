@@ -2,7 +2,7 @@
 //!
 //! Compares sequential vs parallel performance across different delta set sizes.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use harness_sona::{AggregationStrategy, BaseLoRA, InternalBaseLoRAConfig, LoRADelta};
 use std::time::Duration;
 
@@ -14,7 +14,7 @@ fn generate_deltas(count: usize, dim: usize) -> Vec<LoRADelta> {
             LoRADelta::synthetic(
                 "benchmark",
                 weights,
-                10 + (i as u32 % 50),      // task_count varies
+                10 + (i as u32 % 50),            // task_count varies
                 0.7 + (i as f64 % 30.0) / 100.0, // success_rate 0.7-0.99
             )
         })
@@ -124,7 +124,6 @@ fn bench_varying_dimensions(c: &mut Criterion) {
     }
     group.finish();
 }
-
 
 criterion_group!(
     benches,

@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use harness_persistence::{AgentRole, PatternStore, ReasoningBank, TaskPattern, PatternQuery};
+use harness_persistence::{AgentRole, PatternQuery, PatternStore, ReasoningBank, TaskPattern};
 
 /// Helper: create a shared PatternStore and session ID for tests.
 fn setup_bank() -> (Arc<PatternStore>, harness_persistence::SessionId) {
@@ -124,7 +124,10 @@ async fn test_retrieve_similar_patterns() {
     assert!(
         has_auth_result,
         "Results should include at least one auth-related pattern, got: {:?}",
-        similar.iter().map(|r| r.pattern.description()).collect::<Vec<_>>()
+        similar
+            .iter()
+            .map(|r| r.pattern.description())
+            .collect::<Vec<_>>()
     );
 
     // Each result should have a similarity score between 0.0 and 1.0
@@ -191,7 +194,9 @@ async fn test_persist_to_aletheia() {
         "Rate limiting pattern should persist"
     );
     assert!(
-        descriptions.iter().any(|d| d.contains("authentication module")),
+        descriptions
+            .iter()
+            .any(|d| d.contains("authentication module")),
         "Code review pattern should persist"
     );
 }
@@ -207,13 +212,48 @@ async fn test_query_learned_patterns() {
 
     // Store patterns across different task types and roles
     let pattern_data = vec![
-        ("implement_feature", AgentRole::Developer, true, "Built user registration endpoint"),
-        ("implement_feature", AgentRole::Developer, true, "Added password reset flow"),
-        ("implement_feature", AgentRole::Developer, false, "Failed cache invalidation"),
-        ("design_schema", AgentRole::Architect, true, "Designed event sourcing schema"),
-        ("design_schema", AgentRole::Architect, true, "Designed CQRS read model"),
-        ("write_tests", AgentRole::Tester, true, "Property-based tests for serialization"),
-        ("code_review", AgentRole::Architect, true, "Reviewed API gateway security"),
+        (
+            "implement_feature",
+            AgentRole::Developer,
+            true,
+            "Built user registration endpoint",
+        ),
+        (
+            "implement_feature",
+            AgentRole::Developer,
+            true,
+            "Added password reset flow",
+        ),
+        (
+            "implement_feature",
+            AgentRole::Developer,
+            false,
+            "Failed cache invalidation",
+        ),
+        (
+            "design_schema",
+            AgentRole::Architect,
+            true,
+            "Designed event sourcing schema",
+        ),
+        (
+            "design_schema",
+            AgentRole::Architect,
+            true,
+            "Designed CQRS read model",
+        ),
+        (
+            "write_tests",
+            AgentRole::Tester,
+            true,
+            "Property-based tests for serialization",
+        ),
+        (
+            "code_review",
+            AgentRole::Architect,
+            true,
+            "Reviewed API gateway security",
+        ),
     ];
 
     for (task_type, role, success, desc) in pattern_data {
@@ -231,7 +271,11 @@ async fn test_query_learned_patterns() {
         )
         .await
         .unwrap();
-    assert_eq!(feature_patterns.len(), 3, "Should find 3 implement_feature patterns");
+    assert_eq!(
+        feature_patterns.len(),
+        3,
+        "Should find 3 implement_feature patterns"
+    );
 
     // Query by agent role only
     let architect_patterns = bank
@@ -242,7 +286,11 @@ async fn test_query_learned_patterns() {
         )
         .await
         .unwrap();
-    assert_eq!(architect_patterns.len(), 3, "Should find 3 Architect patterns");
+    assert_eq!(
+        architect_patterns.len(),
+        3,
+        "Should find 3 Architect patterns"
+    );
 
     // Query by both task type AND role
     let dev_features = bank
@@ -254,7 +302,11 @@ async fn test_query_learned_patterns() {
         )
         .await
         .unwrap();
-    assert_eq!(dev_features.len(), 3, "Should find 3 Developer+implement_feature patterns");
+    assert_eq!(
+        dev_features.len(),
+        3,
+        "Should find 3 Developer+implement_feature patterns"
+    );
 
     // Query only successful patterns
     let successful_dev = bank
@@ -267,7 +319,11 @@ async fn test_query_learned_patterns() {
         )
         .await
         .unwrap();
-    assert_eq!(successful_dev.len(), 2, "Should find 2 successful Developer+implement_feature patterns");
+    assert_eq!(
+        successful_dev.len(),
+        2,
+        "Should find 2 successful Developer+implement_feature patterns"
+    );
 
     // Query with no filters returns everything
     let all = bank
@@ -298,7 +354,10 @@ async fn test_empty_reasoning_bank() {
         .find_similar(PatternQuery::new("How to implement caching?").with_limit(5))
         .await
         .unwrap();
-    assert!(similar.is_empty(), "Similarity search on empty bank should return empty");
+    assert!(
+        similar.is_empty(),
+        "Similarity search on empty bank should return empty"
+    );
 
     // Getting a non-existent pattern should return a meaningful error
     let fake_id = harness_persistence::PatternId::new();
@@ -338,7 +397,12 @@ async fn test_concurrent_pattern_storage() {
     let results: Vec<_> = futures::future::join_all(handles).await;
     for (i, result) in results.iter().enumerate() {
         let inner = result.as_ref().expect("task should not panic");
-        assert!(inner.is_ok(), "Pattern {} should store successfully: {:?}", i, inner);
+        assert!(
+            inner.is_ok(),
+            "Pattern {} should store successfully: {:?}",
+            i,
+            inner
+        );
     }
 
     // Verify all 10 patterns were stored
@@ -353,7 +417,10 @@ async fn test_concurrent_pattern_storage() {
     );
 
     // Verify no duplicates (each task_type should be unique)
-    let mut task_types: Vec<String> = all_patterns.iter().map(|p| p.task_type().to_string()).collect();
+    let mut task_types: Vec<String> = all_patterns
+        .iter()
+        .map(|p| p.task_type().to_string())
+        .collect();
     task_types.sort();
     task_types.dedup();
     assert_eq!(

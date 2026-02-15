@@ -112,20 +112,40 @@ impl Args {
                     args.sona_enabled = Some(false);
                 }
                 "--ewc-lambda" => {
-                    let raw = it.next().ok_or_else(|| anyhow!("--ewc-lambda requires a value"))?;
-                    args.ewc_lambda = Some(raw.parse().with_context(|| format!("invalid --ewc-lambda value: {raw}"))?);
+                    let raw = it
+                        .next()
+                        .ok_or_else(|| anyhow!("--ewc-lambda requires a value"))?;
+                    args.ewc_lambda = Some(
+                        raw.parse()
+                            .with_context(|| format!("invalid --ewc-lambda value: {raw}"))?,
+                    );
                 }
                 "--ewc-gamma" => {
-                    let raw = it.next().ok_or_else(|| anyhow!("--ewc-gamma requires a value"))?;
-                    args.ewc_gamma = Some(raw.parse().with_context(|| format!("invalid --ewc-gamma value: {raw}"))?);
+                    let raw = it
+                        .next()
+                        .ok_or_else(|| anyhow!("--ewc-gamma requires a value"))?;
+                    args.ewc_gamma = Some(
+                        raw.parse()
+                            .with_context(|| format!("invalid --ewc-gamma value: {raw}"))?,
+                    );
                 }
                 "--lora-rank" => {
-                    let raw = it.next().ok_or_else(|| anyhow!("--lora-rank requires a value"))?;
-                    args.lora_rank = Some(raw.parse().with_context(|| format!("invalid --lora-rank value: {raw}"))?);
+                    let raw = it
+                        .next()
+                        .ok_or_else(|| anyhow!("--lora-rank requires a value"))?;
+                    args.lora_rank = Some(
+                        raw.parse()
+                            .with_context(|| format!("invalid --lora-rank value: {raw}"))?,
+                    );
                 }
                 "--learning-interval" => {
-                    let raw = it.next().ok_or_else(|| anyhow!("--learning-interval requires a value"))?;
-                    args.learning_interval_secs = Some(raw.parse().with_context(|| format!("invalid --learning-interval value: {raw}"))?);
+                    let raw = it
+                        .next()
+                        .ok_or_else(|| anyhow!("--learning-interval requires a value"))?;
+                    args.learning_interval_secs =
+                        Some(raw.parse().with_context(|| {
+                            format!("invalid --learning-interval value: {raw}")
+                        })?);
                 }
                 "-h" | "--help" => {
                     print_usage();

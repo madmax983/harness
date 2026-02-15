@@ -2,10 +2,10 @@
 //!
 //! Run with: cargo bench --bench reasoning_bank_hnsw
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use std::sync::Arc;
 
-use harness_persistence::{AgentRole, PatternStore, ReasoningBank, TaskPattern, PatternQuery};
+use harness_persistence::{AgentRole, PatternQuery, PatternStore, ReasoningBank, TaskPattern};
 
 /// Create sample patterns for benchmarking
 fn create_sample_patterns(count: usize) -> Vec<TaskPattern> {
@@ -34,12 +34,7 @@ fn create_sample_patterns(count: usize) -> Vec<TaskPattern> {
         .map(|i| {
             let desc = descriptions[i % descriptions.len()];
             let task_type = task_types[i % task_types.len()];
-            TaskPattern::new(
-                task_type,
-                AgentRole::Developer,
-                true,
-                desc,
-            )
+            TaskPattern::new(task_type, AgentRole::Developer, true, desc)
         })
         .collect()
 }
@@ -52,22 +47,18 @@ fn bench_hnsw_search(c: &mut Criterion) {
 
     // Test with different dataset sizes
     for size in [10, 100, 1000, 10000].iter() {
-        group.bench_with_input(
-            BenchmarkId::new("hnsw", size),
-            size,
-            |b, &size| {
-                let (store, session_id) = setup_bank_with_patterns(size);
-                let bank = ReasoningBank::new(store, session_id);
-                let query = PatternQuery::new("How to implement authentication?")
-                    .with_task_type("implement_feature")
-                    .with_limit(10);
+        group.bench_with_input(BenchmarkId::new("hnsw", size), size, |b, &size| {
+            let (store, session_id) = setup_bank_with_patterns(size);
+            let bank = ReasoningBank::new(store, session_id);
+            let query = PatternQuery::new("How to implement authentication?")
+                .with_task_type("implement_feature")
+                .with_limit(10);
 
-                b.to_async(&runtime).iter(|| async {
-                    let results = bank.find_similar(query.clone()).await.unwrap();
-                    black_box(results);
-                });
-            },
-        );
+            b.to_async(&runtime).iter(|| async {
+                let results = bank.find_similar(query.clone()).await.unwrap();
+                black_box(results);
+            });
+        });
     }
 
     group.finish();
@@ -102,8 +93,8 @@ fn bench_concurrent_search(c: &mut Criterion) {
             for i in 0..10 {
                 let bank_clone = bank.clone();
                 let handle = tokio::spawn(async move {
-                    let query = PatternQuery::new(&format!("authentication query {}", i))
-                        .with_limit(5);
+                    let query =
+                        PatternQuery::new(&format!("authentication query {}", i)).with_limit(5);
                     bank_clone.find_similar(query).await.unwrap()
                 });
                 handles.push(handle);

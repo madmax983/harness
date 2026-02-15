@@ -13,8 +13,8 @@
 //! These tests are RED phase TDD -- they define the API before implementation exists.
 
 use harness_persistence::{AgentId, Session};
-use harness_sona::ewc::{EwcConfig, EwcConsolidator, FisherInformationMatrix};
 use harness_sona::SonaEngine;
+use harness_sona::ewc::{EwcConfig, EwcConsolidator, FisherInformationMatrix};
 
 /// Helper: create a mock weight vector simulating an agent's learned parameters.
 fn mock_weights(dim: usize, seed: f32) -> Vec<f32> {
@@ -51,9 +51,9 @@ fn mock_gradient_samples(dim: usize, n_samples: usize) -> Vec<Vec<f32>> {
 async fn test_ewc_prevents_forgetting() {
     let dim = 64;
     let config = EwcConfig {
-        lambda: 0.5,          // EWC penalty strength (matches production default)
-        gamma: 0.95,          // Online EWC decay factor for old Fisher info
-        max_tasks: 100,       // Maximum number of tasks to remember
+        lambda: 0.5,    // EWC penalty strength (matches production default)
+        gamma: 0.95,    // Online EWC decay factor for old Fisher info
+        max_tasks: 100, // Maximum number of tasks to remember
         normalize_fisher: true,
     };
     let mut consolidator = EwcConsolidator::new(config);
@@ -287,11 +287,7 @@ async fn test_task_consolidation_max_limit() {
     }
 
     // Should only keep the most recent 3
-    assert_eq!(
-        consolidator.task_count(),
-        3,
-        "Should cap at max_tasks=3"
-    );
+    assert_eq!(consolidator.task_count(), 3, "Should cap at max_tasks=3");
 
     // Oldest task (task_0) should have been evicted
     assert!(
@@ -414,7 +410,8 @@ async fn test_multi_task_temporal_decay() {
     // Running Fisher ~ gamma * F_old + F_new
     // So running[i] should be approximately gamma * old_fisher[i] + new_fisher[i]
     for d in 0..dim {
-        let expected = gamma * old_snapshot.fisher_diagonal()[d] + new_snapshot.fisher_diagonal()[d];
+        let expected =
+            gamma * old_snapshot.fisher_diagonal()[d] + new_snapshot.fisher_diagonal()[d];
         let actual = running[d];
         let tolerance = expected.abs() * 0.1 + 1e-6;
         assert!(
@@ -624,12 +621,7 @@ async fn test_ewc_agent_task_lifecycle() {
     let task_a_gradients = mock_gradient_samples(64, 30);
 
     engine
-        .on_task_complete(
-            agent_id,
-            "task_a",
-            &task_a_weights,
-            &task_a_gradients,
-        )
+        .on_task_complete(agent_id, "task_a", &task_a_weights, &task_a_gradients)
         .await
         .expect("handle task A completion");
 
@@ -647,12 +639,7 @@ async fn test_ewc_agent_task_lifecycle() {
     let task_b_gradients = mock_gradient_samples(64, 30);
 
     engine
-        .on_task_complete(
-            agent_id,
-            "task_b",
-            &task_b_weights,
-            &task_b_gradients,
-        )
+        .on_task_complete(agent_id, "task_b", &task_b_weights, &task_b_gradients)
         .await
         .expect("handle task B completion");
 
@@ -692,19 +679,23 @@ async fn test_ewc_state_serialization() {
     // Consolidate a couple of tasks
     let weights_a = mock_weights(dim, 1.0);
     let grads_a = mock_gradient_samples(dim, 20);
-    consolidator.consolidate_task("task_a", &weights_a, &grads_a).unwrap();
+    consolidator
+        .consolidate_task("task_a", &weights_a, &grads_a)
+        .unwrap();
 
     let weights_b = mock_weights(dim, 2.0);
     let grads_b = mock_gradient_samples(dim, 20);
-    consolidator.consolidate_task("task_b", &weights_b, &grads_b).unwrap();
+    consolidator
+        .consolidate_task("task_b", &weights_b, &grads_b)
+        .unwrap();
 
     // Serialize to JSON (for AletheiaDB storage)
-    let serialized = serde_json::to_string(&consolidator)
-        .expect("EWC consolidator should be serializable");
+    let serialized =
+        serde_json::to_string(&consolidator).expect("EWC consolidator should be serializable");
 
     // Deserialize back
-    let restored: EwcConsolidator = serde_json::from_str(&serialized)
-        .expect("EWC consolidator should be deserializable");
+    let restored: EwcConsolidator =
+        serde_json::from_str(&serialized).expect("EWC consolidator should be deserializable");
 
     // Verify restored state matches
     assert_eq!(restored.task_count(), 2);
@@ -755,10 +746,7 @@ fn test_ewc_config_validation() {
         gamma: 1.5,
         ..valid
     };
-    assert!(
-        bad_gamma.validate().is_err(),
-        "Gamma > 1 should be invalid"
-    );
+    assert!(bad_gamma.validate().is_err(), "Gamma > 1 should be invalid");
 
     let zero_gamma = EwcConfig {
         gamma: 0.0,

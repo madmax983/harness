@@ -20,9 +20,8 @@ use harness_orchestrator::{OrchestratorConfig, ProcessManager};
 use harness_persistence::{InMemoryRepository, Repository, Session};
 
 use harness_sona::{
-    BaseLoRA, BaseLoRAConfig, FederatedCoordinator, FederatedConfig,
-    LearningLoop, LoRADelta, AggregationStrategy, ContributionWeight,
-    HiveLearningService, HiveLearningConfig,
+    AggregationStrategy, BaseLoRA, BaseLoRAConfig, ContributionWeight, FederatedConfig,
+    FederatedCoordinator, HiveLearningConfig, HiveLearningService, LearningLoop, LoRADelta,
 };
 
 /// Helper: set up an in-memory hive with multiple registered agents.
@@ -116,7 +115,11 @@ async fn test_base_lora_aggregates_learning() {
     let aggregated = base_lora.aggregate().await.unwrap();
 
     // Aggregated weights should exist and have the correct rank
-    assert_eq!(aggregated.weights.len(), 8, "Aggregated weights should match rank");
+    assert_eq!(
+        aggregated.weights.len(),
+        8,
+        "Aggregated weights should match rank"
+    );
 
     // With weighted averaging, agent 2's contribution should have the
     // most influence (highest task_count * success_rate)
@@ -214,11 +217,8 @@ async fn test_federated_coordinator() {
         staleness_threshold_secs: 3600,
     };
 
-    let coordinator = FederatedCoordinator::new(
-        fed_config,
-        base_config,
-        state.repository().clone(),
-    );
+    let coordinator =
+        FederatedCoordinator::new(fed_config, base_config, state.repository().clone());
 
     // Start a federated round
     let round_id = coordinator.start_round().await.unwrap();
@@ -235,10 +235,7 @@ async fn test_federated_coordinator() {
             success_rate: 0.8 + (i as f64 * 0.05),
             timestamp: chrono::Utc::now(),
         };
-        coordinator
-            .submit_update(&round_id, delta)
-            .await
-            .unwrap();
+        coordinator.submit_update(&round_id, delta).await.unwrap();
     }
 
     // Check round status
@@ -280,11 +277,8 @@ async fn test_federated_coordinator_rejects_stale() {
         staleness_threshold_secs: 1,
     };
 
-    let coordinator = FederatedCoordinator::new(
-        fed_config,
-        base_config,
-        state.repository().clone(),
-    );
+    let coordinator =
+        FederatedCoordinator::new(fed_config, base_config, state.repository().clone());
 
     let round_id = coordinator.start_round().await.unwrap();
 
@@ -300,11 +294,7 @@ async fn test_federated_coordinator_rejects_stale() {
 
     // Should reject stale delta
     let result = coordinator.submit_update(&round_id, stale_delta).await;
-    assert!(
-        result.is_err(),
-        "Should reject stale delta: {:?}",
-        result
-    );
+    assert!(result.is_err(), "Should reject stale delta: {:?}", result);
 }
 
 // ============================================================
@@ -333,11 +323,8 @@ async fn test_collective_improvement() {
         staleness_threshold_secs: 3600,
     };
 
-    let coordinator = FederatedCoordinator::new(
-        fed_config,
-        base_config,
-        state.repository().clone(),
-    );
+    let coordinator =
+        FederatedCoordinator::new(fed_config, base_config, state.repository().clone());
 
     let mut merit_scores: Vec<f64> = Vec::new();
 
@@ -539,7 +526,9 @@ async fn test_new_agent_benefits() {
         "Inherited weights should match BaseLoRA rank"
     );
     assert!(
-        inherited.domains_covered.contains(&"database_design".to_string()),
+        inherited
+            .domains_covered
+            .contains(&"database_design".to_string()),
         "New agent should know about existing domains"
     );
     assert!(
@@ -720,7 +709,10 @@ async fn test_background_loop_handles_disconnects() {
 
     // Disconnect one of the agents
     let disconnecting_id = handlers[1].agent_id().await.unwrap();
-    service.handle_agent_disconnect(disconnecting_id).await.unwrap();
+    service
+        .handle_agent_disconnect(disconnecting_id)
+        .await
+        .unwrap();
 
     // Run aggregation - should still work with remaining agent contributions
     let result = service.run_aggregation_round().await.unwrap();
@@ -815,22 +807,17 @@ async fn test_domain_specific_aggregation() {
 async fn test_contribution_weight_calculation() {
     // Expert agent: many tasks, high success rate
     let expert_weight = ContributionWeight::compute(
-        /* task_count */ 50,
-        /* success_rate */ 0.95,
-        /* recency_factor */ 1.0,
+        /* task_count */ 50, /* success_rate */ 0.95, /* recency_factor */ 1.0,
     );
 
     // Novice agent: few tasks, low success rate
     let novice_weight = ContributionWeight::compute(
-        /* task_count */ 2,
-        /* success_rate */ 0.60,
-        /* recency_factor */ 1.0,
+        /* task_count */ 2, /* success_rate */ 0.60, /* recency_factor */ 1.0,
     );
 
     // Stale agent: was good but hasn't contributed recently
     let stale_weight = ContributionWeight::compute(
-        /* task_count */ 30,
-        /* success_rate */ 0.90,
+        /* task_count */ 30, /* success_rate */ 0.90,
         /* recency_factor */ 0.1, // Very stale
     );
 

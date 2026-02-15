@@ -481,7 +481,8 @@ impl<R: crate::Repository> TrajectoryRecorder<R> {
         buffer.extend(events);
 
         // Mark all restored events as already flushed
-        self.last_flushed_index.store(count, std::sync::atomic::Ordering::Release);
+        self.last_flushed_index
+            .store(count, std::sync::atomic::Ordering::Release);
 
         Ok(count)
     }
@@ -517,10 +518,7 @@ impl<R: crate::Repository> TrajectoryRecorder<R> {
     /// Get a trajectory event by ID.
     ///
     /// Materializes steps lazily from the raw buffer entry.
-    pub async fn get_event(
-        &self,
-        id: TrajectoryEventId,
-    ) -> RepositoryResult<TrajectoryEvent> {
+    pub async fn get_event(&self, id: TrajectoryEventId) -> RepositoryResult<TrajectoryEvent> {
         let buffer = self.buffer.read();
         buffer
             .iter()
@@ -535,10 +533,7 @@ impl<R: crate::Repository> TrajectoryRecorder<R> {
     /// Query trajectory events with filters.
     ///
     /// Materializes steps lazily for matching events only.
-    pub async fn query(
-        &self,
-        query: TrajectoryQuery,
-    ) -> RepositoryResult<Vec<TrajectoryEvent>> {
+    pub async fn query(&self, query: TrajectoryQuery) -> RepositoryResult<Vec<TrajectoryEvent>> {
         let buffer = self.buffer.read();
         let results: Vec<TrajectoryEvent> = buffer
             .iter()
@@ -575,7 +570,9 @@ impl<R: crate::Repository> TrajectoryRecorder<R> {
         // Clone the events we need to flush (while holding lock briefly)
         let (events_to_flush, end_index) = {
             let buffer = self.buffer.read();
-            let start_index = self.last_flushed_index.load(std::sync::atomic::Ordering::Acquire);
+            let start_index = self
+                .last_flushed_index
+                .load(std::sync::atomic::Ordering::Acquire);
             let events: Vec<RawEvent> = buffer.iter().skip(start_index).cloned().collect();
             let end = buffer.len();
             (events, end)
@@ -587,7 +584,8 @@ impl<R: crate::Repository> TrajectoryRecorder<R> {
         }
 
         // Update the last flushed index (only if we successfully persisted all)
-        self.last_flushed_index.store(end_index, std::sync::atomic::Ordering::Release);
+        self.last_flushed_index
+            .store(end_index, std::sync::atomic::Ordering::Release);
 
         Ok(())
     }
@@ -666,7 +664,12 @@ mod tests {
         assert_eq!(steps.len(), 1);
         assert_eq!(steps[0].kind(), "knowledge_acquired");
         assert_eq!(
-            steps[0].payload().get("knowledge_kind").unwrap().as_str().unwrap(),
+            steps[0]
+                .payload()
+                .get("knowledge_kind")
+                .unwrap()
+                .as_str()
+                .unwrap(),
             "discovery"
         );
     }
@@ -683,15 +686,30 @@ mod tests {
         assert_eq!(steps.len(), 1);
         assert_eq!(steps[0].kind(), "project_consolidation");
         assert_eq!(
-            steps[0].payload().get("project_name").unwrap().as_str().unwrap(),
+            steps[0]
+                .payload()
+                .get("project_name")
+                .unwrap()
+                .as_str()
+                .unwrap(),
             "my-project"
         );
         assert_eq!(
-            steps[0].payload().get("tasks_completed").unwrap().as_u64().unwrap(),
+            steps[0]
+                .payload()
+                .get("tasks_completed")
+                .unwrap()
+                .as_u64()
+                .unwrap(),
             5
         );
         assert_eq!(
-            steps[0].payload().get("tasks_failed").unwrap().as_u64().unwrap(),
+            steps[0]
+                .payload()
+                .get("tasks_failed")
+                .unwrap()
+                .as_u64()
+                .unwrap(),
             2
         );
     }

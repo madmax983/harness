@@ -8,8 +8,8 @@
 //! - Trajectory: Event-driven learning trigger system
 
 pub mod config;
-pub mod ewc;
 mod engine;
+pub mod ewc;
 
 mod base_lora;
 mod contribution;
@@ -34,4 +34,4 @@ pub use merit::CollectiveMerit;
 pub use service::{
     AgentInheritance, BaseLoRAState, HiveLearningConfig, HiveLearningService, LoopStats,
 };
-pub use types::{AggregationStrategy, AggregatedWeights, ContributionStats, LoRADelta};
+pub use types::{AggregatedWeights, AggregationStrategy, ContributionStats, LoRADelta};

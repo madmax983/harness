@@ -19,9 +19,7 @@ use harness_persistence::{
     AgentId, InMemoryRepository, KnowledgeKind, Repository, Session, TaskId,
 };
 
-use harness_persistence::{
-    LearningTrigger, TrajectoryQuery, TrajectoryRecorder, TriggerKind,
-};
+use harness_persistence::{LearningTrigger, TrajectoryQuery, TrajectoryRecorder, TriggerKind};
 
 /// Helper: create a fresh InMemoryRepository with a session.
 async fn setup_repo() -> (Arc<InMemoryRepository>, Session) {
@@ -100,7 +98,10 @@ async fn test_record_task_complete() {
 
     // The event should generate trajectory steps for downstream consumers
     let steps = event.steps();
-    assert!(!steps.is_empty(), "Task completion should generate at least one trajectory step");
+    assert!(
+        !steps.is_empty(),
+        "Task completion should generate at least one trajectory step"
+    );
 
     // First step should be a "task_outcome" step
     let first_step = &steps[0];
@@ -148,7 +149,11 @@ async fn test_record_knowledge_share() {
     assert_eq!(step.kind(), "knowledge_acquired");
     assert!(step.payload().contains_key("knowledge_kind"));
     assert_eq!(
-        step.payload().get("knowledge_kind").unwrap().as_str().unwrap(),
+        step.payload()
+            .get("knowledge_kind")
+            .unwrap()
+            .as_str()
+            .unwrap(),
         "discovery"
     );
 
@@ -157,7 +162,12 @@ async fn test_record_knowledge_share() {
     let decision_steps = decision_event.steps();
     assert!(!decision_steps.is_empty());
     assert_eq!(
-        decision_steps[0].payload().get("knowledge_kind").unwrap().as_str().unwrap(),
+        decision_steps[0]
+            .payload()
+            .get("knowledge_kind")
+            .unwrap()
+            .as_str()
+            .unwrap(),
         "decision"
     );
 
@@ -166,7 +176,11 @@ async fn test_record_knowledge_share() {
         .query(TrajectoryQuery::new().with_agent(agent_id).with_limit(10))
         .await
         .unwrap();
-    assert_eq!(agent_events.len(), 2, "Agent should have 2 trajectory events");
+    assert_eq!(
+        agent_events.len(),
+        2,
+        "Agent should have 2 trajectory events"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -215,15 +229,30 @@ async fn test_record_project_close() {
 
     assert!(consolidation_step.payload().contains_key("project_name"));
     assert_eq!(
-        consolidation_step.payload().get("project_name").unwrap().as_str().unwrap(),
+        consolidation_step
+            .payload()
+            .get("project_name")
+            .unwrap()
+            .as_str()
+            .unwrap(),
         "authentication-module"
     );
     assert_eq!(
-        consolidation_step.payload().get("tasks_completed").unwrap().as_u64().unwrap(),
+        consolidation_step
+            .payload()
+            .get("tasks_completed")
+            .unwrap()
+            .as_u64()
+            .unwrap(),
         4
     );
     assert_eq!(
-        consolidation_step.payload().get("tasks_failed").unwrap().as_u64().unwrap(),
+        consolidation_step
+            .payload()
+            .get("tasks_failed")
+            .unwrap()
+            .as_u64()
+            .unwrap(),
         1
     );
 
@@ -282,10 +311,7 @@ async fn test_lock_free_buffering() {
 
                 match recorder_clone.record(trigger).await {
                     Ok(id) => event_ids.push(id),
-                    Err(e) => panic!(
-                        "Writer {} event {} failed: {:?}",
-                        writer_idx, event_idx, e
-                    ),
+                    Err(e) => panic!("Writer {} event {} failed: {:?}", writer_idx, event_idx, e),
                 }
             }
 
@@ -430,11 +456,8 @@ async fn test_query_trajectories() {
 
     // Record events from agent B
     for _ in 0..2 {
-        let trigger = knowledge_share_trigger(
-            agent_b,
-            KnowledgeKind::Discovery,
-            "Agent B discovery",
-        );
+        let trigger =
+            knowledge_share_trigger(agent_b, KnowledgeKind::Discovery, "Agent B discovery");
         recorder.record(trigger).await.unwrap();
     }
 
@@ -447,7 +470,11 @@ async fn test_query_trajectories() {
         .query(TrajectoryQuery::new().with_agent(agent_a).with_limit(10))
         .await
         .unwrap();
-    assert_eq!(agent_a_events.len(), 4, "Agent A: 3 tasks + 1 project close");
+    assert_eq!(
+        agent_a_events.len(),
+        4,
+        "Agent A: 3 tasks + 1 project close"
+    );
 
     // Query by agent B only
     let agent_b_events = recorder
@@ -541,7 +568,14 @@ async fn test_trajectory_step_payloads() {
         task_id.as_uuid().to_string()
     );
     assert_eq!(payload.get("success").unwrap().as_bool().unwrap(), true);
-    assert!(payload.get("summary").unwrap().as_str().unwrap().contains("connection pooling"));
+    assert!(
+        payload
+            .get("summary")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .contains("connection pooling")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -558,7 +592,10 @@ async fn test_empty_recorder() {
         .query(TrajectoryQuery::new().with_limit(10))
         .await
         .unwrap();
-    assert!(results.is_empty(), "Empty recorder should return empty results");
+    assert!(
+        results.is_empty(),
+        "Empty recorder should return empty results"
+    );
 
     // Flush on empty recorder should be a no-op, not error
     recorder.flush().await.unwrap();
@@ -670,7 +707,12 @@ async fn test_failure_trajectory() {
         .expect("Failed task should still have task_outcome step");
 
     assert_eq!(
-        task_step.payload().get("success").unwrap().as_bool().unwrap(),
+        task_step
+            .payload()
+            .get("success")
+            .unwrap()
+            .as_bool()
+            .unwrap(),
         false
     );
 

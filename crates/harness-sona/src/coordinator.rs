@@ -234,13 +234,12 @@ impl<R: Repository + 'static> FederatedCoordinator<R> {
         let avg_success = if latest.deltas.is_empty() {
             0.0
         } else {
-            latest.deltas.iter().map(|d| d.success_rate).sum::<f64>()
-                / latest.deltas.len() as f64
+            latest.deltas.iter().map(|d| d.success_rate).sum::<f64>() / latest.deltas.len() as f64
         };
 
         // Agent participation: fraction of minimum met
-        let participation = (latest.deltas.len() as f64 / self.fed_config.min_participants as f64)
-            .min(1.0);
+        let participation =
+            (latest.deltas.len() as f64 / self.fed_config.min_participants as f64).min(1.0);
 
         // Knowledge diversity: use the number of rounds as a proxy
         let diversity = (completed.len() as f64 * 0.1).min(1.0);

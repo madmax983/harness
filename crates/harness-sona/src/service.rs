@@ -263,9 +263,7 @@ impl<R: Repository + 'static> HiveLearningService<R> {
     pub async fn contribution_stats(&self) -> ContributionStats {
         let mut stats = self.base_lora.contribution_stats().await;
         let disconnected = self.disconnected.read().await;
-        stats.active_contributors = stats
-            .total_contributors
-            .saturating_sub(disconnected.len());
+        stats.active_contributors = stats.total_contributors.saturating_sub(disconnected.len());
         stats
     }
 
@@ -342,8 +340,8 @@ impl<R: Repository + 'static> HiveLearningService<R> {
     /// Persist the current BaseLoRA state to the repository.
     pub async fn persist_state(&self) -> SonaResult<()> {
         let state = self.current_state.read().await.clone();
-        let json = serde_json::to_string(&state)
-            .map_err(|e| SonaError::Persistence(e.to_string()))?;
+        let json =
+            serde_json::to_string(&state).map_err(|e| SonaError::Persistence(e.to_string()))?;
 
         let content = format!("{}{}", SONA_STATE_PREFIX, json);
 

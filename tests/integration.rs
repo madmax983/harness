@@ -993,7 +993,11 @@ async fn test_aletheia_persistence() {
 
     let config = OrchestratorConfig::default();
     let process_manager = Arc::new(ProcessManager::new(config, repo.clone()));
-    let state = Arc::new(HiveState::new(session.clone(), repo.clone(), process_manager));
+    let state = Arc::new(HiveState::new(
+        session.clone(),
+        repo.clone(),
+        process_manager,
+    ));
 
     // Phase 1: Create patterns through normal workflow
     {
@@ -1046,12 +1050,7 @@ async fn test_aletheia_persistence() {
             .await
             .expect("query patterns before restart");
 
-        let count = patterns
-            .get("patterns")
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .len();
+        let count = patterns.get("patterns").unwrap().as_array().unwrap().len();
         assert!(count >= 1, "Should have learned a pattern before restart");
     }
 
@@ -1075,12 +1074,7 @@ async fn test_aletheia_persistence() {
             .await
             .expect("query patterns after restart");
 
-        let persisted = patterns
-            .get("patterns")
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .len();
+        let persisted = patterns.get("patterns").unwrap().as_array().unwrap().len();
         assert!(
             persisted >= 1,
             "Learned patterns should persist across restart, got {} patterns",
@@ -1345,11 +1339,7 @@ async fn test_multi_agent_dogfooding() {
         .await
         .expect("query all patterns");
 
-    let patterns = all_patterns
-        .get("patterns")
-        .unwrap()
-        .as_array()
-        .unwrap();
+    let patterns = all_patterns.get("patterns").unwrap().as_array().unwrap();
     assert!(
         patterns.len() >= 3,
         "Reasoning bank should have patterns from multiple agents, got {}",

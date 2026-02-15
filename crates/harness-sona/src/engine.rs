@@ -169,10 +169,7 @@ mod tests {
         };
 
         // Default: auto-consolidate disabled
-        let engine = SonaEngine::builder()
-            .with_ewc(config)
-            .build()
-            .unwrap();
+        let engine = SonaEngine::builder().with_ewc(config).build().unwrap();
         assert!(!engine.auto_consolidate_enabled());
 
         // Explicitly enabled
@@ -210,10 +207,7 @@ mod tests {
         let agent_id = AgentId::new();
         let task_id = "test-task-1";
         let weights = vec![0.1, 0.2, 0.3, 0.4];
-        let gradients = vec![
-            vec![1.0, 0.5, -0.5, 0.2],
-            vec![0.8, 0.3, -0.3, 0.1],
-        ];
+        let gradients = vec![vec![1.0, 0.5, -0.5, 0.2], vec![0.8, 0.3, -0.3, 0.1]];
 
         // Consolidate task
         engine
@@ -242,10 +236,7 @@ mod tests {
             normalize_fisher: true,
         };
 
-        let engine = SonaEngine::builder()
-            .with_ewc(config)
-            .build()
-            .unwrap();
+        let engine = SonaEngine::builder().with_ewc(config).build().unwrap();
 
         // Create mock trajectory steps (using public constructor if available)
         // For now, we'll test with empty steps to verify structure

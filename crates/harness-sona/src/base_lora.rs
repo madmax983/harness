@@ -239,11 +239,7 @@ impl BaseLoRA {
             .fold(
                 || (vec![0.0f64; dim], 0.0f64),
                 |(mut acc_sum, mut acc_weight), delta| {
-                    let cw = ContributionWeight::compute(
-                        delta.task_count,
-                        delta.success_rate,
-                        1.0,
-                    );
+                    let cw = ContributionWeight::compute(delta.task_count, delta.success_rate, 1.0);
                     let w = cw.value;
                     acc_weight += w;
 
@@ -288,7 +284,10 @@ impl BaseLoRA {
         let (chunks_b, remainder_b) = b.split_at(len - (len % CHUNK_SIZE));
 
         // Chunked addition (LLVM auto-vectorizes this)
-        for (chunk_a, chunk_b) in chunks_a.chunks_exact_mut(CHUNK_SIZE).zip(chunks_b.chunks_exact(CHUNK_SIZE)) {
+        for (chunk_a, chunk_b) in chunks_a
+            .chunks_exact_mut(CHUNK_SIZE)
+            .zip(chunks_b.chunks_exact(CHUNK_SIZE))
+        {
             for i in 0..CHUNK_SIZE {
                 chunk_a[i] += chunk_b[i];
             }
@@ -525,7 +524,10 @@ mod tests {
         // Attempt to aggregate with no contributions
         let result = base_lora.aggregate().await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), crate::error::SonaError::NoContributions));
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::error::SonaError::NoContributions
+        ));
     }
 
     #[tokio::test]

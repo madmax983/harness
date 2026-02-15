@@ -10,9 +10,9 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use aletheiadb::index::VectorIndex;
-use aletheiadb::index::vector::{HnswIndex, HnswConfig, DistanceMetric, Quantization};
 use aletheiadb::core::id::NodeId;
+use aletheiadb::index::VectorIndex;
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig, HnswIndex, Quantization};
 
 use crate::{AgentRole, PatternId, RepositoryError, RepositoryResult, SessionId};
 
@@ -173,14 +173,13 @@ impl PatternStore {
     /// Create a pattern store with custom embedding dimensions.
     pub fn with_dimensions(dimensions: usize) -> Self {
         let config = HnswConfig::new(dimensions, DistanceMetric::Cosine)
-            .with_m(16)                    // Good balance for most use cases
-            .with_ef_construction(200)     // High build quality for better recall
-            .with_ef_search(64)            // Fast queries with good recall
-            .with_quantization(Quantization::F16);  // 2x memory savings
+            .with_m(16) // Good balance for most use cases
+            .with_ef_construction(200) // High build quality for better recall
+            .with_ef_search(64) // Fast queries with good recall
+            .with_quantization(Quantization::F16); // 2x memory savings
 
         let vector_index = Arc::new(
-            HnswIndex::new(config)
-                .expect("HNSW index creation should not fail with valid config")
+            HnswIndex::new(config).expect("HNSW index creation should not fail with valid config"),
         );
 
         Self {
@@ -198,7 +197,9 @@ impl PatternStore {
         let embedding = generate_embedding(pattern.description());
 
         // Allocate a unique NodeId for HNSW indexing
-        let node_id_raw = self.next_node_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let node_id_raw = self
+            .next_node_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let node_id = NodeId::new(node_id_raw)
             .map_err(|e| RepositoryError::Database(format!("NodeId allocation failed: {}", e)))?;
 
@@ -256,14 +257,20 @@ impl PatternStore {
     ///
     /// This is 100x faster than the old word-overlap approach for large pattern sets.
     /// Uses O(1) reverse mapping for NodeId -> PatternId conversion.
-    fn search_similar(&self, query_embedding: &[f32], limit: usize) -> RepositoryResult<Vec<(PatternId, f32)>> {
+    fn search_similar(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> RepositoryResult<Vec<(PatternId, f32)>> {
         // Search HNSW index for nearest neighbors
-        let results = self.vector_index
+        let results = self
+            .vector_index
             .search(query_embedding, limit)
             .map_err(|e| RepositoryError::Database(format!("HNSW search error: {}", e)))?;
 
         // Use pre-built reverse mapping for O(1) lookup
-        let reverse_map = self.reverse_id_mapping
+        let reverse_map = self
+            .reverse_id_mapping
             .read()
             .map_err(|e| RepositoryError::Database(e.to_string()))?;
 
@@ -332,14 +339,18 @@ impl ReasoningBank {
         let similar_ids = self.store.search_similar(&query_embedding, search_limit)?;
 
         // Convert (PatternId, similarity) to (TaskPattern, similarity) and apply filters
-        let patterns_map = self.store.patterns
+        let patterns_map = self
+            .store
+            .patterns
             .read()
             .map_err(|e| RepositoryError::Database(e.to_string()))?;
 
         let mut scored: Vec<SimilarPattern> = similar_ids
             .into_iter()
             .filter_map(|(pattern_id, similarity)| {
-                patterns_map.get(&pattern_id).map(|p| (p.clone(), similarity))
+                patterns_map
+                    .get(&pattern_id)
+                    .map(|p| (p.clone(), similarity))
             })
             .map(|(p, sim)| SimilarPattern {
                 pattern: p,
@@ -571,7 +582,10 @@ mod tests {
 
         // Test that embeddings are normalized (unit vector)
         let magnitude: f32 = emb1.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((magnitude - 1.0).abs() < 0.01, "Embedding should be normalized");
+        assert!(
+            (magnitude - 1.0).abs() < 0.01,
+            "Embedding should be normalized"
+        );
     }
 
     #[tokio::test]
@@ -598,6 +612,10 @@ mod tests {
         let elapsed = start.elapsed();
 
         assert!(!results.is_empty(), "Should find results");
-        assert!(elapsed.as_millis() < 100, "Search should be fast (< 100ms), was {:?}", elapsed);
+        assert!(
+            elapsed.as_millis() < 100,
+            "Search should be fast (< 100ms), was {:?}",
+            elapsed
+        );
     }
 }

@@ -30,9 +30,7 @@ async fn setup_hive() -> (
 }
 
 /// Helper: register a developer agent and return its ID.
-async fn register_developer(
-    handler: &HiveHandler<InMemoryRepository>,
-) -> String {
+async fn register_developer(handler: &HiveHandler<InMemoryRepository>) -> String {
     let resp = handler
         .call_tool("register_agent", serde_json::json!({"role": "developer"}))
         .await
@@ -229,7 +227,13 @@ async fn test_apply_learned_optimizations() {
     );
 
     // The action with negative reward should be ranked last
-    let last_action = ranked.last().unwrap().get("action").unwrap().as_str().unwrap();
+    let last_action = ranked
+        .last()
+        .unwrap()
+        .get("action")
+        .unwrap()
+        .as_str()
+        .unwrap();
     assert_eq!(
         last_action, "use_string_concatenation_for_sql",
         "Worst-rewarded action should be ranked last"
@@ -428,7 +432,11 @@ async fn test_persist_micro_lora() {
     let config = OrchestratorConfig::default();
     let process_manager = Arc::new(ProcessManager::new(config, repo.clone()));
 
-    let state = Arc::new(HiveState::new(session.clone(), repo.clone(), process_manager));
+    let state = Arc::new(HiveState::new(
+        session.clone(),
+        repo.clone(),
+        process_manager,
+    ));
     let handler = HiveHandler::new(state.clone());
 
     let agent_id = register_developer(&handler).await;
@@ -512,20 +520,12 @@ async fn test_persist_micro_lora() {
         "Restored state should have 1 trajectory"
     );
     assert_eq!(
-        restored_state
-            .get("total_steps")
-            .unwrap()
-            .as_u64()
-            .unwrap(),
+        restored_state.get("total_steps").unwrap().as_u64().unwrap(),
         2,
         "Restored state should have 2 total steps"
     );
 
-    let restored_mean = restored_state
-        .get("mean_reward")
-        .unwrap()
-        .as_f64()
-        .unwrap();
+    let restored_mean = restored_state.get("mean_reward").unwrap().as_f64().unwrap();
     assert!(
         (restored_mean - 0.9).abs() < 0.01,
         "Restored mean reward should be ~0.9, got {}",
@@ -602,11 +602,7 @@ async fn test_concurrent_agent_learning() {
                     .unwrap()
                     .as_u64()
                     .unwrap(),
-                lora_state
-                    .get("total_steps")
-                    .unwrap()
-                    .as_u64()
-                    .unwrap(),
+                lora_state.get("total_steps").unwrap().as_u64().unwrap(),
             )
         });
         handles.push(handle);
@@ -634,14 +630,7 @@ async fn test_concurrent_agent_learning() {
     }
 
     // Verify all agent IDs are unique (no cross-contamination)
-    let agent_ids: Vec<&String> = results
-        .iter()
-        .map(|r| &r.as_ref().unwrap().1)
-        .collect();
+    let agent_ids: Vec<&String> = results.iter().map(|r| &r.as_ref().unwrap().1).collect();
     let unique_ids: std::collections::HashSet<&String> = agent_ids.iter().copied().collect();
-    assert_eq!(
-        unique_ids.len(),
-        5,
-        "All 5 agents should have unique IDs"
-    );
+    assert_eq!(unique_ids.len(), 5, "All 5 agents should have unique IDs");
 }

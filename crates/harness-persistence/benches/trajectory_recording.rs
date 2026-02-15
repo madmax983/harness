@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use harness_persistence::{
     AgentId, AgentRole, InMemoryRepository, LearningTrigger, PatternQuery, PatternStore,
     ReasoningBank, SessionId, TaskPattern, TrajectoryRecorder, TriggerKind,
@@ -60,12 +60,8 @@ fn bench_store_pattern(c: &mut Criterion) {
 
     c.bench_function("store_pattern", |b| {
         b.to_async(&rt).iter(|| async {
-            let pattern = TaskPattern::new(
-                "test_task",
-                AgentRole::Developer,
-                true,
-                "test description",
-            );
+            let pattern =
+                TaskPattern::new("test_task", AgentRole::Developer, true, "test description");
 
             let result = bank.store_pattern(black_box(pattern)).await;
             black_box(result)
@@ -174,7 +170,10 @@ fn bench_event_materialization(c: &mut Criterion) {
 // Benchmark 7: Trajectory query with filters
 // ---------------------------------------------------------------------------
 
-async fn populate_trajectory_events(recorder: &TrajectoryRecorder<InMemoryRepository>, count: usize) {
+async fn populate_trajectory_events(
+    recorder: &TrajectoryRecorder<InMemoryRepository>,
+    count: usize,
+) {
     let agent_id = AgentId::new();
     for i in 0..count {
         let kind = match i % 3 {
@@ -217,9 +216,9 @@ fn bench_trajectory_query(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 
 fn bench_hot_path_microbenchmark(c: &mut Criterion) {
-    use parking_lot::RwLock;
     use chrono::Utc;
     use harness_persistence::{RawEvent, TrajectoryEventId};
+    use parking_lot::RwLock;
 
     let buffer = Arc::new(RwLock::new(Vec::<RawEvent>::with_capacity(10000)));
     let agent_id = AgentId::new();
