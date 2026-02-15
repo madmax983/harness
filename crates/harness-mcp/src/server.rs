@@ -451,6 +451,116 @@ pub fn tool_definitions() -> Vec<Tool> {
             )])),
         ),
         make_tool(
+            "nudge_or_replan",
+            "Nudge active assignees for stale tasks or replan ownership when assignees are inactive.",
+            vec!["task_id"],
+            with_agent_id(HashMap::from([
+                (
+                    "task_id".into(),
+                    prop("string", "Task ID to inspect for nudge/replan"),
+                ),
+                (
+                    "mode".into(),
+                    prop_with_default(
+                        "string",
+                        "Execution mode: 'auto', 'nudge', or 'replan'",
+                        serde_json::Value::String("auto".into()),
+                    ),
+                ),
+                (
+                    "inactivity_minutes".into(),
+                    prop_with_default(
+                        "integer",
+                        "Minutes since last activity before task is considered stale",
+                        serde_json::Value::Number(15.into()),
+                    ),
+                ),
+                (
+                    "max_actions".into(),
+                    prop_with_default(
+                        "integer",
+                        "Maximum nudge/replan actions to perform in one call",
+                        serde_json::Value::Number(10.into()),
+                    ),
+                ),
+                (
+                    "nudge_message".into(),
+                    prop(
+                        "string",
+                        "Optional direct message content used when nudging assignees",
+                    ),
+                ),
+                (
+                    "directive".into(),
+                    prop("string", "Optional strategoi directive attached to nudges"),
+                ),
+                (
+                    "dry_run".into(),
+                    prop_with_default(
+                        "boolean",
+                        "Compute nudge/replan actions without mutating task ownership or sending messages",
+                        serde_json::Value::Bool(false),
+                    ),
+                ),
+            ])),
+        ),
+        make_tool(
+            "task_completion_gate",
+            "Before marking complete, enforce required checks and summary fields.",
+            vec!["task_id"],
+            with_agent_id(HashMap::from([
+                (
+                    "task_id".into(),
+                    prop("string", "Task ID to validate for completion"),
+                ),
+                (
+                    "summary".into(),
+                    prop("string", "Completion summary required for finalize path"),
+                ),
+                ("checks".into(), {
+                    let mut checks_prop = serde_json::Map::new();
+                    checks_prop.insert("type".to_string(), serde_json::json!("array"));
+                    checks_prop.insert(
+                        "description".to_string(),
+                        serde_json::json!(
+                            "Reported command checks, each with name and passed boolean"
+                        ),
+                    );
+                    checks_prop.insert(
+                        "items".to_string(),
+                        serde_json::json!({
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "passed": {"type": "boolean"}
+                            },
+                            "required": ["name", "passed"]
+                        }),
+                    );
+                    checks_prop
+                }),
+                ("required_checks".into(), {
+                    let mut required_prop = serde_json::Map::new();
+                    required_prop.insert("type".to_string(), serde_json::json!("array"));
+                    required_prop.insert(
+                        "description".to_string(),
+                        serde_json::json!("Required check names; defaults to cargo test/clippy"),
+                    );
+                    required_prop
+                        .insert("items".to_string(), serde_json::json!({"type": "string"}));
+                    required_prop
+                }),
+                (
+                    "finalize".into(),
+                    prop_with_default(
+                        "boolean",
+                        "If true and gate passes, update task status to completed",
+                        serde_json::Value::Bool(false),
+                    ),
+                ),
+            ])),
+        ),
+        make_tool(
             "get_task_context",
             "Get full context for a task including knowledge and subtasks.",
             vec!["task_id"],
@@ -986,6 +1096,43 @@ pub fn tool_definitions() -> Vec<Tool> {
                         "boolean",
                         "Restart non-running agents when spawn metadata is available",
                         serde_json::Value::Bool(false),
+                    ),
+                ),
+            ])),
+        ),
+        make_tool(
+            "team_runbook_prompt",
+            "Return the strict shared team protocol all spawned agents should follow.",
+            vec![],
+            with_agent_id(HashMap::new()),
+        ),
+        make_tool(
+            "hive_observability_snapshot",
+            "Single tool to summarize throughput, stuck tasks, noisy agents, failed commands, and coordination latency.",
+            vec![],
+            with_agent_id(HashMap::from([
+                (
+                    "window_minutes".into(),
+                    prop_with_default(
+                        "integer",
+                        "Lookback window for throughput and noise metrics in minutes",
+                        serde_json::Value::Number(60.into()),
+                    ),
+                ),
+                (
+                    "stale_task_minutes".into(),
+                    prop_with_default(
+                        "integer",
+                        "Minutes without task activity before classifying as stuck",
+                        serde_json::Value::Number(30.into()),
+                    ),
+                ),
+                (
+                    "noisy_agent_threshold".into(),
+                    prop_with_default(
+                        "integer",
+                        "Minimum knowledge-event count in window before flagging an agent as noisy",
+                        serde_json::Value::Number(5.into()),
                     ),
                 ),
             ])),
@@ -1707,7 +1854,7 @@ mod tests {
     #[test]
     fn test_tool_definitions_returns_expected_count() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 65);
+        assert_eq!(tools.len(), 69);
     }
 
     #[test]

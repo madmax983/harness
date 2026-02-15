@@ -1,5 +1,25 @@
 //! System prompt generation for spawned agents.
 
+/// Strict shared protocol all spawned agents must follow.
+pub fn team_runbook_protocol() -> &'static str {
+    r#"TEAM RUNBOOK PROTOCOL
+STARTUP HANDSHAKE
+- On startup, call get_hive_status and list_tasks with your _agent_id.
+- Post one activity note: "startup_complete" with task inventory.
+
+STATUS CADENCE
+- Post a status update at least every 20 minutes while active.
+- Include: task_id, current step, next step, and ETA or confidence.
+
+BLOCKER FORMAT
+- Prefix blockers with "BLOCKER:".
+- Include: what is blocked, exact error/output, what was tried, what unblocks you.
+
+DONE FORMAT
+- Prefix completion with "DONE:".
+- Include: commands run, test/clippy results, files changed, and any residual risk."#
+}
+
 /// Generate a complete system prompt for a spawned agent.
 ///
 /// Includes:
@@ -13,6 +33,7 @@ pub fn generate_agent_system_prompt(
     custom_prompt: Option<&str>,
     poll_interval_secs: u64,
 ) -> String {
+    let runbook_section = format!("\n{}\n", team_runbook_protocol());
     let custom_section = custom_prompt
         .map(|p| format!("\n═══════════════════════════════════════════\nCustom Instructions\n═══════════════════════════════════════════\n{}\n", p))
         .unwrap_or_default();
@@ -76,7 +97,7 @@ IMMEDIATELY on startup:
      task_id: "...",
      _agent_id: "{agent_id}"
    }})
-{custom_section}
+{runbook_section}{custom_section}
 ═══════════════════════════════════════════
 Remember: You are part of a coordinated team!
 ═══════════════════════════════════════════
@@ -88,6 +109,7 @@ Remember: You are part of a coordinated team!
         role = role,
         agent_id = agent_id,
         poll_interval_secs = poll_interval_secs,
+        runbook_section = runbook_section,
         custom_section = custom_section,
     )
 }
@@ -101,6 +123,7 @@ pub fn generate_strategoi_directive_prompt(
     directive: &str,
     context: Option<&str>,
 ) -> String {
+    let runbook_section = team_runbook_protocol();
     let context_section = context
         .map(str::trim)
         .filter(|c| !c.is_empty())
@@ -116,6 +139,7 @@ CRITICAL RULES:
 2. Include _agent_id: "{agent_id}" in all mcp__harness__* calls.
 3. Execute first, then summarize.
 4. If a task_id is provided, claim it before implementation.
+{runbook_section}
 {context_section}
 DIRECTIVE (execute now):
 {directive}
@@ -127,6 +151,7 @@ When done, report:
 "#,
         agent_id = agent_id,
         directive = directive.trim(),
+        runbook_section = runbook_section,
         context_section = context_section,
     )
 }
@@ -293,5 +318,26 @@ mod tests {
 
         assert!(prompt.contains("Optional Context:"));
         assert!(prompt.contains("Task is latency-sensitive."));
+    }
+
+    #[test]
+    fn test_strategoi_directive_prompt_includes_team_runbook_protocol_sections() {
+        let prompt =
+            generate_strategoi_directive_prompt("agent-runbook", "Execute assigned work", None);
+
+        assert!(prompt.contains("STARTUP HANDSHAKE"));
+        assert!(prompt.contains("STATUS CADENCE"));
+        assert!(prompt.contains("BLOCKER FORMAT"));
+        assert!(prompt.contains("DONE FORMAT"));
+    }
+
+    #[test]
+    fn test_agent_system_prompt_includes_team_runbook_protocol_sections() {
+        let prompt = generate_agent_system_prompt("agent-runbook", "developer", None, 30);
+
+        assert!(prompt.contains("STARTUP HANDSHAKE"));
+        assert!(prompt.contains("STATUS CADENCE"));
+        assert!(prompt.contains("BLOCKER FORMAT"));
+        assert!(prompt.contains("DONE FORMAT"));
     }
 }

@@ -1113,6 +1113,16 @@ impl Repository for AletheiaRepository {
         })
     }
 
+    async fn clear_task_assignment(&self, task_id: TaskId) -> RepositoryResult<()> {
+        let task_node = self.index_get(&Self::task_key(task_id))?;
+        self.db_write(|tx| {
+            Ok(tx.update_node(
+                task_node,
+                PropertyMapBuilder::new().insert("assigned_to", "").build(),
+            )?)
+        })
+    }
+
     async fn list_tasks(
         &self,
         session_id: SessionId,

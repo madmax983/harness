@@ -277,6 +277,21 @@ impl Repository for InMemoryRepository {
         Ok(())
     }
 
+    async fn clear_task_assignment(&self, task_id: TaskId) -> RepositoryResult<()> {
+        let mut tasks = self
+            .tasks
+            .write()
+            .map_err(|e| RepositoryError::Database(e.to_string()))?;
+        let task = tasks
+            .get_mut(&task_id)
+            .ok_or_else(|| RepositoryError::NotFound {
+                entity_type: "Task".into(),
+                id: task_id.to_string(),
+            })?;
+        task.assigned_to = None;
+        Ok(())
+    }
+
     async fn list_tasks(
         &self,
         session_id: SessionId,

@@ -110,6 +110,9 @@ pub trait Repository: Send + Sync {
     /// Assign a task to an agent (Strategoi assigns work).
     async fn assign_task(&self, task_id: TaskId, agent_id: AgentId) -> RepositoryResult<()>;
 
+    /// Clear any explicit assignment from a task.
+    async fn clear_task_assignment(&self, task_id: TaskId) -> RepositoryResult<()>;
+
     /// List tasks in a session, optionally filtered by status.
     async fn list_tasks(
         &self,

@@ -143,6 +143,105 @@ pub struct DispatchReadyTasksResponse {
     pub assignments: Vec<TaskDispatchAssignment>,
 }
 
+/// Request to nudge an assigned agent or replan stalled task ownership.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NudgeOrReplanRequest {
+    pub task_id: String,
+    #[serde(default = "default_nudge_mode")]
+    pub mode: String,
+    #[serde(default = "default_nudge_inactivity_minutes")]
+    pub inactivity_minutes: u64,
+    #[serde(default = "default_nudge_max_actions")]
+    pub max_actions: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nudge_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directive: Option<String>,
+    #[serde(default)]
+    pub dry_run: bool,
+    /// Optional agent ID for multi-client support.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
+
+fn default_nudge_mode() -> String {
+    "auto".to_string()
+}
+
+fn default_nudge_inactivity_minutes() -> u64 {
+    15
+}
+
+fn default_nudge_max_actions() -> usize {
+    10
+}
+
+/// One action considered or taken while nudging/replanning tasks.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NudgeOrReplanAction {
+    pub task_id: String,
+    pub action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to_agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Response from nudge_or_replan.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NudgeOrReplanResponse {
+    pub task_id: String,
+    pub action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    pub inspected_at: String,
+    pub stale_task_count: usize,
+    pub nudged_count: usize,
+    pub reassigned_count: usize,
+    pub actions: Vec<NudgeOrReplanAction>,
+}
+
+/// Individual completion check result supplied to task_completion_gate.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CompletionCheckResult {
+    pub name: String,
+    pub passed: bool,
+}
+
+/// Request to validate required completion checks before closing a task.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TaskCompletionGateRequest {
+    pub task_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub checks: Vec<CompletionCheckResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_checks: Option<Vec<String>>,
+    #[serde(default)]
+    pub finalize: bool,
+    /// Optional agent ID for multi-client support.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
+
+/// Response from task_completion_gate.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TaskCompletionGateResponse {
+    pub task_id: String,
+    pub allowed: bool,
+    pub missing_summary_fields: Vec<String>,
+    pub missing_checks: Vec<String>,
+    pub failed_checks: Vec<String>,
+    pub required_checks: Vec<String>,
+    pub validated_checks: usize,
+    pub finalized: bool,
+}
+
 /// Request to get task context.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GetTaskContextRequest {

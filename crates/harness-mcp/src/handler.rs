@@ -83,6 +83,13 @@ impl TeamTemplateKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NudgeMode {
+    Auto,
+    Nudge,
+    Replan,
+}
+
 #[derive(Debug, Clone)]
 struct TeamTemplateMember {
     name: String,
@@ -176,6 +183,18 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 let req: tools::DispatchReadyTasksRequest = serde_json::from_value(arguments)
                     .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
                 let resp = self.handle_dispatch_ready_tasks(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "nudge_or_replan" => {
+                let req: tools::NudgeOrReplanRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_nudge_or_replan(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "task_completion_gate" => {
+                let req: tools::TaskCompletionGateRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_task_completion_gate(req).await?;
                 Ok(serde_json::to_value(resp).unwrap())
             }
             "get_task_context" => {
@@ -338,6 +357,19 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 let req: tools::SuperviseTeamRequest = serde_json::from_value(arguments)
                     .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
                 let resp = self.handle_supervise_team(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "team_runbook_prompt" => {
+                let req: tools::TeamRunbookPromptRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_team_runbook_prompt(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "hive_observability_snapshot" => {
+                let req: tools::HiveObservabilitySnapshotRequest =
+                    serde_json::from_value(arguments)
+                        .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_hive_observability_snapshot(req).await?;
                 Ok(serde_json::to_value(resp).unwrap())
             }
             "get_process_output" => {
@@ -559,6 +591,8 @@ impl<R: Repository + 'static> HiveHandler<R> {
             "update_task_status",
             "assign_task",
             "dispatch_ready_tasks",
+            "nudge_or_replan",
+            "task_completion_gate",
             "get_task_context",
             "add_task_dependency",
             "remove_task_dependency",
@@ -586,6 +620,8 @@ impl<R: Repository + 'static> HiveHandler<R> {
             "get_messages",
             "get_thread_messages",
             "supervise_team",
+            "team_runbook_prompt",
+            "hive_observability_snapshot",
             "collect_agent_artifacts",
             "create_product",
             "list_products",
@@ -731,6 +767,24 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 "Invalid template: {s}. Use 'feature', 'bugfix', or 'incident'"
             ))),
         }
+    }
+
+    fn parse_nudge_mode(s: &str) -> HandlerResult<NudgeMode> {
+        match s.to_ascii_lowercase().as_str() {
+            "auto" => Ok(NudgeMode::Auto),
+            "nudge" => Ok(NudgeMode::Nudge),
+            "replan" => Ok(NudgeMode::Replan),
+            _ => Err(HandlerError::InvalidArgs(format!(
+                "Invalid mode: {s}. Use 'auto', 'nudge', or 'replan'"
+            ))),
+        }
+    }
+
+    fn default_completion_checks() -> Vec<String> {
+        vec![
+            "cargo test -p harness-mcp --lib".to_string(),
+            "cargo clippy -p harness-mcp --lib -- -D warnings".to_string(),
+        ]
     }
 
     fn build_team_template_members(
@@ -1376,6 +1430,179 @@ impl<R: Repository + 'static> HiveHandler<R> {
             eligible_agent_count,
             assignment_count: assignments.len(),
             assignments,
+        })
+    }
+
+    async fn handle_nudge_or_replan(
+        &self,
+        req: tools::NudgeOrReplanRequest,
+    ) -> HandlerResult<tools::NudgeOrReplanResponse> {
+        let strategoi_id = self.require_strategoi(req._agent_id.as_deref()).await?;
+        let task_id = Self::parse_task_id(&req.task_id)?;
+        let mode = Self::parse_nudge_mode(&req.mode)?;
+        let repo = self.state.repository();
+
+        let task = repo.get_task(task_id).await?;
+        let task_knowledge = repo.get_task_knowledge(task_id).await?;
+
+        let mut last_activity = task.created_at;
+        if let Some(latest) = task_knowledge.iter().map(|k| k.created_at).max()
+            && latest > last_activity
+        {
+            last_activity = latest;
+        }
+
+        let inactivity_minutes_i64 = std::cmp::min(req.inactivity_minutes, i64::MAX as u64) as i64;
+        let stale_threshold = chrono::Duration::minutes(inactivity_minutes_i64);
+        let stale_by_time = Utc::now().signed_duration_since(last_activity) > stale_threshold;
+
+        let mut action = "no_action".to_string();
+        let mut message_id = None;
+        let mut nudged_count = 0usize;
+        let mut reassigned_count = 0usize;
+        let mut actions = Vec::new();
+
+        if let Some(assignee_id) = task.assigned_to {
+            let assignee = repo.get_agent(assignee_id).await?;
+            let assignee_inactive = matches!(
+                assignee.status,
+                AgentStatus::Killed | AgentStatus::Crashed | AgentStatus::Finished
+            );
+
+            let should_nudge = matches!(mode, NudgeMode::Nudge)
+                || (matches!(mode, NudgeMode::Auto) && !assignee_inactive);
+            let should_replan = matches!(mode, NudgeMode::Replan)
+                || (matches!(mode, NudgeMode::Auto) && assignee_inactive);
+
+            if should_nudge {
+                action = "nudged".to_string();
+                nudged_count = 1;
+                let nudge_text = req.nudge_message.clone().unwrap_or_else(|| {
+                    "Please post a progress update for your assigned task.".to_string()
+                });
+
+                if !req.dry_run {
+                    let mut dm = DirectMessage::new(
+                        strategoi_id,
+                        assignee.id,
+                        nudge_text,
+                        self.state.session_id(),
+                    );
+                    dm = dm.with_task(task_id);
+                    let mid = dm.id.as_uuid().to_string();
+                    repo.create_direct_message(&dm).await?;
+                    message_id = Some(mid.clone());
+                }
+
+                actions.push(tools::NudgeOrReplanAction {
+                    task_id: task_id.as_uuid().to_string(),
+                    action: action.clone(),
+                    message_id: message_id.clone(),
+                    from_agent_id: Some(strategoi_id.as_uuid().to_string()),
+                    to_agent_id: Some(assignee.id.as_uuid().to_string()),
+                    reason: Some(if stale_by_time {
+                        "stale_inactivity_threshold_exceeded".to_string()
+                    } else {
+                        "active_assignee_requires_status_refresh".to_string()
+                    }),
+                });
+            } else if should_replan {
+                action = "replanned".to_string();
+                reassigned_count = 1;
+
+                if !req.dry_run {
+                    repo.update_task_status(task_id, TaskStatus::Pending, None)
+                        .await?;
+                    repo.clear_task_assignment(task_id).await?;
+                }
+
+                actions.push(tools::NudgeOrReplanAction {
+                    task_id: task_id.as_uuid().to_string(),
+                    action: action.clone(),
+                    message_id: None,
+                    from_agent_id: Some(strategoi_id.as_uuid().to_string()),
+                    to_agent_id: Some(assignee.id.as_uuid().to_string()),
+                    reason: Some(if assignee_inactive {
+                        "assignee_inactive".to_string()
+                    } else {
+                        "replan_mode_forced".to_string()
+                    }),
+                });
+            }
+        }
+
+        let stale_task_count = usize::from(stale_by_time || reassigned_count > 0);
+
+        Ok(tools::NudgeOrReplanResponse {
+            task_id: task_id.as_uuid().to_string(),
+            action,
+            message_id,
+            inspected_at: Utc::now().to_rfc3339(),
+            stale_task_count,
+            nudged_count,
+            reassigned_count,
+            actions,
+        })
+    }
+
+    async fn handle_task_completion_gate(
+        &self,
+        req: tools::TaskCompletionGateRequest,
+    ) -> HandlerResult<tools::TaskCompletionGateResponse> {
+        self.require_strategoi(req._agent_id.as_deref()).await?;
+
+        let task_id = Self::parse_task_id(&req.task_id)?;
+        let required_checks = req
+            .required_checks
+            .clone()
+            .filter(|checks| !checks.is_empty())
+            .unwrap_or_else(Self::default_completion_checks);
+
+        let summary = req.summary.as_deref().map(str::trim).unwrap_or("");
+        let mut missing_summary_fields = Vec::new();
+        if summary.is_empty() {
+            missing_summary_fields.push("summary".to_string());
+        }
+
+        let check_map: HashMap<&str, bool> = req
+            .checks
+            .iter()
+            .map(|check| (check.name.as_str(), check.passed))
+            .collect();
+
+        let mut missing_checks = Vec::new();
+        let mut failed_checks = Vec::new();
+        for required in &required_checks {
+            match check_map.get(required.as_str()) {
+                Some(true) => {}
+                Some(false) => failed_checks.push(required.clone()),
+                None => missing_checks.push(required.clone()),
+            }
+        }
+
+        let allowed = missing_summary_fields.is_empty()
+            && missing_checks.is_empty()
+            && failed_checks.is_empty();
+
+        let finalized = if req.finalize && allowed {
+            self.state
+                .repository()
+                .update_task_status(task_id, TaskStatus::Completed, Some(summary))
+                .await?;
+            true
+        } else {
+            false
+        };
+
+        Ok(tools::TaskCompletionGateResponse {
+            task_id: task_id.as_uuid().to_string(),
+            allowed,
+            missing_summary_fields,
+            missing_checks,
+            failed_checks,
+            required_checks,
+            validated_checks: req.checks.len(),
+            finalized,
         })
     }
 
@@ -3312,6 +3539,175 @@ impl<R: Repository + 'static> HiveHandler<R> {
             restarted_agents,
             issues,
             escalations,
+        })
+    }
+
+    async fn handle_team_runbook_prompt(
+        &self,
+        req: tools::TeamRunbookPromptRequest,
+    ) -> HandlerResult<tools::TeamRunbookPromptResponse> {
+        self.require_strategoi(req._agent_id.as_deref()).await?;
+
+        Ok(tools::TeamRunbookPromptResponse {
+            protocol_version: "1.0.0".to_string(),
+            runbook: crate::team_runbook_protocol().to_string(),
+            sections: vec![
+                "STARTUP HANDSHAKE".to_string(),
+                "STATUS CADENCE".to_string(),
+                "BLOCKER FORMAT".to_string(),
+                "DONE FORMAT".to_string(),
+            ],
+        })
+    }
+
+    async fn handle_hive_observability_snapshot(
+        &self,
+        req: tools::HiveObservabilitySnapshotRequest,
+    ) -> HandlerResult<tools::HiveObservabilitySnapshotResponse> {
+        self.require_strategoi(req._agent_id.as_deref()).await?;
+
+        let repo = self.state.repository();
+        let now = Utc::now();
+        let window_minutes_i64 = std::cmp::min(req.window_minutes, i64::MAX as u64) as i64;
+        let window_start = now - chrono::Duration::minutes(window_minutes_i64);
+        let stale_minutes_i64 = std::cmp::min(req.stale_task_minutes, i64::MAX as u64) as i64;
+        let stale_threshold = chrono::Duration::minutes(stale_minutes_i64);
+
+        let tasks = repo.list_tasks(self.state.session_id(), None).await?;
+        let completed_tasks_last_window = tasks
+            .iter()
+            .filter(|task| {
+                task.completed_at
+                    .is_some_and(|completed| completed >= window_start)
+            })
+            .count();
+        let completion_rate_per_hour = if req.window_minutes == 0 {
+            completed_tasks_last_window as f64
+        } else {
+            completed_tasks_last_window as f64 / (req.window_minutes as f64 / 60.0)
+        };
+
+        let knowledge_window = repo
+            .get_recent_knowledge(self.state.session_id(), 2000)
+            .await?;
+        let recent_knowledge: Vec<_> = knowledge_window
+            .iter()
+            .filter(|k| k.created_at >= window_start)
+            .collect();
+        let knowledge_events_last_window = recent_knowledge.len();
+
+        let mut stuck_tasks = Vec::new();
+        for task in &tasks {
+            if !matches!(task.status, TaskStatus::Claimed | TaskStatus::InProgress) {
+                continue;
+            }
+            let task_activity = knowledge_window
+                .iter()
+                .filter(|k| k.task_id == Some(task.id))
+                .map(|k| k.created_at)
+                .max()
+                .unwrap_or(task.created_at);
+
+            let age = now.signed_duration_since(task_activity);
+            if age > stale_threshold {
+                stuck_tasks.push(tools::SnapshotStuckTask {
+                    task_id: task.id.as_uuid().to_string(),
+                    status: format!("{:?}", task.status).to_lowercase(),
+                    assigned_to: task.assigned_to.map(|a| a.as_uuid().to_string()),
+                    minutes_since_activity: age.num_minutes().max(0) as u64,
+                });
+            }
+        }
+
+        let mut events_by_agent: HashMap<AgentId, usize> = HashMap::new();
+        for knowledge in &recent_knowledge {
+            *events_by_agent.entry(knowledge.author_id).or_default() += 1;
+        }
+        let mut noisy_agents: Vec<tools::SnapshotNoisyAgent> = events_by_agent
+            .into_iter()
+            .filter(|(_, count)| *count >= req.noisy_agent_threshold)
+            .map(|(agent_id, count)| tools::SnapshotNoisyAgent {
+                agent_id: agent_id.as_uuid().to_string(),
+                event_count: count,
+            })
+            .collect();
+        noisy_agents.sort_by(|a, b| b.event_count.cmp(&a.event_count));
+
+        let agents = repo.list_agents(self.state.session_id()).await?;
+        let mut failed_commands = Vec::new();
+        for agent in agents {
+            if let Ok((_, stderr)) = self.state.process_manager().get_output(agent.id).await
+                && let Some(signal) = stderr
+                    .lines()
+                    .rev()
+                    .find(|line| {
+                        let lower = line.to_ascii_lowercase();
+                        lower.contains("error") || lower.contains("failed")
+                    })
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+            {
+                let truncated = if signal.chars().count() > 200 {
+                    let prefix: String = signal.chars().take(200).collect();
+                    format!("{prefix}...")
+                } else {
+                    signal.to_string()
+                };
+                failed_commands.push(tools::SnapshotFailedCommand {
+                    agent_id: agent.id.as_uuid().to_string(),
+                    signal: truncated,
+                });
+            }
+        }
+
+        let mut latencies = Vec::new();
+        for task in &tasks {
+            let mut messages = repo.get_thread_messages(task.id, 200).await?;
+            messages.sort_by_key(|msg| msg.created_at);
+            for pair in messages.windows(2) {
+                let first = &pair[0];
+                let second = &pair[1];
+                if first.from_agent != second.from_agent {
+                    let delta = second
+                        .created_at
+                        .signed_duration_since(first.created_at)
+                        .num_milliseconds() as f64
+                        / 1000.0;
+                    if delta >= 0.0 {
+                        latencies.push(delta);
+                    }
+                }
+            }
+        }
+
+        latencies.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let average_secs = if latencies.is_empty() {
+            None
+        } else {
+            Some(latencies.iter().sum::<f64>() / latencies.len() as f64)
+        };
+        let p95_secs = if latencies.is_empty() {
+            None
+        } else {
+            let idx = ((latencies.len() - 1) as f64 * 0.95).round() as usize;
+            latencies.get(idx).copied()
+        };
+
+        Ok(tools::HiveObservabilitySnapshotResponse {
+            inspected_at: now.to_rfc3339(),
+            throughput: tools::SnapshotThroughput {
+                completed_tasks_last_window,
+                completion_rate_per_hour,
+                knowledge_events_last_window,
+            },
+            stuck_tasks,
+            noisy_agents,
+            failed_commands,
+            coordination_latency: tools::SnapshotCoordinationLatency {
+                average_secs,
+                p95_secs,
+                sample_count: latencies.len(),
+            },
         })
     }
 
@@ -5350,12 +5746,16 @@ mod tests {
         assert!(names.contains(&"get_task_history"));
         assert!(names.contains(&"knowledge_clusters"));
         assert!(names.contains(&"dispatch_ready_tasks"));
+        assert!(names.contains(&"nudge_or_replan"));
+        assert!(names.contains(&"task_completion_gate"));
         assert!(names.contains(&"spawn_team_and_handshake"));
         assert!(names.contains(&"spawn_team_from_template"));
         assert!(names.contains(&"supervise_team"));
+        assert!(names.contains(&"team_runbook_prompt"));
+        assert!(names.contains(&"hive_observability_snapshot"));
         assert!(names.contains(&"collect_agent_artifacts"));
         assert!(names.contains(&"refresh_session"));
-        assert_eq!(names.len(), 55);
+        assert_eq!(names.len(), 59);
     }
 
     #[tokio::test]
@@ -5649,6 +6049,345 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some(idle_agent_id.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn test_nudge_or_replan_nudges_active_assignee() {
+        let (state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let worker = Agent::new(AgentRole::Developer, state.session_id());
+        let worker_id = worker.id.as_uuid().to_string();
+        state.repository().create_agent(&worker).await.unwrap();
+
+        let task = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({
+                    "title": "Needs a nudge",
+                    "description": "Waiting on assignee update",
+                    "priority": "high"
+                }),
+            )
+            .await
+            .unwrap();
+        let task: tools::CreateTaskResponse = serde_json::from_value(task).unwrap();
+
+        handler
+            .call_tool(
+                "assign_task",
+                serde_json::json!({
+                    "task_id": task.task_id,
+                    "agent_id": worker_id,
+                }),
+            )
+            .await
+            .unwrap();
+
+        let resp = handler
+            .call_tool(
+                "nudge_or_replan",
+                serde_json::json!({
+                    "task_id": task.task_id,
+                    "nudge_message": "Please provide a progress update in the task thread."
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.get("task_id").and_then(serde_json::Value::as_str),
+            Some(task.task_id.as_str())
+        );
+        assert_eq!(
+            resp.get("action").and_then(serde_json::Value::as_str),
+            Some("nudged")
+        );
+        assert!(
+            resp.get("message_id")
+                .and_then(serde_json::Value::as_str)
+                .is_some(),
+            "expected nudge_or_replan to include message_id when assignee is nudged"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_nudge_or_replan_replans_when_assignee_inactive() {
+        let (state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let worker = Agent::new(AgentRole::Developer, state.session_id());
+        let worker_id = worker.id.as_uuid().to_string();
+        state.repository().create_agent(&worker).await.unwrap();
+
+        let task = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({
+                    "title": "Recover ownership",
+                    "description": "Assigned worker became inactive",
+                    "priority": "critical"
+                }),
+            )
+            .await
+            .unwrap();
+        let task: tools::CreateTaskResponse = serde_json::from_value(task).unwrap();
+
+        handler
+            .call_tool(
+                "assign_task",
+                serde_json::json!({
+                    "task_id": task.task_id,
+                    "agent_id": worker_id,
+                }),
+            )
+            .await
+            .unwrap();
+
+        state
+            .repository()
+            .update_agent_status(worker.id, AgentStatus::Killed)
+            .await
+            .unwrap();
+
+        let resp = handler
+            .call_tool(
+                "nudge_or_replan",
+                serde_json::json!({
+                    "task_id": task.task_id
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.get("task_id").and_then(serde_json::Value::as_str),
+            Some(task.task_id.as_str())
+        );
+        assert_eq!(
+            resp.get("action").and_then(serde_json::Value::as_str),
+            Some("replanned")
+        );
+
+        let listed = handler
+            .call_tool("list_tasks", serde_json::json!({}))
+            .await
+            .unwrap();
+        let listed: tools::ListTasksResponse = serde_json::from_value(listed).unwrap();
+        let replanned = listed.tasks.iter().find(|t| t.id == task.task_id).unwrap();
+        assert_eq!(replanned.assigned_to, None);
+        assert_eq!(replanned.status, "pending");
+    }
+
+    #[tokio::test]
+    async fn test_nudge_or_replan_requires_strategoi() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "developer"}))
+            .await
+            .unwrap();
+
+        let task = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({
+                    "title": "Strategoi gate",
+                    "description": "Only strategoi should invoke nudge_or_replan",
+                    "priority": "medium"
+                }),
+            )
+            .await
+            .unwrap();
+        let task: tools::CreateTaskResponse = serde_json::from_value(task).unwrap();
+
+        let err = handler
+            .call_tool(
+                "nudge_or_replan",
+                serde_json::json!({
+                    "task_id": task.task_id
+                }),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("Only strategoi"));
+    }
+
+    #[tokio::test]
+    async fn test_nudge_or_replan_auto_mode_reports_operational_counts() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let task = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({
+                    "title": "Auto mode stale task",
+                    "description": "Should produce stale task inspection metrics",
+                    "priority": "high"
+                }),
+            )
+            .await
+            .unwrap();
+        let task: tools::CreateTaskResponse = serde_json::from_value(task).unwrap();
+
+        let resp = handler
+            .call_tool(
+                "nudge_or_replan",
+                serde_json::json!({
+                    "task_id": task.task_id,
+                    "mode": "auto",
+                    "inactivity_minutes": 30,
+                    "nudge_message": "Please post a progress heartbeat."
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            resp.get("inspected_at")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+        );
+        assert!(
+            resp.get("stale_task_count")
+                .and_then(serde_json::Value::as_u64)
+                .is_some()
+        );
+        assert!(
+            resp.get("nudged_count")
+                .and_then(serde_json::Value::as_u64)
+                .is_some()
+        );
+        assert!(
+            resp.get("reassigned_count")
+                .and_then(serde_json::Value::as_u64)
+                .is_some()
+        );
+        assert!(
+            resp.get("actions")
+                .and_then(serde_json::Value::as_array)
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_task_completion_gate_reports_required_check_state() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let task = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({
+                    "title": "Completion gate target",
+                    "description": "Needs completion checks before done",
+                    "priority": "high"
+                }),
+            )
+            .await
+            .unwrap();
+        let task: tools::CreateTaskResponse = serde_json::from_value(task).unwrap();
+
+        let resp = handler
+            .call_tool(
+                "task_completion_gate",
+                serde_json::json!({
+                    "task_id": task.task_id,
+                    "summary": "Implemented and validated behavior.",
+                    "checks": [
+                        {"name": "cargo test -p harness-mcp --lib", "passed": true},
+                        {"name": "cargo clippy -p harness-mcp --lib -- -D warnings", "passed": true}
+                    ],
+                    "finalize": false
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            resp.get("allowed")
+                .and_then(serde_json::Value::as_bool)
+                .is_some()
+        );
+        assert!(
+            resp.get("missing_checks")
+                .and_then(serde_json::Value::as_array)
+                .is_some()
+        );
+        assert!(
+            resp.get("failed_checks")
+                .and_then(serde_json::Value::as_array)
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_team_runbook_prompt_returns_required_protocol_sections() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let resp = handler
+            .call_tool("team_runbook_prompt", serde_json::json!({}))
+            .await
+            .unwrap();
+
+        let runbook = resp
+            .get("runbook")
+            .and_then(serde_json::Value::as_str)
+            .unwrap();
+
+        assert!(runbook.contains("STARTUP HANDSHAKE"));
+        assert!(runbook.contains("STATUS CADENCE"));
+        assert!(runbook.contains("BLOCKER FORMAT"));
+        assert!(runbook.contains("DONE FORMAT"));
+    }
+
+    #[tokio::test]
+    async fn test_hive_observability_snapshot_includes_operational_signals() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let resp = handler
+            .call_tool(
+                "hive_observability_snapshot",
+                serde_json::json!({
+                    "window_minutes": 60
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert!(resp.get("throughput").is_some());
+        assert!(resp.get("stuck_tasks").is_some());
+        assert!(resp.get("noisy_agents").is_some());
+        assert!(resp.get("failed_commands").is_some());
+        assert!(resp.get("coordination_latency").is_some());
     }
 
     #[tokio::test]

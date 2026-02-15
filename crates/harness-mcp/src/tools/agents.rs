@@ -302,6 +302,101 @@ pub struct SuperviseTeamResponse {
     pub escalations: Vec<String>,
 }
 
+/// Request to return the strict shared runbook protocol for team coordination.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TeamRunbookPromptRequest {
+    /// Optional agent ID for multi-client support.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
+
+/// Response from team_runbook_prompt.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TeamRunbookPromptResponse {
+    pub protocol_version: String,
+    pub runbook: String,
+    pub sections: Vec<String>,
+}
+
+fn default_observability_window_minutes() -> u64 {
+    60
+}
+
+fn default_observability_stale_task_minutes() -> u64 {
+    30
+}
+
+fn default_observability_noisy_agent_threshold() -> usize {
+    5
+}
+
+/// Request to compute a high-level hive observability snapshot.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HiveObservabilitySnapshotRequest {
+    #[serde(default = "default_observability_window_minutes")]
+    pub window_minutes: u64,
+    #[serde(default = "default_observability_stale_task_minutes")]
+    pub stale_task_minutes: u64,
+    #[serde(default = "default_observability_noisy_agent_threshold")]
+    pub noisy_agent_threshold: usize,
+    /// Optional agent ID for multi-client support.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
+
+/// Throughput metrics for recent hive activity.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SnapshotThroughput {
+    pub completed_tasks_last_window: usize,
+    pub completion_rate_per_hour: f64,
+    pub knowledge_events_last_window: usize,
+}
+
+/// One task considered stuck by observability snapshot heuristics.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SnapshotStuckTask {
+    pub task_id: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assigned_to: Option<String>,
+    pub minutes_since_activity: u64,
+}
+
+/// One noisy agent entry.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SnapshotNoisyAgent {
+    pub agent_id: String,
+    pub event_count: usize,
+}
+
+/// One failed-command signal extracted from recent process output.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SnapshotFailedCommand {
+    pub agent_id: String,
+    pub signal: String,
+}
+
+/// Coordination latency metrics derived from task-thread message exchange.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SnapshotCoordinationLatency {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub average_secs: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p95_secs: Option<f64>,
+    pub sample_count: usize,
+}
+
+/// Response from hive_observability_snapshot.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HiveObservabilitySnapshotResponse {
+    pub inspected_at: String,
+    pub throughput: SnapshotThroughput,
+    pub stuck_tasks: Vec<SnapshotStuckTask>,
+    pub noisy_agents: Vec<SnapshotNoisyAgent>,
+    pub failed_commands: Vec<SnapshotFailedCommand>,
+    pub coordination_latency: SnapshotCoordinationLatency,
+}
+
 /// Request to list running processes.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ListProcessesRequest {

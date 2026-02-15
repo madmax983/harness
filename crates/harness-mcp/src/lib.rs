@@ -9,6 +9,8 @@ pub mod tools;
 
 pub use agent_runtime::{AgentRuntime, RuntimeError, RuntimeResult};
 pub use handler::{HandlerError, HandlerResult, HiveHandler};
-pub use prompt_generator::{generate_agent_system_prompt, generate_strategoi_directive_prompt};
+pub use prompt_generator::{
+    generate_agent_system_prompt, generate_strategoi_directive_prompt, team_runbook_protocol,
+};
 pub use server::{HiveMcpServer, start_mcp_server, tool_definitions};
 pub use state::{AgentLoraData, HiveState, StoredTrajectory, TrajectoryRecord};
