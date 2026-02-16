@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use harness_orchestrator::AgentRuntimeKind;
 use harness_persistence::{
     Agent, AgentId, AgentRole, AgentStatus, DirectMessage, Knowledge, KnowledgeKind,
     LearningTrigger, PatternQuery, Plan, PlanStatus, Priority, Product, ProductId, ProductStatus,
@@ -109,6 +110,13 @@ struct SpawnWorkerParams<'a> {
     poll_interval_secs: u64,
     initial_task_id: Option<&'a str>,
 }
+
+const CODING_AGENT_SCHEDULE_KNOWLEDGE_PREFIX: &str = "__coding_agent_schedule_v1__:";
+const CODING_AGENT_WORKFLOW_DEFINITION_KNOWLEDGE_PREFIX: &str =
+    "__coding_agent_workflow_definition_v1__:";
+const CODING_AGENT_WORKFLOW_RUN_KNOWLEDGE_PREFIX: &str = "__coding_agent_workflow_run_v1__:";
+const CODING_AGENT_SCHEDULE_HYDRATION_LIMIT: usize = 10_000;
+const CODING_AGENT_HEARTBEAT_MAX_SCHEDULES: usize = 100;
 
 impl<R: Repository + 'static> HiveHandler<R> {
     /// Create a new handler.
@@ -321,6 +329,78 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 let req: tools::SpawnTeamFromTemplateRequest = serde_json::from_value(arguments)
                     .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
                 let resp = self.handle_spawn_team_from_template(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "create_workflow" => {
+                let req: tools::CreateWorkflowRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_create_workflow(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "list_workflows" => {
+                let req: tools::ListWorkflowsRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_list_workflows(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "trigger_workflow" => {
+                let req: tools::TriggerWorkflowRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_trigger_workflow(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "list_workflow_runs" => {
+                let req: tools::ListWorkflowRunsRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_list_workflow_runs(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "get_workflow_run" => {
+                let req: tools::GetWorkflowRunRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_get_workflow_run(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "pause_workflow" => {
+                let req: tools::PauseWorkflowRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_pause_workflow(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "resume_workflow" => {
+                let req: tools::ResumeWorkflowRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_resume_workflow(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "retry_step" => {
+                let req: tools::RetryStepRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_retry_step(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "backfill_workflow" => {
+                let req: tools::BackfillWorkflowRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_backfill_workflow(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "schedule_coding_agents" => {
+                let req: tools::ScheduleCodingAgentsRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_schedule_coding_agents(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "list_coding_agent_schedules" => {
+                let req: tools::ListCodingAgentSchedulesRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_list_coding_agent_schedules(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
+            "run_coding_agent_schedules" => {
+                let req: tools::RunCodingAgentSchedulesRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_run_coding_agent_schedules(req).await?;
                 Ok(serde_json::to_value(resp).unwrap())
             }
             "refresh_session" => {
@@ -614,6 +694,18 @@ impl<R: Repository + 'static> HiveHandler<R> {
             "spawn_agent",
             "spawn_team_and_handshake",
             "spawn_team_from_template",
+            "create_workflow",
+            "list_workflows",
+            "trigger_workflow",
+            "list_workflow_runs",
+            "get_workflow_run",
+            "pause_workflow",
+            "resume_workflow",
+            "retry_step",
+            "backfill_workflow",
+            "schedule_coding_agents",
+            "list_coding_agent_schedules",
+            "run_coding_agent_schedules",
             "refresh_session",
             "disconnect_agent",
             "send_direct_message",
@@ -778,6 +870,858 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 "Invalid mode: {s}. Use 'auto', 'nudge', or 'replan'"
             ))),
         }
+    }
+
+    fn render_schedule_template(template: &str, schedule_name: &str, run_at: &str) -> String {
+        template
+            .replace("{name}", schedule_name)
+            .replace("{run_at}", run_at)
+    }
+
+    fn next_schedule_time(
+        base: DateTime<Utc>,
+        cadence_minutes: u64,
+    ) -> HandlerResult<DateTime<Utc>> {
+        if cadence_minutes == 0 {
+            return Err(HandlerError::InvalidArgs(
+                "cadence_minutes must be greater than 0".to_string(),
+            ));
+        }
+        let cadence_i64 = std::cmp::min(cadence_minutes, i64::MAX as u64) as i64;
+        Ok(base + chrono::Duration::minutes(cadence_i64))
+    }
+
+    fn schedule_to_info(
+        schedule: &crate::state::CodingAgentSchedule,
+    ) -> tools::CodingAgentScheduleInfo {
+        tools::CodingAgentScheduleInfo {
+            schedule_id: schedule.schedule_id.clone(),
+            name: schedule.name.clone(),
+            cadence_minutes: schedule.cadence_minutes,
+            prompt_template: schedule.prompt_template.clone(),
+            task_title_template: schedule.task_title_template.clone(),
+            task_priority: schedule.task_priority.clone(),
+            auto_dispatch: schedule.auto_dispatch,
+            enabled: schedule.enabled,
+            created_at: schedule.created_at.to_rfc3339(),
+            last_run_at: schedule.last_run_at.map(|ts| ts.to_rfc3339()),
+            next_run_at: schedule.next_run_at.to_rfc3339(),
+        }
+    }
+
+    fn workflow_to_info(workflow: &crate::state::WorkflowDefinition) -> tools::WorkflowInfo {
+        tools::WorkflowInfo {
+            workflow_id: workflow.workflow_id.clone(),
+            name: workflow.name.clone(),
+            description: workflow.description.clone(),
+            status: workflow.status.clone(),
+            step_count: workflow.steps.len(),
+            max_concurrency: workflow.max_concurrency,
+            failure_policy: workflow.failure_policy.clone(),
+            retries: workflow.retries,
+            timeout_secs: workflow.timeout_secs,
+            backoff_secs: workflow.backoff_secs,
+            created_at: workflow.created_at.to_rfc3339(),
+            updated_at: workflow.updated_at.to_rfc3339(),
+        }
+    }
+
+    fn workflow_run_to_info(run: &crate::state::CodingAgentWorkflowRun) -> tools::WorkflowRunInfo {
+        tools::WorkflowRunInfo {
+            workflow_run_id: run.run_id.clone(),
+            workflow_id: run.workflow_id.clone(),
+            payload: run.payload.clone(),
+            status: run.status.clone(),
+            attempt: run.attempt,
+            max_attempts: run.max_attempts,
+            timeout_secs: run.timeout_secs,
+            backoff_secs: run.backoff_secs,
+            last_error: run.last_error.clone(),
+            created_at: run.created_at.to_rfc3339(),
+            updated_at: run.updated_at.to_rfc3339(),
+            step_runs: run
+                .step_runs
+                .iter()
+                .map(|step| tools::StepRunInfo {
+                    step_id: step.step_id.clone(),
+                    kind: step.kind.clone(),
+                    tool: step.tool.clone(),
+                    args: step.args.clone(),
+                    status: step.status.clone(),
+                    attempt: step.attempt,
+                    max_attempts: step.max_attempts,
+                    timeout_secs: step.timeout_secs,
+                    backoff_secs: step.backoff_secs,
+                    last_error: step.last_error.clone(),
+                    red_evidence: step.red_evidence.clone(),
+                    green_evidence: step.green_evidence.clone(),
+                    final_verification: step.final_verification.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    fn latest_workflow_runs_by_id(
+        runs: Vec<crate::state::CodingAgentWorkflowRun>,
+    ) -> Vec<crate::state::CodingAgentWorkflowRun> {
+        let mut latest: HashMap<String, crate::state::CodingAgentWorkflowRun> = HashMap::new();
+        for run in runs {
+            match latest.get(&run.run_id) {
+                Some(existing) if existing.updated_at >= run.updated_at => {}
+                _ => {
+                    latest.insert(run.run_id.clone(), run);
+                }
+            }
+        }
+        let mut result: Vec<_> = latest.into_values().collect();
+        result.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        result
+    }
+
+    fn step_definitions_to_runs(
+        steps: &[crate::state::WorkflowStepDefinition],
+    ) -> Vec<crate::state::WorkflowStepRun> {
+        steps
+            .iter()
+            .map(|step| crate::state::WorkflowStepRun {
+                step_id: step.step_id.clone(),
+                kind: step.kind.clone(),
+                tool: step.tool.clone(),
+                args: step.args.clone(),
+                status: "queued".to_string(),
+                attempt: 0,
+                max_attempts: step.max_attempts.max(1),
+                timeout_secs: step.timeout_secs,
+                backoff_secs: step.backoff_secs,
+                last_error: None,
+                red_evidence: step.red_evidence.clone(),
+                green_evidence: step.green_evidence.clone(),
+                final_verification: step.final_verification.clone(),
+            })
+            .collect()
+    }
+
+    /// Phase-3 seam: Hyper-V execution backend integration point.
+    /// Runtime implementation is intentionally deferred.
+    fn execute_hyperv_step_seam(_step_id: &str) -> HandlerResult<()> {
+        Err(HandlerError::InternalError(
+            "Hyper-V workflow execution is deferred to Phase 3".to_string(),
+        ))
+    }
+
+    fn inject_agent_id_into_args(
+        args: Option<serde_json::Value>,
+        fallback_agent_id: Option<AgentId>,
+    ) -> HandlerResult<serde_json::Value> {
+        let mut object = match args {
+            Some(serde_json::Value::Object(map)) => map,
+            None => serde_json::Map::new(),
+            Some(_) => {
+                return Err(HandlerError::InvalidArgs(
+                    "workflow run_tool args must be an object when provided".to_string(),
+                ));
+            }
+        };
+
+        if !object.contains_key("_agent_id")
+            && let Some(agent_id) = fallback_agent_id
+        {
+            object.insert(
+                "_agent_id".to_string(),
+                serde_json::Value::String(agent_id.as_uuid().to_string()),
+            );
+        }
+
+        Ok(serde_json::Value::Object(object))
+    }
+
+    async fn execute_workflow_run_tool_step(
+        &self,
+        step: &crate::state::WorkflowStepRun,
+        fallback_agent_id: Option<AgentId>,
+    ) -> HandlerResult<serde_json::Value> {
+        let tool_name = step.tool.as_deref().ok_or_else(|| {
+            HandlerError::InvalidArgs(format!(
+                "run_tool step {} is missing required tool name",
+                step.step_id
+            ))
+        })?;
+        let args = Self::inject_agent_id_into_args(step.args.clone(), fallback_agent_id)?;
+        self.call_tool(tool_name, args).await
+    }
+
+    async fn create_schedule_task(
+        &self,
+        schedule: &crate::state::CodingAgentSchedule,
+        now: DateTime<Utc>,
+        created_by: AgentId,
+    ) -> HandlerResult<TaskId> {
+        let run_at = now.to_rfc3339();
+        let title =
+            Self::render_schedule_template(&schedule.task_title_template, &schedule.name, &run_at);
+        let rendered_prompt =
+            Self::render_schedule_template(&schedule.prompt_template, &schedule.name, &run_at);
+        let priority = Self::parse_priority(&schedule.task_priority)?;
+        let description = format!(
+            "Scheduled coding-agent prompt run at {run_at}.\n\nReusable prompt:\n{rendered_prompt}"
+        );
+
+        let task = Task::new(&title, &description, priority, self.state.session_id())
+            .with_created_by(created_by);
+        self.state.repository().create_task(&task).await?;
+        Ok(task.id)
+    }
+
+    async fn persist_coding_agent_schedule(
+        &self,
+        schedule: &crate::state::CodingAgentSchedule,
+    ) -> HandlerResult<()> {
+        let serialized = serde_json::to_string(schedule).map_err(|e| {
+            HandlerError::InternalError(format!("Failed to serialize coding-agent schedule: {e}"))
+        })?;
+        let content = format!("{CODING_AGENT_SCHEDULE_KNOWLEDGE_PREFIX}{serialized}");
+        let knowledge = Knowledge::new(
+            content,
+            KnowledgeKind::Decision,
+            schedule.created_by,
+            self.state.session_id(),
+        );
+        self.state.repository().create_knowledge(&knowledge).await?;
+        Ok(())
+    }
+
+    async fn hydrate_coding_agent_schedules_from_knowledge(&self) -> HandlerResult<()> {
+        let entries = self
+            .state
+            .repository()
+            .get_recent_knowledge(
+                self.state.session_id(),
+                CODING_AGENT_SCHEDULE_HYDRATION_LIMIT,
+            )
+            .await?;
+
+        for entry in entries.into_iter().rev() {
+            let Some(payload) = entry
+                .content
+                .strip_prefix(CODING_AGENT_SCHEDULE_KNOWLEDGE_PREFIX)
+            else {
+                continue;
+            };
+
+            match serde_json::from_str::<crate::state::CodingAgentSchedule>(payload) {
+                Ok(schedule) => {
+                    self.state.upsert_coding_agent_schedule(schedule).await;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "Skipping malformed coding-agent schedule snapshot"
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn persist_workflow_definition(
+        &self,
+        workflow: &crate::state::WorkflowDefinition,
+    ) -> HandlerResult<()> {
+        let serialized = serde_json::to_string(workflow).map_err(|e| {
+            HandlerError::InternalError(format!("Failed to serialize workflow definition: {e}"))
+        })?;
+        let content = format!("{CODING_AGENT_WORKFLOW_DEFINITION_KNOWLEDGE_PREFIX}{serialized}");
+        let knowledge = Knowledge::new(
+            content,
+            KnowledgeKind::Decision,
+            workflow.created_by,
+            self.state.session_id(),
+        );
+        self.state.repository().create_knowledge(&knowledge).await?;
+        Ok(())
+    }
+
+    async fn hydrate_workflow_definitions_from_knowledge(&self) -> HandlerResult<()> {
+        let entries = self
+            .state
+            .repository()
+            .get_recent_knowledge(
+                self.state.session_id(),
+                CODING_AGENT_SCHEDULE_HYDRATION_LIMIT,
+            )
+            .await?;
+
+        for entry in entries.into_iter().rev() {
+            let Some(payload) = entry
+                .content
+                .strip_prefix(CODING_AGENT_WORKFLOW_DEFINITION_KNOWLEDGE_PREFIX)
+            else {
+                continue;
+            };
+
+            match serde_json::from_str::<crate::state::WorkflowDefinition>(payload) {
+                Ok(workflow) => {
+                    self.state.upsert_workflow_definition(workflow).await;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "Skipping malformed workflow definition snapshot"
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn persist_coding_agent_workflow_run(
+        &self,
+        run: &crate::state::CodingAgentWorkflowRun,
+        created_by: AgentId,
+    ) -> HandlerResult<()> {
+        let serialized = serde_json::to_string(run).map_err(|e| {
+            HandlerError::InternalError(format!(
+                "Failed to serialize coding-agent workflow run: {e}"
+            ))
+        })?;
+        let content = format!("{CODING_AGENT_WORKFLOW_RUN_KNOWLEDGE_PREFIX}{serialized}");
+        let knowledge = Knowledge::new(
+            content,
+            KnowledgeKind::Activity,
+            created_by,
+            self.state.session_id(),
+        );
+        self.state.repository().create_knowledge(&knowledge).await?;
+        Ok(())
+    }
+
+    async fn upsert_and_persist_coding_agent_workflow_run(
+        &self,
+        run: crate::state::CodingAgentWorkflowRun,
+        fallback_created_by: Option<AgentId>,
+    ) -> HandlerResult<()> {
+        self.state
+            .upsert_coding_agent_workflow_run(run.clone())
+            .await;
+        if let Some(created_by) = run.created_by.or(fallback_created_by) {
+            self.persist_coding_agent_workflow_run(&run, created_by)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn hydrate_coding_agent_workflow_runs_from_knowledge(&self) -> HandlerResult<()> {
+        let entries = self
+            .state
+            .repository()
+            .get_recent_knowledge(
+                self.state.session_id(),
+                CODING_AGENT_SCHEDULE_HYDRATION_LIMIT,
+            )
+            .await?;
+
+        for entry in entries.into_iter().rev() {
+            let Some(payload) = entry
+                .content
+                .strip_prefix(CODING_AGENT_WORKFLOW_RUN_KNOWLEDGE_PREFIX)
+            else {
+                continue;
+            };
+
+            match serde_json::from_str::<crate::state::CodingAgentWorkflowRun>(payload) {
+                Ok(run) => {
+                    self.state.upsert_coding_agent_workflow_run(run).await;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "Skipping malformed coding-agent workflow-run snapshot"
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn default_scheduler_cli_args(cli_command: &str) -> Vec<String> {
+        match AgentRuntimeKind::infer_from_cli(cli_command) {
+            AgentRuntimeKind::Codex => vec![
+                "exec".to_string(),
+                "{PROMPT}".to_string(),
+                "--json".to_string(),
+            ],
+            AgentRuntimeKind::Gemini => vec![
+                "-p".to_string(),
+                "{PROMPT}".to_string(),
+                "--output-format".to_string(),
+                "json".to_string(),
+                "--yolo".to_string(),
+            ],
+            AgentRuntimeKind::Claude | AgentRuntimeKind::ClaudeCompatible => vec![
+                "-p".to_string(),
+                "{PROMPT}".to_string(),
+                "--output-format".to_string(),
+                "json".to_string(),
+                "--allowedTools".to_string(),
+                "Bash,Read,Edit".to_string(),
+            ],
+        }
+    }
+
+    async fn select_scheduler_spawn_spec(&self) -> HandlerResult<AgentSpawnSpec> {
+        let mut agents = self
+            .state
+            .repository()
+            .list_active_agents(self.state.session_id())
+            .await?;
+        agents.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+
+        let mut fallback_candidate: Option<AgentSpawnSpec> = None;
+        for agent in agents {
+            if agent.is_strategoi {
+                continue;
+            }
+
+            if let Some(mut spec) = self.state.get_agent_spawn_spec(agent.id).await {
+                if spec.cli_args.is_empty() {
+                    spec.cli_args = Self::default_scheduler_cli_args(&spec.cli_command);
+                }
+                if spec.role.eq_ignore_ascii_case("developer") {
+                    return Ok(spec);
+                }
+                if fallback_candidate.is_none() {
+                    fallback_candidate = Some(spec);
+                }
+            }
+        }
+
+        if let Some(spec) = fallback_candidate {
+            return Ok(spec);
+        }
+
+        let cli_command = self.state.process_manager().config().agent_cli_path.clone();
+        Ok(AgentSpawnSpec {
+            role: "developer".to_string(),
+            cli_command: cli_command.clone(),
+            cli_args: Self::default_scheduler_cli_args(&cli_command),
+            custom_prompt: None,
+            directive: None,
+            poll_interval_secs: 30,
+        })
+    }
+
+    async fn spawn_worker_for_scheduled_task(
+        &self,
+        schedule: &crate::state::CodingAgentSchedule,
+        task_id: TaskId,
+        run_at: DateTime<Utc>,
+    ) -> HandlerResult<AgentId> {
+        let mut spec = self.select_scheduler_spawn_spec().await?;
+        if spec.cli_args.is_empty() {
+            spec.cli_args = Self::default_scheduler_cli_args(&spec.cli_command);
+        }
+        let task_id_str = task_id.as_uuid().to_string();
+        let rendered_prompt = Self::render_schedule_template(
+            &schedule.prompt_template,
+            &schedule.name,
+            &run_at.to_rfc3339(),
+        );
+
+        let scheduler_custom_prompt = format!(
+            "You are a scheduler-dispatched coding worker for schedule '{}'. \
+Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree isolation.",
+            schedule.name
+        );
+        let scheduler_directive = format!(
+            "Execute assigned task_id {} immediately.\n\nSchedule prompt:\n{}\n\nEvidence gates:\n- RED: exact command, failing tests, expected failure reason\n- GREEN: targeted passing tests\n- Final verification: cargo test -p harness-mcp --lib && cargo clippy -p harness-mcp --lib -- -D warnings",
+            task_id_str, rendered_prompt
+        );
+
+        self.spawn_worker_agent(SpawnWorkerParams {
+            role: &spec.role,
+            cli_command: &spec.cli_command,
+            cli_args: &spec.cli_args,
+            custom_prompt: Some(scheduler_custom_prompt.as_str()),
+            directive: Some(scheduler_directive.as_str()),
+            poll_interval_secs: spec.poll_interval_secs.max(10),
+            initial_task_id: Some(task_id_str.as_str()),
+        })
+        .await
+    }
+
+    async fn run_coding_agent_schedules_core(
+        &self,
+        schedule_id: Option<&str>,
+        max_schedules: usize,
+        force_run: bool,
+        dry_run: bool,
+    ) -> HandlerResult<tools::RunCodingAgentSchedulesResponse> {
+        if max_schedules == 0 {
+            return Err(HandlerError::InvalidArgs(
+                "max_schedules must be greater than 0".to_string(),
+            ));
+        }
+
+        let _single_flight = self.state.coding_agent_scheduler_lock().lock().await;
+        self.hydrate_coding_agent_schedules_from_knowledge().await?;
+        self.hydrate_workflow_definitions_from_knowledge().await?;
+        self.hydrate_coding_agent_workflow_runs_from_knowledge()
+            .await?;
+
+        let now = Utc::now();
+        let mut schedules = if let Some(schedule_id) = schedule_id {
+            vec![
+                self.state
+                    .get_coding_agent_schedule(schedule_id)
+                    .await
+                    .ok_or_else(|| {
+                        HandlerError::InvalidArgs(format!("Unknown schedule_id: {schedule_id}"))
+                    })?,
+            ]
+        } else {
+            self.state.list_coding_agent_schedules().await
+        };
+
+        schedules.sort_by(|a, b| a.next_run_at.cmp(&b.next_run_at));
+        if schedule_id.is_none() && schedules.len() > max_schedules {
+            schedules.truncate(max_schedules);
+        }
+
+        let inspected_count = schedules.len();
+        let mut executed_count = 0usize;
+        let mut results = Vec::with_capacity(inspected_count);
+
+        for mut schedule in schedules {
+            let due = schedule.enabled && (force_run || schedule.next_run_at <= now);
+            let mut created_task_ids = Vec::new();
+            let mut workflow_run_id: Option<String> = None;
+            let mut dispatched_assignment_count = 0usize;
+            let mut spawned_agent_id: Option<String> = None;
+
+            if due && !dry_run {
+                let created_id = self
+                    .create_schedule_task(&schedule, now, schedule.created_by)
+                    .await?;
+                let created_ids = vec![created_id];
+                let compatibility_step_runs = vec![crate::state::WorkflowStepRun {
+                    step_id: "scheduled_task".to_string(),
+                    kind: "schedule_task".to_string(),
+                    tool: None,
+                    args: None,
+                    status: "queued".to_string(),
+                    attempt: 0,
+                    max_attempts: 1,
+                    timeout_secs: 300,
+                    backoff_secs: 30,
+                    last_error: None,
+                    red_evidence: None,
+                    green_evidence: None,
+                    final_verification: None,
+                }];
+                let mut workflow_run = crate::state::CodingAgentWorkflowRun {
+                    run_id: uuid::Uuid::new_v4().to_string(),
+                    workflow_id: format!("schedule::{}", schedule.schedule_id),
+                    schedule_id: schedule.schedule_id.clone(),
+                    schedule_name: schedule.name.clone(),
+                    task_id: created_id,
+                    worker_agent_id: None,
+                    created_by: Some(schedule.created_by),
+                    status: "queued".to_string(),
+                    attempt: 1,
+                    max_attempts: 1,
+                    timeout_secs: 300,
+                    backoff_secs: 30,
+                    last_error: None,
+                    evidence_status: "pending".to_string(),
+                    payload: None,
+                    step_runs: compatibility_step_runs,
+                    notes: None,
+                    created_at: now,
+                    updated_at: now,
+                };
+                if schedule.auto_dispatch {
+                    let assignments = self.assign_tasks_to_idle_workers(&created_ids).await?;
+                    dispatched_assignment_count = assignments.len();
+                    if let Some((_task_id, assigned_agent_id)) = assignments.first() {
+                        workflow_run.worker_agent_id = Some(*assigned_agent_id);
+                        workflow_run.notes = Some("assigned_existing_worker".to_string());
+                    } else {
+                        match self
+                            .spawn_worker_for_scheduled_task(&schedule, created_id, now)
+                            .await
+                        {
+                            Ok(agent_id) => {
+                                dispatched_assignment_count = 1;
+                                spawned_agent_id = Some(agent_id.as_uuid().to_string());
+                                workflow_run.worker_agent_id = Some(agent_id);
+                                workflow_run.notes = Some("spawned_worker".to_string());
+                            }
+                            Err(error) => {
+                                workflow_run.status = "blocked".to_string();
+                                workflow_run.last_error = Some(error.to_string());
+                                workflow_run.notes = Some("dispatch_failed".to_string());
+                                tracing::warn!(
+                                    schedule_id = %schedule.schedule_id,
+                                    error = %error,
+                                    "Scheduler failed to spawn worker for due schedule"
+                                );
+                            }
+                        }
+                    }
+                }
+                created_task_ids = created_ids
+                    .iter()
+                    .map(|task_id| task_id.as_uuid().to_string())
+                    .collect();
+
+                schedule.last_run_at = Some(now);
+                schedule.next_run_at = Self::next_schedule_time(now, schedule.cadence_minutes)?;
+                self.state
+                    .upsert_coding_agent_schedule(schedule.clone())
+                    .await;
+                self.persist_coding_agent_schedule(&schedule).await?;
+                workflow_run.updated_at = Utc::now();
+                workflow_run_id = Some(workflow_run.run_id.clone());
+                self.upsert_and_persist_coding_agent_workflow_run(
+                    workflow_run,
+                    Some(schedule.created_by),
+                )
+                .await?;
+                executed_count += 1;
+            }
+
+            let next_run_at = if due && dry_run {
+                Self::next_schedule_time(now, schedule.cadence_minutes)?.to_rfc3339()
+            } else {
+                schedule.next_run_at.to_rfc3339()
+            };
+
+            results.push(tools::CodingAgentScheduleRunResult {
+                schedule_id: schedule.schedule_id.clone(),
+                name: schedule.name.clone(),
+                executed: due && !dry_run,
+                created_task_ids,
+                workflow_run_id,
+                dispatched_assignment_count,
+                spawned_agent_id,
+                next_run_at,
+            });
+        }
+
+        Ok(tools::RunCodingAgentSchedulesResponse {
+            inspected_at: now.to_rfc3339(),
+            inspected_count,
+            executed_count,
+            results,
+        })
+    }
+
+    async fn run_workflow_executor_heartbeat_once(&self) -> HandlerResult<usize> {
+        let latest_runs =
+            Self::latest_workflow_runs_by_id(self.state.list_coding_agent_workflow_runs().await);
+        let mut consumed = 0usize;
+        let mut consumed_per_workflow: HashMap<String, usize> = HashMap::new();
+
+        for mut run in latest_runs {
+            if run.status != "queued" {
+                continue;
+            }
+            let workflow_config = self.state.get_workflow_definition(&run.workflow_id).await;
+            if let Some(workflow) = workflow_config.as_ref()
+                && workflow.status != "active"
+            {
+                continue;
+            }
+            let workflow_key = run.workflow_id.clone();
+            let max_concurrency = workflow_config
+                .as_ref()
+                .map(|workflow| workflow.max_concurrency.max(1))
+                .unwrap_or(1);
+            let fallback_created_by = run
+                .created_by
+                .or_else(|| workflow_config.as_ref().map(|workflow| workflow.created_by));
+            let already_consumed = consumed_per_workflow
+                .get(&workflow_key)
+                .copied()
+                .unwrap_or(0);
+            if already_consumed >= max_concurrency {
+                continue;
+            }
+            consumed_per_workflow.insert(workflow_key, already_consumed + 1);
+
+            consumed += 1;
+            run.status = "running".to_string();
+            run.updated_at = Utc::now();
+            self.upsert_and_persist_coding_agent_workflow_run(run.clone(), fallback_created_by)
+                .await?;
+
+            let mut blocked = false;
+            let mut step_failed = false;
+            let mut pending_retry = false;
+            let continue_on_failure = workflow_config
+                .as_ref()
+                .is_some_and(|workflow| workflow.failure_policy == "continue_on_failure");
+
+            for step_idx in 0..run.step_runs.len() {
+                if run.step_runs[step_idx].status != "queued" {
+                    continue;
+                }
+
+                let step_kind;
+                let step_id;
+                let step_attempt;
+                let step_max_attempts;
+                {
+                    let step = &mut run.step_runs[step_idx];
+                    step.status = "running".to_string();
+                    step.attempt = step.attempt.saturating_add(1);
+                    step_kind = step.kind.clone();
+                    step_id = step.step_id.clone();
+                    step_attempt = step.attempt;
+                    step_max_attempts = step.max_attempts;
+                }
+
+                if step_kind.eq_ignore_ascii_case("hyperv_vm") {
+                    let step = &mut run.step_runs[step_idx];
+                    step.status = "blocked".to_string();
+                    step.last_error = Some(
+                        Self::execute_hyperv_step_seam(&step_id)
+                            .err()
+                            .map(|error| error.to_string())
+                            .unwrap_or_else(|| "Hyper-V seam returned no error".to_string()),
+                    );
+                    run.status = "blocked".to_string();
+                    run.last_error = step.last_error.clone();
+                    run.evidence_status = "blocked".to_string();
+                    blocked = true;
+                    break;
+                }
+
+                if step_attempt > step_max_attempts {
+                    let step = &mut run.step_runs[step_idx];
+                    step.status = "failed".to_string();
+                    step.last_error = Some("step exceeded max_attempts".to_string());
+                    run.status = "failed".to_string();
+                    run.last_error = step.last_error.clone();
+                    run.evidence_status = "failed".to_string();
+                    step_failed = true;
+                    if !continue_on_failure {
+                        break;
+                    }
+                    continue;
+                }
+
+                if step_kind.eq_ignore_ascii_case("run_tool") {
+                    let step_snapshot = run.step_runs[step_idx].clone();
+                    match self
+                        .execute_workflow_run_tool_step(&step_snapshot, fallback_created_by)
+                        .await
+                    {
+                        Ok(_) => {
+                            let step = &mut run.step_runs[step_idx];
+                            step.status = "succeeded".to_string();
+                            step.last_error = None;
+                        }
+                        Err(error) => {
+                            let step = &mut run.step_runs[step_idx];
+                            step.last_error = Some(error.to_string());
+                            if step.attempt >= step.max_attempts {
+                                step.status = "failed".to_string();
+                                run.status = "failed".to_string();
+                                run.last_error = step.last_error.clone();
+                                run.evidence_status = "failed".to_string();
+                                step_failed = true;
+                                if !continue_on_failure {
+                                    break;
+                                }
+                                continue;
+                            }
+
+                            step.status = "queued".to_string();
+                            run.status = "queued".to_string();
+                            run.last_error = step.last_error.clone();
+                            run.evidence_status = "pending_retry".to_string();
+                            pending_retry = true;
+                            break;
+                        }
+                    }
+                    continue;
+                }
+
+                let step = &mut run.step_runs[step_idx];
+                step.status = "succeeded".to_string();
+                step.last_error = None;
+            }
+
+            if !blocked && !step_failed && !pending_retry {
+                run.status = "succeeded".to_string();
+                run.evidence_status = if run
+                    .step_runs
+                    .iter()
+                    .all(|step| step.red_evidence.is_some() && step.green_evidence.is_some())
+                {
+                    "ready_for_final_verification".to_string()
+                } else {
+                    "missing_step_evidence".to_string()
+                };
+            }
+
+            run.updated_at = Utc::now();
+            self.upsert_and_persist_coding_agent_workflow_run(run, fallback_created_by)
+                .await?;
+        }
+
+        Ok(consumed)
+    }
+
+    /// Run one internal scheduler heartbeat tick without MCP caller context.
+    pub(crate) async fn run_coding_agent_scheduler_heartbeat_once(
+        &self,
+    ) -> HandlerResult<tools::RunCodingAgentSchedulesResponse> {
+        let response = self
+            .run_coding_agent_schedules_core(
+                None,
+                CODING_AGENT_HEARTBEAT_MAX_SCHEDULES,
+                false,
+                false,
+            )
+            .await?;
+        let _ = self.run_workflow_executor_heartbeat_once().await?;
+        Ok(response)
+    }
+
+    async fn assign_tasks_to_idle_workers(
+        &self,
+        task_ids: &[TaskId],
+    ) -> HandlerResult<Vec<(TaskId, AgentId)>> {
+        if task_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut workers: Vec<Agent> = self
+            .state
+            .repository()
+            .list_active_agents(self.state.session_id())
+            .await?
+            .into_iter()
+            .filter(|agent| !agent.is_strategoi && agent.current_task.is_none())
+            .collect();
+        workers.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+
+        let assign_count = std::cmp::min(task_ids.len(), workers.len());
+        let mut assignments = Vec::with_capacity(assign_count);
+        for idx in 0..assign_count {
+            self.state
+                .repository()
+                .assign_task(task_ids[idx], workers[idx].id)
+                .await?;
+            assignments.push((task_ids[idx], workers[idx].id));
+        }
+
+        Ok(assignments)
     }
 
     fn default_completion_checks() -> Vec<String> {
@@ -3348,6 +4292,491 @@ impl<R: Repository + 'static> HiveHandler<R> {
         })
     }
 
+    async fn handle_create_workflow(
+        &self,
+        req: tools::CreateWorkflowRequest,
+    ) -> HandlerResult<tools::CreateWorkflowResponse> {
+        let strategoi_id = self.require_strategoi(req._agent_id.as_deref()).await?;
+        self.hydrate_workflow_definitions_from_knowledge().await?;
+        let name = req.name.trim();
+        if name.is_empty() {
+            return Err(HandlerError::InvalidArgs(
+                "name cannot be empty".to_string(),
+            ));
+        }
+        if req.definition.steps.is_empty() {
+            return Err(HandlerError::InvalidArgs(
+                "definition.steps must not be empty".to_string(),
+            ));
+        }
+        let failure_policy = req.definition.failure_policy.to_ascii_lowercase();
+        if !matches!(failure_policy.as_str(), "fail_fast" | "continue_on_failure") {
+            return Err(HandlerError::InvalidArgs(
+                "failure_policy must be 'fail_fast' or 'continue_on_failure'".to_string(),
+            ));
+        }
+
+        let steps = req
+            .definition
+            .steps
+            .into_iter()
+            .map(|step| {
+                let step_id = step.step_id.trim();
+                if step_id.is_empty() {
+                    return Err(HandlerError::InvalidArgs(
+                        "workflow step_id cannot be empty".to_string(),
+                    ));
+                }
+                let kind = if step.kind.trim().is_empty() {
+                    "run_tool".to_string()
+                } else {
+                    step.kind.to_ascii_lowercase()
+                };
+                if kind == "run_tool" && step.tool.as_deref().is_none_or(str::is_empty) {
+                    return Err(HandlerError::InvalidArgs(
+                        "run_tool steps require non-empty tool".to_string(),
+                    ));
+                }
+                Ok(crate::state::WorkflowStepDefinition {
+                    step_id: step_id.to_string(),
+                    kind,
+                    tool: step.tool,
+                    args: step.args,
+                    max_attempts: step.max_attempts.max(1),
+                    timeout_secs: step.timeout_secs,
+                    backoff_secs: step.backoff_secs,
+                    red_evidence: step.red_evidence,
+                    green_evidence: step.green_evidence,
+                    final_verification: step.final_verification,
+                })
+            })
+            .collect::<HandlerResult<Vec<_>>>()?;
+
+        let now = Utc::now();
+        let workflow_id = uuid::Uuid::new_v4().to_string();
+        let workflow = crate::state::WorkflowDefinition {
+            workflow_id: workflow_id.clone(),
+            name: name.to_string(),
+            description: req.description,
+            status: "active".to_string(),
+            steps: steps.clone(),
+            max_concurrency: req.definition.max_concurrency.max(1),
+            failure_policy: failure_policy.clone(),
+            retries: req.definition.retries,
+            timeout_secs: req.definition.timeout_secs,
+            backoff_secs: req.definition.backoff_secs,
+            created_by: strategoi_id,
+            created_at: now,
+            updated_at: now,
+        };
+        self.state
+            .upsert_workflow_definition(workflow.clone())
+            .await;
+        self.persist_workflow_definition(&workflow).await?;
+
+        Ok(tools::CreateWorkflowResponse {
+            workflow_id,
+            name: name.to_string(),
+            status: "active".to_string(),
+            step_count: steps.len(),
+            max_concurrency: req.definition.max_concurrency.max(1),
+            failure_policy,
+        })
+    }
+
+    async fn handle_list_workflows(
+        &self,
+        req: tools::ListWorkflowsRequest,
+    ) -> HandlerResult<tools::ListWorkflowsResponse> {
+        self.require_strategoi(req._agent_id.as_deref()).await?;
+        self.hydrate_workflow_definitions_from_knowledge().await?;
+        let mut workflows = self.state.list_workflow_definitions().await;
+        workflows.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        Ok(tools::ListWorkflowsResponse {
+            workflows: workflows.iter().map(Self::workflow_to_info).collect(),
+        })
+    }
+
+    async fn handle_trigger_workflow(
+        &self,
+        req: tools::TriggerWorkflowRequest,
+    ) -> HandlerResult<tools::TriggerWorkflowResponse> {
+        let strategoi_id = self.require_strategoi(req._agent_id.as_deref()).await?;
+        self.hydrate_workflow_definitions_from_knowledge().await?;
+        let workflow = self
+            .state
+            .get_workflow_definition(&req.workflow_id)
+            .await
+            .ok_or_else(|| {
+                HandlerError::InvalidArgs(format!("Unknown workflow_id: {}", req.workflow_id))
+            })?;
+        if workflow.status != "active" {
+            return Err(HandlerError::InvalidArgs(format!(
+                "workflow {} is not active",
+                req.workflow_id
+            )));
+        }
+
+        let now = Utc::now();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let run = crate::state::CodingAgentWorkflowRun {
+            run_id: run_id.clone(),
+            workflow_id: workflow.workflow_id.clone(),
+            schedule_id: String::new(),
+            schedule_name: workflow.name.clone(),
+            task_id: TaskId::new(),
+            worker_agent_id: None,
+            created_by: Some(strategoi_id),
+            status: "queued".to_string(),
+            attempt: 1,
+            max_attempts: workflow.retries.saturating_add(1).max(1),
+            timeout_secs: workflow.timeout_secs,
+            backoff_secs: workflow.backoff_secs,
+            last_error: None,
+            evidence_status: "pending".to_string(),
+            payload: req.payload,
+            step_runs: Self::step_definitions_to_runs(&workflow.steps),
+            notes: None,
+            created_at: now,
+            updated_at: now,
+        };
+        self.upsert_and_persist_coding_agent_workflow_run(run, Some(strategoi_id))
+            .await?;
+
+        Ok(tools::TriggerWorkflowResponse {
+            workflow_run_id: run_id,
+            workflow_id: workflow.workflow_id,
+            status: "queued".to_string(),
+        })
+    }
+
+    async fn handle_list_workflow_runs(
+        &self,
+        req: tools::ListWorkflowRunsRequest,
+    ) -> HandlerResult<tools::ListWorkflowRunsResponse> {
+        self.require_strategoi(req._agent_id.as_deref()).await?;
+        self.hydrate_coding_agent_workflow_runs_from_knowledge()
+            .await?;
+        let runs =
+            Self::latest_workflow_runs_by_id(self.state.list_coding_agent_workflow_runs().await);
+        let filtered = if let Some(workflow_id) = req.workflow_id.as_deref() {
+            runs.into_iter()
+                .filter(|run| run.workflow_id == workflow_id)
+                .collect::<Vec<_>>()
+        } else {
+            runs
+        };
+        Ok(tools::ListWorkflowRunsResponse {
+            runs: filtered.iter().map(Self::workflow_run_to_info).collect(),
+        })
+    }
+
+    async fn handle_get_workflow_run(
+        &self,
+        req: tools::GetWorkflowRunRequest,
+    ) -> HandlerResult<tools::GetWorkflowRunResponse> {
+        self.require_strategoi(req._agent_id.as_deref()).await?;
+        self.hydrate_coding_agent_workflow_runs_from_knowledge()
+            .await?;
+        let run = self
+            .state
+            .get_coding_agent_workflow_run(&req.workflow_run_id)
+            .await
+            .ok_or_else(|| {
+                HandlerError::InvalidArgs(format!(
+                    "Unknown workflow_run_id: {}",
+                    req.workflow_run_id
+                ))
+            })?;
+        Ok(tools::GetWorkflowRunResponse {
+            run: Self::workflow_run_to_info(&run),
+        })
+    }
+
+    async fn handle_pause_workflow(
+        &self,
+        req: tools::PauseWorkflowRequest,
+    ) -> HandlerResult<tools::PauseWorkflowResponse> {
+        self.require_strategoi(req._agent_id.as_deref()).await?;
+        self.hydrate_workflow_definitions_from_knowledge().await?;
+        let mut workflow = self
+            .state
+            .get_workflow_definition(&req.workflow_id)
+            .await
+            .ok_or_else(|| {
+                HandlerError::InvalidArgs(format!("Unknown workflow_id: {}", req.workflow_id))
+            })?;
+        workflow.status = "paused".to_string();
+        workflow.updated_at = Utc::now();
+        self.state
+            .upsert_workflow_definition(workflow.clone())
+            .await;
+        self.persist_workflow_definition(&workflow).await?;
+        Ok(tools::PauseWorkflowResponse {
+            workflow_id: req.workflow_id,
+            status: "paused".to_string(),
+        })
+    }
+
+    async fn handle_resume_workflow(
+        &self,
+        req: tools::ResumeWorkflowRequest,
+    ) -> HandlerResult<tools::ResumeWorkflowResponse> {
+        self.require_strategoi(req._agent_id.as_deref()).await?;
+        self.hydrate_workflow_definitions_from_knowledge().await?;
+        let mut workflow = self
+            .state
+            .get_workflow_definition(&req.workflow_id)
+            .await
+            .ok_or_else(|| {
+                HandlerError::InvalidArgs(format!("Unknown workflow_id: {}", req.workflow_id))
+            })?;
+        workflow.status = "active".to_string();
+        workflow.updated_at = Utc::now();
+        self.state
+            .upsert_workflow_definition(workflow.clone())
+            .await;
+        self.persist_workflow_definition(&workflow).await?;
+        Ok(tools::ResumeWorkflowResponse {
+            workflow_id: req.workflow_id,
+            status: "active".to_string(),
+        })
+    }
+
+    async fn handle_retry_step(
+        &self,
+        req: tools::RetryStepRequest,
+    ) -> HandlerResult<tools::RetryStepResponse> {
+        let strategoi_id = self.require_strategoi(req._agent_id.as_deref()).await?;
+        self.hydrate_coding_agent_workflow_runs_from_knowledge()
+            .await?;
+        let mut run = self
+            .state
+            .get_coding_agent_workflow_run(&req.workflow_run_id)
+            .await
+            .ok_or_else(|| {
+                HandlerError::InvalidArgs(format!(
+                    "Unknown workflow_run_id: {}",
+                    req.workflow_run_id
+                ))
+            })?;
+        let step = run
+            .step_runs
+            .iter_mut()
+            .find(|step| step.step_id == req.step_id)
+            .ok_or_else(|| {
+                HandlerError::InvalidArgs(format!(
+                    "Unknown step_id {} for workflow_run {}",
+                    req.step_id, req.workflow_run_id
+                ))
+            })?;
+        step.attempt = step.attempt.saturating_add(1);
+        step.last_error = None;
+        step.status = if step.attempt > step.max_attempts {
+            "blocked".to_string()
+        } else {
+            "queued".to_string()
+        };
+        run.status = step.status.clone();
+        run.last_error = None;
+        run.evidence_status = "pending".to_string();
+        run.updated_at = Utc::now();
+        let response_status = step.status.clone();
+        let response_attempt = step.attempt;
+        self.upsert_and_persist_coding_agent_workflow_run(run, Some(strategoi_id))
+            .await?;
+
+        Ok(tools::RetryStepResponse {
+            workflow_run_id: req.workflow_run_id,
+            step_id: req.step_id,
+            status: response_status,
+            attempt: response_attempt,
+        })
+    }
+
+    async fn handle_backfill_workflow(
+        &self,
+        req: tools::BackfillWorkflowRequest,
+    ) -> HandlerResult<tools::BackfillWorkflowResponse> {
+        let strategoi_id = self.require_strategoi(req._agent_id.as_deref()).await?;
+        self.hydrate_workflow_definitions_from_knowledge().await?;
+        let workflow = self
+            .state
+            .get_workflow_definition(&req.workflow_id)
+            .await
+            .ok_or_else(|| {
+                HandlerError::InvalidArgs(format!("Unknown workflow_id: {}", req.workflow_id))
+            })?;
+        let from = DateTime::parse_from_rfc3339(&req.from)
+            .map_err(|e| HandlerError::InvalidArgs(format!("Invalid from timestamp: {e}")))?
+            .with_timezone(&Utc);
+        let to = DateTime::parse_from_rfc3339(&req.to)
+            .map_err(|e| HandlerError::InvalidArgs(format!("Invalid to timestamp: {e}")))?
+            .with_timezone(&Utc);
+        if from > to {
+            return Err(HandlerError::InvalidArgs(
+                "from must be less than or equal to to".to_string(),
+            ));
+        }
+
+        let span_secs = (to - from).num_seconds().max(0) as u64;
+        let slice_secs = chrono::Duration::hours(24).num_seconds() as u64;
+        let queued_count = std::cmp::max(1, span_secs.div_ceil(slice_secs)) as usize;
+        let mut queued_run_ids = Vec::new();
+        if !req.dry_run {
+            for slice_index in 0..queued_count {
+                let run_id = uuid::Uuid::new_v4().to_string();
+                let run = crate::state::CodingAgentWorkflowRun {
+                    run_id: run_id.clone(),
+                    workflow_id: workflow.workflow_id.clone(),
+                    schedule_id: String::new(),
+                    schedule_name: workflow.name.clone(),
+                    task_id: TaskId::new(),
+                    worker_agent_id: None,
+                    created_by: Some(strategoi_id),
+                    status: "queued".to_string(),
+                    attempt: 1,
+                    max_attempts: workflow.retries.saturating_add(1).max(1),
+                    timeout_secs: workflow.timeout_secs,
+                    backoff_secs: workflow.backoff_secs,
+                    last_error: None,
+                    evidence_status: "pending".to_string(),
+                    payload: Some(serde_json::json!({
+                        "backfill": {
+                            "from": from.to_rfc3339(),
+                            "to": to.to_rfc3339(),
+                            "slice_index": slice_index,
+                            "slice_count": queued_count,
+                        }
+                    })),
+                    step_runs: Self::step_definitions_to_runs(&workflow.steps),
+                    notes: Some(format!(
+                        "Backfill queued for range {} to {} (slice {}/{})",
+                        from.to_rfc3339(),
+                        to.to_rfc3339(),
+                        slice_index + 1,
+                        queued_count
+                    )),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                };
+                self.upsert_and_persist_coding_agent_workflow_run(run, Some(strategoi_id))
+                    .await?;
+                queued_run_ids.push(run_id);
+            }
+        }
+
+        Ok(tools::BackfillWorkflowResponse {
+            workflow_id: req.workflow_id,
+            queued_count,
+            queued_run_ids,
+            dry_run: req.dry_run,
+        })
+    }
+
+    async fn handle_schedule_coding_agents(
+        &self,
+        req: tools::ScheduleCodingAgentsRequest,
+    ) -> HandlerResult<tools::ScheduleCodingAgentsResponse> {
+        let strategoi_id = self.require_strategoi(req._agent_id.as_deref()).await?;
+
+        let name = req.name.trim();
+        if name.is_empty() {
+            return Err(HandlerError::InvalidArgs(
+                "name cannot be empty".to_string(),
+            ));
+        }
+        let prompt_template = req.prompt_template.trim();
+        if prompt_template.is_empty() {
+            return Err(HandlerError::InvalidArgs(
+                "prompt_template cannot be empty".to_string(),
+            ));
+        }
+        let task_title_template = req.task_title_template.trim();
+        if task_title_template.is_empty() {
+            return Err(HandlerError::InvalidArgs(
+                "task_title_template cannot be empty".to_string(),
+            ));
+        }
+        if req.cadence_minutes == 0 {
+            return Err(HandlerError::InvalidArgs(
+                "cadence_minutes must be greater than 0".to_string(),
+            ));
+        }
+        let task_priority = req.task_priority.to_ascii_lowercase();
+        let _ = Self::parse_priority(&task_priority)?;
+
+        let now = Utc::now();
+        let start_at = if let Some(start_at_raw) = req.start_at.as_deref() {
+            DateTime::parse_from_rfc3339(start_at_raw)
+                .map_err(|e| HandlerError::InvalidArgs(format!("Invalid start_at: {e}")))?
+                .with_timezone(&Utc)
+        } else {
+            now
+        };
+
+        let schedule_id = uuid::Uuid::new_v4().to_string();
+        let schedule = crate::state::CodingAgentSchedule {
+            schedule_id: schedule_id.clone(),
+            name: name.to_string(),
+            cadence_minutes: req.cadence_minutes,
+            prompt_template: prompt_template.to_string(),
+            task_title_template: task_title_template.to_string(),
+            task_priority: task_priority.clone(),
+            auto_dispatch: req.auto_dispatch,
+            enabled: true,
+            created_by: strategoi_id,
+            created_at: now,
+            last_run_at: None,
+            next_run_at: start_at,
+        };
+        self.persist_coding_agent_schedule(&schedule).await?;
+        self.state.upsert_coding_agent_schedule(schedule).await;
+
+        Ok(tools::ScheduleCodingAgentsResponse {
+            schedule_id,
+            name: name.to_string(),
+            cadence_minutes: req.cadence_minutes,
+            prompt_template: prompt_template.to_string(),
+            task_title_template: task_title_template.to_string(),
+            task_priority,
+            auto_dispatch: req.auto_dispatch,
+            next_run_at: start_at.to_rfc3339(),
+        })
+    }
+
+    async fn handle_list_coding_agent_schedules(
+        &self,
+        req: tools::ListCodingAgentSchedulesRequest,
+    ) -> HandlerResult<tools::ListCodingAgentSchedulesResponse> {
+        self.require_strategoi(req._agent_id.as_deref()).await?;
+        self.hydrate_coding_agent_schedules_from_knowledge().await?;
+
+        let mut schedules = self.state.list_coding_agent_schedules().await;
+        if req.enabled_only {
+            schedules.retain(|schedule| schedule.enabled);
+        }
+        schedules.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+
+        Ok(tools::ListCodingAgentSchedulesResponse {
+            schedules: schedules.iter().map(Self::schedule_to_info).collect(),
+        })
+    }
+
+    async fn handle_run_coding_agent_schedules(
+        &self,
+        req: tools::RunCodingAgentSchedulesRequest,
+    ) -> HandlerResult<tools::RunCodingAgentSchedulesResponse> {
+        self.require_strategoi(req._agent_id.as_deref()).await?;
+        self.run_coding_agent_schedules_core(
+            req.schedule_id.as_deref(),
+            req.max_schedules,
+            req.force_run,
+            req.dry_run,
+        )
+        .await
+    }
+
     async fn handle_disconnect_agent(
         &self,
         req: tools::DisconnectAgentRequest,
@@ -5776,12 +7205,24 @@ mod tests {
         assert!(names.contains(&"task_completion_gate"));
         assert!(names.contains(&"spawn_team_and_handshake"));
         assert!(names.contains(&"spawn_team_from_template"));
+        assert!(names.contains(&"create_workflow"));
+        assert!(names.contains(&"list_workflows"));
+        assert!(names.contains(&"trigger_workflow"));
+        assert!(names.contains(&"list_workflow_runs"));
+        assert!(names.contains(&"get_workflow_run"));
+        assert!(names.contains(&"pause_workflow"));
+        assert!(names.contains(&"resume_workflow"));
+        assert!(names.contains(&"retry_step"));
+        assert!(names.contains(&"backfill_workflow"));
+        assert!(names.contains(&"schedule_coding_agents"));
+        assert!(names.contains(&"list_coding_agent_schedules"));
+        assert!(names.contains(&"run_coding_agent_schedules"));
         assert!(names.contains(&"supervise_team"));
         assert!(names.contains(&"team_runbook_prompt"));
         assert!(names.contains(&"hive_observability_snapshot"));
         assert!(names.contains(&"collect_agent_artifacts"));
         assert!(names.contains(&"refresh_session"));
-        assert_eq!(names.len(), 59);
+        assert_eq!(names.len(), 71);
     }
 
     #[tokio::test]
@@ -6358,10 +7799,12 @@ mod tests {
             .get("missing_checks")
             .and_then(serde_json::Value::as_array)
             .unwrap();
-        assert!(missing_checks
-            .iter()
-            .filter_map(serde_json::Value::as_str)
-            .any(|name| name == "code_review"));
+        assert!(
+            missing_checks
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .any(|name| name == "code_review")
+        );
         assert!(
             resp.get("failed_checks")
                 .and_then(serde_json::Value::as_array)
@@ -6418,6 +7861,1177 @@ mod tests {
         assert!(resp.get("noisy_agents").is_some());
         assert!(resp.get("failed_commands").is_some());
         assert!(resp.get("coordination_latency").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_schedule_coding_agents_and_list_roundtrip() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let schedule = handler
+            .call_tool(
+                "schedule_coding_agents",
+                serde_json::json!({
+                    "name": "weekly-maintenance",
+                    "cadence_minutes": 10080,
+                    "prompt_template": "Run a strict code review over auth and report findings with line-level evidence.",
+                    "task_title_template": "Review sweep [{name}]",
+                    "task_priority": "high",
+                    "auto_dispatch": false
+                }),
+            )
+            .await
+            .unwrap();
+
+        let schedule_id = schedule
+            .get("schedule_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap();
+        assert!(!schedule_id.is_empty());
+
+        let listed = handler
+            .call_tool("list_coding_agent_schedules", serde_json::json!({}))
+            .await
+            .unwrap();
+        let listed = listed
+            .get("schedules")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].get("name").and_then(serde_json::Value::as_str),
+            Some("weekly-maintenance")
+        );
+        assert_eq!(
+            listed[0]
+                .get("prompt_template")
+                .and_then(serde_json::Value::as_str),
+            Some(
+                "Run a strict code review over auth and report findings with line-level evidence."
+            )
+        );
+        assert_eq!(
+            listed[0]
+                .get("task_title_template")
+                .and_then(serde_json::Value::as_str),
+            Some("Review sweep [{name}]")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_coding_agent_schedules_creates_maintenance_tasks() {
+        let (state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let schedule = handler
+            .call_tool(
+                "schedule_coding_agents",
+                serde_json::json!({
+                    "name": "daily-code-health",
+                    "cadence_minutes": 1440,
+                    "prompt_template": "Refactor the largest god-function in billing while preserving behavior with tests.",
+                    "task_title_template": "Refactor pass [{name}]",
+                    "task_priority": "high",
+                    "auto_dispatch": false
+                }),
+            )
+            .await
+            .unwrap();
+        let schedule_id = schedule
+            .get("schedule_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap()
+            .to_string();
+
+        let run = handler
+            .call_tool(
+                "run_coding_agent_schedules",
+                serde_json::json!({
+                    "schedule_id": schedule_id,
+                    "force_run": true
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            run.get("executed_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+        let results = run
+            .get("results")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        let created = results[0]
+            .get("created_task_ids")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        assert_eq!(created.len(), 1);
+
+        let created_task_id = created[0].as_str().unwrap();
+        let created_task_id =
+            TaskId::from_uuid(uuid::Uuid::parse_str(created_task_id).expect("valid task UUID"));
+        let created_task = state
+            .repository()
+            .get_task(created_task_id)
+            .await
+            .expect("created task should exist");
+
+        assert!(
+            created_task
+                .title
+                .contains("Refactor pass [daily-code-health]"),
+            "expected scheduled task title to use template"
+        );
+        assert!(
+            created_task
+                .description
+                .contains("Refactor the largest god-function in billing"),
+            "expected scheduled task description to include prompt template"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_coding_agent_schedule_persists_and_hydrates_on_new_state() {
+        let repo = Arc::new(InMemoryRepository::new());
+        let session = Session::new(8);
+        repo.create_session(&session).await.unwrap();
+        let config = OrchestratorConfig::default();
+
+        let process_manager_a = Arc::new(ProcessManager::new(config.clone(), repo.clone()));
+        let state_a = Arc::new(HiveState::new(
+            session.clone(),
+            repo.clone(),
+            process_manager_a,
+        ));
+        let handler_a = HiveHandler::new(state_a);
+
+        handler_a
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let created = handler_a
+            .call_tool(
+                "schedule_coding_agents",
+                serde_json::json!({
+                    "name": "persisted-review",
+                    "cadence_minutes": 60,
+                    "prompt_template": "Run a focused core review and report concrete risks with file references.",
+                    "task_title_template": "Core review [{name}]",
+                    "task_priority": "high",
+                    "auto_dispatch": false
+                }),
+            )
+            .await
+            .unwrap();
+        let schedule_id = created
+            .get("schedule_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap()
+            .to_string();
+
+        let process_manager_b = Arc::new(ProcessManager::new(config, repo.clone()));
+        let state_b = Arc::new(HiveState::new(
+            session.clone(),
+            repo.clone(),
+            process_manager_b,
+        ));
+        let handler_b = HiveHandler::new(state_b);
+
+        handler_b
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let listed = handler_b
+            .call_tool("list_coding_agent_schedules", serde_json::json!({}))
+            .await
+            .unwrap();
+        let schedules = listed
+            .get("schedules")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+
+        assert_eq!(schedules.len(), 1);
+        assert_eq!(
+            schedules[0]
+                .get("schedule_id")
+                .and_then(serde_json::Value::as_str),
+            Some(schedule_id.as_str())
+        );
+        assert_eq!(
+            schedules[0]
+                .get("prompt_template")
+                .and_then(serde_json::Value::as_str),
+            Some("Run a focused core review and report concrete risks with file references.")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_heartbeat_runs_due_schedule_without_manual_tool_call() {
+        let (state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let schedule = handler
+            .call_tool(
+                "schedule_coding_agents",
+                serde_json::json!({
+                    "name": "heartbeat-coverage",
+                    "cadence_minutes": 1440,
+                    "prompt_template": "Generate one additional regression test for the highest-risk uncovered behavior.",
+                    "task_title_template": "Coverage sweep [{name}]",
+                    "task_priority": "medium",
+                    "auto_dispatch": false,
+                    "start_at": (Utc::now() - chrono::Duration::minutes(5)).to_rfc3339()
+                }),
+            )
+            .await
+            .unwrap();
+        let schedule_id = schedule
+            .get("schedule_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap()
+            .to_string();
+
+        let run = handler
+            .run_coding_agent_scheduler_heartbeat_once()
+            .await
+            .unwrap();
+        assert_eq!(run.executed_count, 1);
+        assert_eq!(run.results.len(), 1);
+        assert_eq!(run.results[0].schedule_id, schedule_id);
+        assert!(run.results[0].executed);
+        assert_eq!(run.results[0].created_task_ids.len(), 1);
+
+        let created_task_id =
+            TaskId::from_uuid(uuid::Uuid::parse_str(&run.results[0].created_task_ids[0]).unwrap());
+        let created_task = state.repository().get_task(created_task_id).await.unwrap();
+        assert!(
+            created_task
+                .description
+                .contains("Generate one additional regression test"),
+            "expected heartbeat run to materialize schedule prompt into task description"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_auto_spawns_worker_when_no_idle_worker_available() {
+        let (state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let (cli_command, cli_args): (&str, Vec<&str>) = if cfg!(windows) {
+            ("cmd.exe", vec!["/c", "echo", "{PROMPT}"])
+        } else {
+            ("sh", vec!["-c", "printf '%s\\n' \"{PROMPT}\""])
+        };
+
+        let bootstrap = handler
+            .call_tool(
+                "spawn_agent",
+                serde_json::json!({
+                    "role": "developer",
+                    "name": "bootstrap-worker",
+                    "cli_command": cli_command,
+                    "cli_args": cli_args,
+                    "custom_prompt": "Bootstrap worker for scheduler spawn profile",
+                    "poll_interval_secs": 30
+                }),
+            )
+            .await
+            .unwrap();
+        let bootstrap_agent_id = bootstrap
+            .get("agent_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap()
+            .to_string();
+
+        let busy_task = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({
+                    "title": "busy bootstrap worker",
+                    "description": "occupy existing worker so scheduler must spawn",
+                    "priority": "high"
+                }),
+            )
+            .await
+            .unwrap();
+        let busy_task_id = busy_task
+            .get("task_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap()
+            .to_string();
+
+        handler
+            .call_tool(
+                "assign_task",
+                serde_json::json!({
+                    "task_id": busy_task_id,
+                    "agent_id": bootstrap_agent_id
+                }),
+            )
+            .await
+            .unwrap();
+
+        // Ensure the bootstrap worker is definitely non-idle for scheduler dispatch filtering.
+        let bootstrap_agent_uuid =
+            uuid::Uuid::parse_str(&bootstrap_agent_id).expect("bootstrap agent id should be UUID");
+        let bootstrap_agent = AgentId::from_uuid(bootstrap_agent_uuid);
+        let busy_task_uuid = uuid::Uuid::parse_str(&busy_task_id).expect("busy task id UUID");
+        let busy_task = TaskId::from_uuid(busy_task_uuid);
+        state
+            .repository()
+            .update_agent_task(bootstrap_agent, Some(busy_task))
+            .await
+            .expect("mark bootstrap worker busy");
+
+        let schedule = handler
+            .call_tool(
+                "schedule_coding_agents",
+                serde_json::json!({
+                    "name": "spawn-on-demand",
+                    "cadence_minutes": 60,
+                    "prompt_template": "Run strict RED/GREEN/REFACTOR loop and produce evidence.",
+                    "task_title_template": "Agentic run [{name}]",
+                    "task_priority": "high",
+                    "auto_dispatch": true
+                }),
+            )
+            .await
+            .unwrap();
+        let schedule_id = schedule
+            .get("schedule_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap()
+            .to_string();
+
+        let run = handler
+            .call_tool(
+                "run_coding_agent_schedules",
+                serde_json::json!({
+                    "schedule_id": schedule_id,
+                    "force_run": true
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            run.get("executed_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+        let results = run
+            .get("results")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0]
+                .get("dispatched_assignment_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(1),
+            "expected scheduler to end with one assigned task (spawn path or idle dispatch)"
+        );
+        let spawned_agent_id = results[0]
+            .get("spawned_agent_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap();
+        assert!(
+            !spawned_agent_id.is_empty(),
+            "expected scheduler to spawn a worker when no idle worker is available"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_run_records_workflow_run_state() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let schedule = handler
+            .call_tool(
+                "schedule_coding_agents",
+                serde_json::json!({
+                    "name": "workflow-run-state",
+                    "cadence_minutes": 60,
+                    "prompt_template": "Perform core review and include explicit findings.",
+                    "task_title_template": "Workflow run [{name}]",
+                    "task_priority": "medium",
+                    "auto_dispatch": false
+                }),
+            )
+            .await
+            .unwrap();
+        let schedule_id = schedule
+            .get("schedule_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap()
+            .to_string();
+
+        handler
+            .call_tool(
+                "run_coding_agent_schedules",
+                serde_json::json!({
+                    "schedule_id": schedule_id,
+                    "force_run": true
+                }),
+            )
+            .await
+            .unwrap();
+
+        let runs = handler.state.list_coding_agent_workflow_runs().await;
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].schedule_id, schedule_id);
+        assert_eq!(runs[0].status, "queued");
+    }
+
+    #[tokio::test]
+    async fn test_schedule_coding_agents_requires_strategoi() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "developer"}))
+            .await
+            .unwrap();
+
+        let err = handler
+            .call_tool(
+                "schedule_coding_agents",
+                serde_json::json!({
+                    "name": "unauthorized",
+                    "cadence_minutes": 60,
+                    "prompt_template": "Run code review and report blockers."
+                }),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("Only strategoi"));
+    }
+
+    #[tokio::test]
+    async fn test_workflow_control_plane_create_tool_available() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        handler
+            .call_tool(
+                "create_workflow",
+                serde_json::json!({
+                    "name": "workflow-red-coverage",
+                    "description": "Exercise workflow control-plane creation path.",
+                    "definition": {
+                        "steps": [
+                            { "step_id": "step-1", "kind": "run_tool", "tool": "list_tasks" }
+                        ]
+                    }
+                }),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_executor_heartbeat_transitions_workflow_run_status() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        handler
+            .call_tool(
+                "schedule_coding_agents",
+                serde_json::json!({
+                    "name": "heartbeat-transition-red",
+                    "cadence_minutes": 60,
+                    "prompt_template": "run heartbeat transition check",
+                    "task_title_template": "Heartbeat transition [{name}]",
+                    "task_priority": "medium",
+                    "auto_dispatch": false
+                }),
+            )
+            .await
+            .unwrap();
+
+        handler
+            .run_coding_agent_scheduler_heartbeat_once()
+            .await
+            .unwrap();
+
+        let runs = HiveHandler::<InMemoryRepository>::latest_workflow_runs_by_id(
+            handler.state.list_coding_agent_workflow_runs().await,
+        );
+        assert_eq!(runs.len(), 1);
+        assert_eq!(
+            runs[0].status, "succeeded",
+            "expected heartbeat executor to consume queued runs and finish single-step schedule compatibility runs"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_schedule_compatibility_exposes_workflow_run_id() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let schedule = handler
+            .call_tool(
+                "schedule_coding_agents",
+                serde_json::json!({
+                    "name": "compatibility-red",
+                    "cadence_minutes": 60,
+                    "prompt_template": "compatibility bridge validation",
+                    "task_title_template": "Compatibility [{name}]",
+                    "task_priority": "medium",
+                    "auto_dispatch": false
+                }),
+            )
+            .await
+            .unwrap();
+        let schedule_id = schedule
+            .get("schedule_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap()
+            .to_string();
+
+        let run = handler
+            .call_tool(
+                "run_coding_agent_schedules",
+                serde_json::json!({
+                    "schedule_id": schedule_id,
+                    "force_run": true
+                }),
+            )
+            .await
+            .unwrap();
+        let results = run
+            .get("results")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        let workflow_run_id = results[0]
+            .get("workflow_run_id")
+            .and_then(serde_json::Value::as_str)
+            .expect("expected schedule compatibility response to include workflow_run_id");
+        assert!(
+            !workflow_run_id.is_empty(),
+            "workflow_run_id should be non-empty when compatibility layer is active"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_workflow_control_plane_roundtrip_pause_resume_retry_and_backfill() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let workflow = handler
+            .call_tool(
+                "create_workflow",
+                serde_json::json!({
+                    "name": "control-plane-roundtrip",
+                    "description": "Validate workflow CRUD+run controls",
+                    "definition": {
+                        "steps": [
+                            { "step_id": "step-alpha", "kind": "run_tool", "tool": "list_tasks" }
+                        ],
+                        "retries": 1,
+                        "timeout_secs": 120,
+                        "backoff_secs": 10
+                    }
+                }),
+            )
+            .await
+            .unwrap();
+        let workflow_id = workflow
+            .get("workflow_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap()
+            .to_string();
+
+        let triggered = handler
+            .call_tool(
+                "trigger_workflow",
+                serde_json::json!({
+                    "workflow_id": workflow_id.clone()
+                }),
+            )
+            .await
+            .unwrap();
+        let workflow_run_id = triggered
+            .get("workflow_run_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap()
+            .to_string();
+
+        let listed = handler
+            .call_tool(
+                "list_workflow_runs",
+                serde_json::json!({
+                    "workflow_id": workflow_id.clone()
+                }),
+            )
+            .await
+            .unwrap();
+        let runs = listed
+            .get("runs")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(
+            runs[0]
+                .get("workflow_run_id")
+                .and_then(serde_json::Value::as_str),
+            Some(workflow_run_id.as_str())
+        );
+
+        let fetched = handler
+            .call_tool(
+                "get_workflow_run",
+                serde_json::json!({
+                    "workflow_run_id": workflow_run_id.clone()
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fetched
+                .get("run")
+                .and_then(|run| run.get("status"))
+                .and_then(serde_json::Value::as_str),
+            Some("queued")
+        );
+
+        let retry = handler
+            .call_tool(
+                "retry_step",
+                serde_json::json!({
+                    "workflow_run_id": workflow_run_id.clone(),
+                    "step_id": "step-alpha"
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            retry.get("status").and_then(serde_json::Value::as_str),
+            Some("queued")
+        );
+
+        let paused = handler
+            .call_tool(
+                "pause_workflow",
+                serde_json::json!({
+                    "workflow_id": workflow_id.clone()
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            paused.get("status").and_then(serde_json::Value::as_str),
+            Some("paused")
+        );
+
+        let resumed = handler
+            .call_tool(
+                "resume_workflow",
+                serde_json::json!({
+                    "workflow_id": workflow_id.clone()
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resumed.get("status").and_then(serde_json::Value::as_str),
+            Some("active")
+        );
+
+        let backfill = handler
+            .call_tool(
+                "backfill_workflow",
+                serde_json::json!({
+                    "workflow_id": workflow_id.clone(),
+                    "from": (Utc::now() - chrono::Duration::hours(2)).to_rfc3339(),
+                    "to": Utc::now().to_rfc3339(),
+                    "dry_run": true
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            backfill
+                .get("queued_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_executor_heartbeat_executes_run_tool_step_and_fails_invalid_tool_args() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let workflow = handler
+            .call_tool(
+                "create_workflow",
+                serde_json::json!({
+                    "name": "executor-step-exec-red",
+                    "definition": {
+                        "steps": [
+                            {
+                                "step_id": "bad-call",
+                                "kind": "run_tool",
+                                "tool": "get_workflow_run",
+                                "args": {}
+                            }
+                        ]
+                    }
+                }),
+            )
+            .await
+            .unwrap();
+        let workflow_id = workflow
+            .get("workflow_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap()
+            .to_string();
+
+        let triggered = handler
+            .call_tool(
+                "trigger_workflow",
+                serde_json::json!({
+                    "workflow_id": workflow_id
+                }),
+            )
+            .await
+            .unwrap();
+        let workflow_run_id = triggered
+            .get("workflow_run_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap()
+            .to_string();
+
+        handler
+            .run_coding_agent_scheduler_heartbeat_once()
+            .await
+            .unwrap();
+
+        let run = handler
+            .call_tool(
+                "get_workflow_run",
+                serde_json::json!({
+                    "workflow_run_id": workflow_run_id
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            run.get("run")
+                .and_then(|value| value.get("status"))
+                .and_then(serde_json::Value::as_str),
+            Some("failed"),
+            "executor should execute run_tool steps and surface invalid args as failed status"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_trigger_workflow_payload_roundtrips_to_run_queries() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let workflow = handler
+            .call_tool(
+                "create_workflow",
+                serde_json::json!({
+                    "name": "trigger-payload-red",
+                    "definition": {
+                        "steps": [
+                            { "step_id": "noop", "kind": "run_tool", "tool": "list_tasks" }
+                        ]
+                    }
+                }),
+            )
+            .await
+            .unwrap();
+        let workflow_id = workflow
+            .get("workflow_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap()
+            .to_string();
+
+        let payload = serde_json::json!({
+            "red_evidence": {
+                "command": "cargo test -p harness-mcp --lib workflow_payload",
+                "expected_failure_reason": "test is red before implementation"
+            }
+        });
+        let triggered = handler
+            .call_tool(
+                "trigger_workflow",
+                serde_json::json!({
+                    "workflow_id": workflow_id,
+                    "payload": payload
+                }),
+            )
+            .await
+            .unwrap();
+        let workflow_run_id = triggered
+            .get("workflow_run_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap()
+            .to_string();
+
+        let run = handler
+            .call_tool(
+                "get_workflow_run",
+                serde_json::json!({
+                    "workflow_run_id": workflow_run_id
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            run.get("run").and_then(|value| value.get("payload")),
+            Some(&serde_json::json!({
+                "red_evidence": {
+                    "command": "cargo test -p harness-mcp --lib workflow_payload",
+                    "expected_failure_reason": "test is red before implementation"
+                }
+            })),
+            "trigger payload should be preserved on workflow runs"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_backfill_workflow_queues_interval_slices_and_dry_run_counts_match() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let workflow = handler
+            .call_tool(
+                "create_workflow",
+                serde_json::json!({
+                    "name": "backfill-slices-red",
+                    "definition": {
+                        "steps": [
+                            { "step_id": "step", "kind": "run_tool", "tool": "list_tasks" }
+                        ]
+                    }
+                }),
+            )
+            .await
+            .unwrap();
+        let workflow_id = workflow
+            .get("workflow_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap()
+            .to_string();
+
+        let from = (Utc::now() - chrono::Duration::hours(50)).to_rfc3339();
+        let to = Utc::now().to_rfc3339();
+
+        let dry_run = handler
+            .call_tool(
+                "backfill_workflow",
+                serde_json::json!({
+                    "workflow_id": workflow_id.clone(),
+                    "from": from,
+                    "to": to,
+                    "dry_run": true
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            dry_run
+                .get("queued_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(3),
+            "dry-run should report all interval slices"
+        );
+        assert_eq!(
+            dry_run
+                .get("queued_run_ids")
+                .and_then(serde_json::Value::as_array)
+                .map(std::vec::Vec::len),
+            Some(0),
+            "dry-run should not create workflow run IDs"
+        );
+
+        let queued = handler
+            .call_tool(
+                "backfill_workflow",
+                serde_json::json!({
+                    "workflow_id": workflow_id,
+                    "from": (Utc::now() - chrono::Duration::hours(50)).to_rfc3339(),
+                    "to": Utc::now().to_rfc3339(),
+                    "dry_run": false
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            queued
+                .get("queued_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(3),
+            "queued_count should match created interval slices"
+        );
+        assert_eq!(
+            queued
+                .get("queued_run_ids")
+                .and_then(serde_json::Value::as_array)
+                .map(std::vec::Vec::len),
+            Some(3),
+            "non-dry-run should return one run ID per queued interval slice"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_workflow_run_hydration_does_not_duplicate_history_snapshots() {
+        let (state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let schedule = handler
+            .call_tool(
+                "schedule_coding_agents",
+                serde_json::json!({
+                    "name": "hydration-dedupe-red",
+                    "cadence_minutes": 60,
+                    "prompt_template": "hydrate workflow dedupe",
+                    "task_title_template": "Hydration dedupe [{name}]",
+                    "task_priority": "medium",
+                    "auto_dispatch": false
+                }),
+            )
+            .await
+            .unwrap();
+        let schedule_id = schedule
+            .get("schedule_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap()
+            .to_string();
+
+        let first_run = handler
+            .call_tool(
+                "run_coding_agent_schedules",
+                serde_json::json!({
+                    "schedule_id": schedule_id.clone(),
+                    "force_run": true
+                }),
+            )
+            .await
+            .unwrap();
+        let first_workflow_run_id = first_run
+            .get("results")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|results| results.first())
+            .and_then(|result| result.get("workflow_run_id"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap()
+            .to_string();
+
+        let count_before = state
+            .list_coding_agent_workflow_runs()
+            .await
+            .into_iter()
+            .filter(|run| run.run_id == first_workflow_run_id)
+            .count();
+
+        handler
+            .call_tool(
+                "run_coding_agent_schedules",
+                serde_json::json!({
+                    "schedule_id": schedule_id.clone(),
+                    "dry_run": true
+                }),
+            )
+            .await
+            .unwrap();
+        handler
+            .call_tool(
+                "run_coding_agent_schedules",
+                serde_json::json!({
+                    "schedule_id": schedule_id,
+                    "dry_run": true
+                }),
+            )
+            .await
+            .unwrap();
+
+        let count_after = state
+            .list_coding_agent_workflow_runs()
+            .await
+            .into_iter()
+            .filter(|run| run.run_id == first_workflow_run_id)
+            .count();
+
+        assert_eq!(
+            count_after, count_before,
+            "rehydration should not append duplicate workflow-run snapshots"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_workflow_definitions_and_runs_persist_and_hydrate_on_new_state() {
+        let repo = Arc::new(InMemoryRepository::new());
+        let session = Session::new(8);
+        repo.create_session(&session).await.unwrap();
+        let config = OrchestratorConfig::default();
+
+        let process_manager_a = Arc::new(ProcessManager::new(config.clone(), repo.clone()));
+        let state_a = Arc::new(HiveState::new(
+            session.clone(),
+            repo.clone(),
+            process_manager_a,
+        ));
+        let handler_a = HiveHandler::new(state_a);
+
+        handler_a
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let workflow = handler_a
+            .call_tool(
+                "create_workflow",
+                serde_json::json!({
+                    "name": "persisted-workflow-red",
+                    "definition": {
+                        "steps": [
+                            { "step_id": "step", "kind": "run_tool", "tool": "list_tasks" }
+                        ]
+                    }
+                }),
+            )
+            .await
+            .unwrap();
+        let workflow_id = workflow
+            .get("workflow_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap()
+            .to_string();
+
+        let triggered = handler_a
+            .call_tool(
+                "trigger_workflow",
+                serde_json::json!({
+                    "workflow_id": workflow_id.clone()
+                }),
+            )
+            .await
+            .unwrap();
+        let workflow_run_id = triggered
+            .get("workflow_run_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap()
+            .to_string();
+
+        handler_a
+            .run_coding_agent_scheduler_heartbeat_once()
+            .await
+            .unwrap();
+
+        let process_manager_b = Arc::new(ProcessManager::new(config, repo.clone()));
+        let state_b = Arc::new(HiveState::new(
+            session.clone(),
+            repo.clone(),
+            process_manager_b,
+        ));
+        let handler_b = HiveHandler::new(state_b);
+
+        handler_b
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let listed_workflows = handler_b
+            .call_tool("list_workflows", serde_json::json!({}))
+            .await
+            .unwrap();
+        let workflows = listed_workflows
+            .get("workflows")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        assert!(
+            workflows.iter().any(|row| {
+                row.get("workflow_id").and_then(serde_json::Value::as_str)
+                    == Some(workflow_id.as_str())
+            }),
+            "workflow definitions should hydrate on new state"
+        );
+
+        let listed_runs = handler_b
+            .call_tool(
+                "list_workflow_runs",
+                serde_json::json!({
+                    "workflow_id": workflow_id
+                }),
+            )
+            .await
+            .unwrap();
+        let runs = listed_runs
+            .get("runs")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        assert!(
+            runs.iter().any(|row| {
+                row.get("workflow_run_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(workflow_run_id.as_str())
+            }),
+            "workflow run snapshots should hydrate on new state"
+        );
     }
 
     #[tokio::test]

@@ -16,8 +16,8 @@ tokio = { version = "1", features = ["full"] }
 rust-mcp-sdk = { version = "0.8", features = ["server", "macros"] }
 rust-mcp-schema = "0.8"
 
-# Persistence (local path)
-aletheiadb = { path = "../gallifreydb", features = ["mcp-server", "embeddings", "embedding-openai", "embedding-ollama", "nova"] }
+# Persistence (GitHub source, not local workspace state)
+aletheiadb = { git = "https://github.com/madmax983/AletheiaDB", branch = "trunk", features = ["mcp-server", "embeddings", "embedding-openai", "embedding-ollama", "nova"] }
 
 # TUI
 ratatui = "0.29"

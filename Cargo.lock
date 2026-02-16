@@ -27,6 +27,7 @@ dependencies = [
 [[package]]
 name = "aletheiadb"
 version = "0.1.0"
+source = "git+https://github.com/madmax983/AletheiaDB?branch=trunk#98c3745500d3a954c6da9f12872911d7a994c3bf"
 dependencies = [
  "arc-swap",
  "async-trait",

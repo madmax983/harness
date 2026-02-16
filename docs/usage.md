@@ -141,7 +141,7 @@ cargo run -- \
 
 ## MCP Server
 
-The MCP server endpoint is `http://localhost:3000/sse` (by default) and exposes 14 tools for agent coordination.
+The MCP server endpoint is `http://localhost:3000/sse` (by default) and exposes a broad coordination surface, including workflow orchestration control-plane tools.
 
 Start either runtime:
 
@@ -166,6 +166,85 @@ Example command/args MCP config (Claude Desktop/other stdio-style clients):
   }
 }
 ```
+
+## Workflow Orchestration (v1)
+
+Harness supports workflow definitions and persisted workflow runs with step-level evidence gates.
+
+### Lifecycle Model
+
+- **Workflow**: definition (`steps`, `max_concurrency`, `failure_policy`, retries/timeout/backoff)
+- **WorkflowRun**: execution record with status `queued|running|succeeded|failed|blocked`
+- **StepRun**: per-step transition state with `attempt`, `last_error`, `red_evidence`, `green_evidence`, `final_verification`
+
+### End-to-End Example
+
+```javascript
+// 1) Define a workflow
+const wf = await create_workflow({
+  name: "harness-lib-ci-gate",
+  description: "RED/GREEN/final verification",
+  definition: {
+    max_concurrency: 1,
+    failure_policy: "fail_fast",
+    retries: 1,
+    timeout_secs: 1800,
+    backoff_secs: 30,
+    steps: [
+      {
+        step_id: "red",
+        kind: "run_tool",
+        tool: "task_completion_gate",
+        max_attempts: 1,
+        timeout_secs: 600,
+        backoff_secs: 10,
+        red_evidence: "exact command + failing tests + expected failure reason"
+      },
+      {
+        step_id: "green",
+        kind: "run_tool",
+        tool: "task_completion_gate",
+        max_attempts: 2,
+        timeout_secs: 900,
+        backoff_secs: 30,
+        green_evidence: "targeted tests pass"
+      },
+      {
+        step_id: "final",
+        kind: "run_tool",
+        tool: "task_completion_gate",
+        final_verification: "cargo test -p harness-mcp --lib && cargo clippy -p harness-mcp --lib -- -D warnings"
+      }
+    ]
+  }
+});
+
+// 2) Queue execution (heartbeat consumes queued runs)
+const queued = await trigger_workflow({ workflow_id: wf.workflow_id });
+
+// 3) Observe persisted transitions
+const runs = await list_workflow_runs({ workflow_id: wf.workflow_id });
+const run = await get_workflow_run({ workflow_run_id: queued.workflow_run_id });
+
+// 4) Operational controls
+await pause_workflow({ workflow_id: wf.workflow_id });
+await resume_workflow({ workflow_id: wf.workflow_id });
+await retry_step({ workflow_run_id: queued.workflow_run_id, step_id: "green" });
+await backfill_workflow({
+  workflow_id: wf.workflow_id,
+  from: "2026-02-01T00:00:00Z",
+  to: "2026-02-16T00:00:00Z",
+  dry_run: true
+});
+```
+
+### Executor Semantics
+
+- Heartbeat consumes queued runs and persists run/step state transitions.
+- `max_concurrency` applies per workflow definition during queued-run consumption.
+- `failure_policy` controls step-failure behavior (`fail_fast` or `continue_on_failure`).
+- Existing coding-agent schedules remain compatible: each schedule run creates a single-step workflow run and returns `workflow_run_id`.
+- `hyperv_vm` is currently a Phase-3 seam and intentionally returns `blocked` until VM execution is implemented.
 
 ## Examples
 

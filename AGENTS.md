@@ -45,13 +45,14 @@ INFO harness_mcp::server: Graceful shutdown complete - session state persisted v
 
 ### Connecting from Claude Code
 
-The harness MCP server provides 25 tools across 6 categories:
-- **Task Management** (7 tools): create, list, claim, update, assign, get context
-- **Knowledge Sharing** (3 tools): share, ask hive, fish (associative retrieval)
-- **Agent Management** (6 tools): register, list, status, spawn, disconnect
-- **Messaging** (3 tools): send DM, get messages, get thread messages
-- **Planning** (6 tools): products, projects, plans (hierarchical planning)
-- **SONA Learning** (4 tools): get trajectory, query patterns, learning status, trigger cycle
+The harness MCP server has a broad tool surface (81 tools in this release) across major categories:
+- **Task Management**: create/list/claim/update/assign/context + completion gates
+- **Knowledge Sharing**: share, ask hive, fish (associative retrieval)
+- **Agent Management & Operations**: register/list/status/spawn/supervise/scheduling/observability
+- **Messaging**: send DM, get messages, get thread messages
+- **Planning**: products, projects, plans (hierarchical planning)
+- **Workflow Orchestration**: definition/run control-plane + step retry/backfill
+- **SONA Learning**: trajectory, reasoning-bank query, loop status, trigger cycle
 
 ## Core Concepts
 
@@ -280,7 +281,117 @@ list_plans({
 })
 ```
 
-## 6. SONA Learning System
+### 6. Workflow Orchestration
+
+Workflow v1 adds explicit control-plane objects:
+- **Workflow (definition)**: reusable step graph + runtime policy
+- **WorkflowRun**: one queued/running/succeeded/failed/blocked execution
+- **StepRun**: per-step transition state with retry/evidence fields
+
+Core statuses:
+- `queued`
+- `running`
+- `succeeded`
+- `failed`
+- `blocked`
+
+Core tools:
+- `create_workflow`
+- `list_workflows`
+- `trigger_workflow`
+- `list_workflow_runs`
+- `get_workflow_run`
+- `pause_workflow`
+- `resume_workflow`
+- `retry_step`
+- `backfill_workflow`
+
+```javascript
+// 1) Create workflow definition (with per-step evidence gates)
+const createResp = await create_workflow({
+  name: "harness-lib-quality-gate",
+  description: "Strict RED/GREEN/final verification for harness-mcp lib changes",
+  definition: {
+    max_concurrency: 1,
+    failure_policy: "fail_fast", // or "continue_on_failure"
+    retries: 1,
+    timeout_secs: 1800,
+    backoff_secs: 30,
+    steps: [
+      {
+        step_id: "red",
+        kind: "run_tool",
+        tool: "task_completion_gate",
+        args: {"required_checks": ["red_evidence"]},
+        max_attempts: 1,
+        timeout_secs: 600,
+        backoff_secs: 10,
+        red_evidence: "Command + failing tests + expected failure reason"
+      },
+      {
+        step_id: "green",
+        kind: "run_tool",
+        tool: "task_completion_gate",
+        args: {"required_checks": ["green_evidence"]},
+        max_attempts: 2,
+        timeout_secs: 900,
+        backoff_secs: 30,
+        green_evidence: "Passing targeted tests"
+      },
+      {
+        step_id: "final_verify",
+        kind: "run_tool",
+        tool: "task_completion_gate",
+        args: {
+          "required_checks": [
+            "cargo test -p harness-mcp --lib",
+            "cargo clippy -p harness-mcp --lib -- -D warnings"
+          ]
+        },
+        final_verification: "cargo test -p harness-mcp --lib && cargo clippy -p harness-mcp --lib -- -D warnings"
+      }
+    ]
+  }
+})
+
+// 2) Trigger run (enters queued; executor heartbeat consumes it)
+const queued = await trigger_workflow({
+  workflow_id: createResp.workflow_id,
+  payload: {"task_id": "optional-task-uuid"}
+})
+
+// 3) Inspect run + step evidence state
+const runs = await list_workflow_runs({workflow_id: createResp.workflow_id})
+const run = await get_workflow_run({workflow_run_id: queued.workflow_run_id})
+
+// 4) Operational controls
+await pause_workflow({workflow_id: createResp.workflow_id})
+await resume_workflow({workflow_id: createResp.workflow_id})
+
+// Retry one blocked/failed step
+await retry_step({
+  workflow_run_id: queued.workflow_run_id,
+  step_id: "green"
+})
+
+// Backfill historical interval (RFC3339 timestamps)
+await backfill_workflow({
+  workflow_id: createResp.workflow_id,
+  from: "2026-02-01T00:00:00Z",
+  to: "2026-02-16T00:00:00Z",
+  dry_run: true
+})
+```
+
+Execution semantics:
+- Scheduler heartbeat now also runs an executor heartbeat that consumes `queued` workflow runs.
+- Workflow and step transitions are persisted append-only; list/get returns the latest transition snapshot.
+- `max_concurrency` is enforced per workflow definition while consuming queued runs.
+- `failure_policy` controls whether a failed step halts immediately (`fail_fast`) or continues (`continue_on_failure`).
+- Existing coding-agent schedules remain a compatibility layer: each schedule execution materializes a single-step workflow run and returns `workflow_run_id` in schedule run results.
+- `hyperv_vm` step kind is a Phase-3 seam and currently transitions to `blocked` with an explicit deferred-implementation error.
+
+## 7. SONA Learning System
 
 SONA (Self-Optimizing Neural Architecture) provides adaptive learning capabilities for the harness hive mind. Agents learn from experience, share knowledge through collective learning, and avoid catastrophic forgetting of previous task knowledge.
 
@@ -716,6 +827,16 @@ Product: "Customer Portal"
 │   │   └── Task: "Write tests"
 ```
 
+### Pattern 4: Workflow Evidence Gates
+
+```
+1. Strategoi defines workflow steps with red_evidence, green_evidence, final_verification
+2. trigger_workflow queues run for heartbeat execution
+3. heartbeat transitions run/step status: queued -> running -> succeeded|failed|blocked
+4. get_workflow_run provides persisted step-level evidence + error state
+5. retry_step re-queues only the blocked/failed step after remediation
+```
+
 ## Best Practices
 
 ### Task Management
@@ -736,6 +857,13 @@ Product: "Customer Portal"
 - **Use direct messages**: For specific agent-to-agent communication
 - **Thread messages**: Always include `task_id` when discussing specific tasks
 - **Spawn strategically**: Don't over-spawn agents, coordinate existing ones
+
+### Workflow Orchestration
+- **Define evidence gates per step**: Populate `red_evidence`, `green_evidence`, and `final_verification`.
+- **Use explicit verification commands**: For harness-mcp library closure, require `cargo test -p harness-mcp --lib` and `cargo clippy -p harness-mcp --lib -- -D warnings`.
+- **Tune retries/timeouts/backoff per step**: Keep workflow-level defaults conservative and override hot spots at step level.
+- **Choose failure policy intentionally**: `fail_fast` for strict pipelines, `continue_on_failure` for forensic collection.
+- **Monitor blocked runs**: Use `list_workflow_runs` + `get_workflow_run` and `retry_step` only after the underlying blocker is addressed.
 
 ### Multi-Client Usage
 - **Pass `_agent_id` explicitly**: When using multiple Claude Code instances

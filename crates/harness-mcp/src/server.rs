@@ -28,6 +28,8 @@ pub struct HiveMcpServer<R: Repository + 'static> {
     state: Arc<HiveState<R>>,
 }
 
+const CODING_AGENT_SCHEDULER_HEARTBEAT_SECS: u64 = 30;
+
 impl<R: Repository + 'static> HiveMcpServer<R> {
     /// Create a new MCP server handler backed by shared hive state.
     pub fn new(state: Arc<HiveState<R>>) -> Self {
@@ -234,6 +236,39 @@ pub async fn start_mcp_server<R: Repository + 'static>(
     // Cleanup zombie agents from previous crashes/sessions
     cleanup_zombie_agents(&state).await;
 
+    let scheduler_state = state.clone();
+    let scheduler_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+            CODING_AGENT_SCHEDULER_HEARTBEAT_SECS,
+        ));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            interval.tick().await;
+            let heartbeat_handler = HiveHandler::new(scheduler_state.clone());
+            match heartbeat_handler
+                .run_coding_agent_scheduler_heartbeat_once()
+                .await
+            {
+                Ok(run) => {
+                    if run.executed_count > 0 {
+                        tracing::info!(
+                            inspected_count = run.inspected_count,
+                            executed_count = run.executed_count,
+                            "Coding-agent scheduler heartbeat executed due schedules"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "Coding-agent scheduler heartbeat iteration failed"
+                    );
+                }
+            }
+        }
+    });
+
     let handler = HiveMcpServer::new(state.clone());
     let server_info = HiveMcpServer::<R>::server_info();
 
@@ -278,7 +313,7 @@ pub async fn start_mcp_server<R: Repository + 'static>(
     // Run server with graceful shutdown
     tracing::info!("MCP server starting, press Ctrl+C to shutdown gracefully");
 
-    tokio::select! {
+    let result = tokio::select! {
         result = server.start() => {
             result
         }
@@ -294,7 +329,12 @@ pub async fn start_mcp_server<R: Repository + 'static>(
             );
             Ok(())
         }
-    }
+    };
+
+    scheduler_task.abort();
+    let _ = scheduler_task.await;
+
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -1068,6 +1108,220 @@ pub fn tool_definitions() -> Vec<Tool> {
                 (
                     "handshake_message".into(),
                     prop("string", "Optional custom body for seeded handshake DMs"),
+                ),
+            ])),
+        ),
+        make_tool(
+            "create_workflow",
+            "Create a workflow definition for orchestration control-plane execution.",
+            vec!["name", "definition"],
+            with_agent_id(HashMap::from([
+                (
+                    "name".into(),
+                    prop("string", "Human-readable workflow name"),
+                ),
+                (
+                    "description".into(),
+                    prop("string", "Optional workflow description"),
+                ),
+                (
+                    "definition".into(),
+                    prop(
+                        "object",
+                        "Workflow definition payload (steps, retries, timeout, backoff, failure policy)",
+                    ),
+                ),
+            ])),
+        ),
+        make_tool(
+            "list_workflows",
+            "List registered workflow definitions.",
+            vec![],
+            with_agent_id(HashMap::new()),
+        ),
+        make_tool(
+            "trigger_workflow",
+            "Queue a workflow run for executor heartbeat consumption.",
+            vec!["workflow_id"],
+            with_agent_id(HashMap::from([
+                (
+                    "workflow_id".into(),
+                    prop("string", "Workflow definition ID to trigger"),
+                ),
+                (
+                    "payload".into(),
+                    prop("object", "Optional run-scoped payload"),
+                ),
+            ])),
+        ),
+        make_tool(
+            "list_workflow_runs",
+            "List workflow runs and their latest persisted transition snapshot.",
+            vec![],
+            with_agent_id(HashMap::from([(
+                "workflow_id".into(),
+                prop("string", "Optional workflow_id filter"),
+            )])),
+        ),
+        make_tool(
+            "get_workflow_run",
+            "Get one workflow run by ID including step evidence state.",
+            vec!["workflow_run_id"],
+            with_agent_id(HashMap::from([(
+                "workflow_run_id".into(),
+                prop("string", "Workflow run ID"),
+            )])),
+        ),
+        make_tool(
+            "pause_workflow",
+            "Pause a workflow definition so new triggers are blocked.",
+            vec!["workflow_id"],
+            with_agent_id(HashMap::from([(
+                "workflow_id".into(),
+                prop("string", "Workflow definition ID"),
+            )])),
+        ),
+        make_tool(
+            "resume_workflow",
+            "Resume a paused workflow definition.",
+            vec!["workflow_id"],
+            with_agent_id(HashMap::from([(
+                "workflow_id".into(),
+                prop("string", "Workflow definition ID"),
+            )])),
+        ),
+        make_tool(
+            "retry_step",
+            "Retry a blocked/failed step in an existing workflow run.",
+            vec!["workflow_run_id", "step_id"],
+            with_agent_id(HashMap::from([
+                ("workflow_run_id".into(), prop("string", "Workflow run ID")),
+                ("step_id".into(), prop("string", "Step ID to retry")),
+            ])),
+        ),
+        make_tool(
+            "backfill_workflow",
+            "Backfill workflow runs across a historical interval.",
+            vec!["workflow_id", "from", "to"],
+            with_agent_id(HashMap::from([
+                (
+                    "workflow_id".into(),
+                    prop("string", "Workflow definition ID"),
+                ),
+                ("from".into(), prop("string", "RFC3339 start timestamp")),
+                ("to".into(), prop("string", "RFC3339 end timestamp")),
+                (
+                    "dry_run".into(),
+                    prop_with_default(
+                        "boolean",
+                        "When true, compute queued runs without creating them",
+                        serde_json::Value::Bool(false),
+                    ),
+                ),
+            ])),
+        ),
+        make_tool(
+            "schedule_coding_agents",
+            "Create a recurring schedule that generates tasks from a reusable prompt template.",
+            vec!["name", "prompt_template"],
+            with_agent_id(HashMap::from([
+                (
+                    "name".into(),
+                    prop("string", "Human-readable schedule name"),
+                ),
+                (
+                    "cadence_minutes".into(),
+                    prop_with_default(
+                        "integer",
+                        "Run cadence in minutes",
+                        serde_json::Value::Number(1440.into()),
+                    ),
+                ),
+                (
+                    "prompt_template".into(),
+                    prop(
+                        "string",
+                        "Reusable prompt template. Supports placeholders: {name}, {run_at}",
+                    ),
+                ),
+                (
+                    "task_title_template".into(),
+                    prop_with_default(
+                        "string",
+                        "Optional task title template. Supports placeholders: {name}, {run_at}",
+                        serde_json::Value::String("Scheduled coding-agent run [{name}]".into()),
+                    ),
+                ),
+                (
+                    "task_priority".into(),
+                    prop_with_default(
+                        "string",
+                        "Generated task priority: low, medium, high, critical",
+                        serde_json::Value::String("medium".into()),
+                    ),
+                ),
+                (
+                    "auto_dispatch".into(),
+                    prop_with_default(
+                        "boolean",
+                        "Auto-assign generated tasks to idle active worker agents after creation",
+                        serde_json::Value::Bool(true),
+                    ),
+                ),
+                (
+                    "start_at".into(),
+                    prop(
+                        "string",
+                        "Optional first-run RFC3339 timestamp; defaults to now",
+                    ),
+                ),
+            ])),
+        ),
+        make_tool(
+            "list_coding_agent_schedules",
+            "List strategoi-defined coding-agent schedules.",
+            vec![],
+            with_agent_id(HashMap::from([(
+                "enabled_only".into(),
+                prop_with_default(
+                    "boolean",
+                    "When true, return only enabled schedules",
+                    serde_json::Value::Bool(false),
+                ),
+            )])),
+        ),
+        make_tool(
+            "run_coding_agent_schedules",
+            "Execute due coding-agent schedules and materialize maintenance tasks.",
+            vec![],
+            with_agent_id(HashMap::from([
+                (
+                    "schedule_id".into(),
+                    prop("string", "Optional schedule ID to run a single schedule"),
+                ),
+                (
+                    "max_schedules".into(),
+                    prop_with_default(
+                        "integer",
+                        "Maximum schedules to inspect in this run",
+                        serde_json::Value::Number(10.into()),
+                    ),
+                ),
+                (
+                    "force_run".into(),
+                    prop_with_default(
+                        "boolean",
+                        "Run selected schedules even when they are not yet due",
+                        serde_json::Value::Bool(false),
+                    ),
+                ),
+                (
+                    "dry_run".into(),
+                    prop_with_default(
+                        "boolean",
+                        "Compute schedule execution outcomes without creating tasks",
+                        serde_json::Value::Bool(false),
+                    ),
                 ),
             ])),
         ),
@@ -1856,7 +2110,61 @@ mod tests {
     #[test]
     fn test_tool_definitions_returns_expected_count() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 69);
+        assert_eq!(tools.len(), 81);
+    }
+
+    #[test]
+    fn test_workflow_control_plane_tools_are_registered() {
+        let tools = tool_definitions();
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
+        let expected = [
+            "create_workflow",
+            "list_workflows",
+            "trigger_workflow",
+            "list_workflow_runs",
+            "get_workflow_run",
+            "pause_workflow",
+            "resume_workflow",
+            "retry_step",
+            "backfill_workflow",
+        ];
+
+        for name in expected {
+            assert!(
+                names.contains(&name),
+                "Missing workflow control-plane tool definition: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_workflow_control_plane_tools_expose_schema_contracts() {
+        let tools = tool_definitions();
+        let expected_contracts = [
+            ("create_workflow", vec!["name", "definition"]),
+            ("list_workflows", vec![]),
+            ("trigger_workflow", vec!["workflow_id"]),
+            ("list_workflow_runs", vec![]),
+            ("get_workflow_run", vec!["workflow_run_id"]),
+            ("pause_workflow", vec!["workflow_id"]),
+            ("resume_workflow", vec!["workflow_id"]),
+            ("retry_step", vec!["workflow_run_id", "step_id"]),
+            ("backfill_workflow", vec!["workflow_id", "from", "to"]),
+        ];
+
+        for (name, required_fields) in expected_contracts {
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("Missing workflow tool schema: {name}"));
+
+            for field in required_fields {
+                assert!(
+                    tool.input_schema.required.contains(&field.to_string()),
+                    "Workflow tool {name} missing required field: {field}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use harness_orchestrator::ProcessManager;
 use harness_persistence::{
     AgentId, PatternStore, ReasoningBank, Repository, Session, SessionId, TaskId,
@@ -10,7 +11,8 @@ use harness_persistence::{
 };
 use harness_sona::{SonaConfig, SonaEngine};
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use serde_json::Value;
+use tokio::sync::{Mutex, RwLock};
 
 /// A single recorded trajectory step (action + context + outcome + reward).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +84,119 @@ pub struct AgentSpawnSpec {
     pub poll_interval_secs: u64,
 }
 
+/// Scheduled coding-agent maintenance workload definition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodingAgentSchedule {
+    pub schedule_id: String,
+    pub name: String,
+    pub cadence_minutes: u64,
+    pub prompt_template: String,
+    pub task_title_template: String,
+    pub task_priority: String,
+    pub auto_dispatch: bool,
+    pub enabled: bool,
+    pub created_by: AgentId,
+    pub created_at: DateTime<Utc>,
+    pub last_run_at: Option<DateTime<Utc>>,
+    pub next_run_at: DateTime<Utc>,
+}
+
+/// One executable step in a workflow definition.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowStepDefinition {
+    pub step_id: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<Value>,
+    pub max_attempts: u32,
+    pub timeout_secs: u64,
+    pub backoff_secs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub red_evidence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub green_evidence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub final_verification: Option<String>,
+}
+
+/// Stored workflow definition for orchestration control plane.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowDefinition {
+    pub workflow_id: String,
+    pub name: String,
+    pub description: String,
+    /// active | paused
+    pub status: String,
+    pub steps: Vec<WorkflowStepDefinition>,
+    pub max_concurrency: usize,
+    /// fail_fast | continue_on_failure
+    pub failure_policy: String,
+    pub retries: u32,
+    pub timeout_secs: u64,
+    pub backoff_secs: u64,
+    pub created_by: AgentId,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Persisted step-run transition record.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowStepRun {
+    pub step_id: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<Value>,
+    /// queued | running | succeeded | failed | blocked
+    pub status: String,
+    pub attempt: u32,
+    pub max_attempts: u32,
+    pub timeout_secs: u64,
+    pub backoff_secs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub red_evidence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub green_evidence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub final_verification: Option<String>,
+}
+
+/// A single scheduler workflow execution record.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodingAgentWorkflowRun {
+    pub run_id: String,
+    pub workflow_id: String,
+    #[serde(default)]
+    pub schedule_id: String,
+    #[serde(default)]
+    pub schedule_name: String,
+    pub task_id: TaskId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_agent_id: Option<AgentId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<AgentId>,
+    /// queued | running | succeeded | failed | blocked
+    pub status: String,
+    pub attempt: u32,
+    pub max_attempts: u32,
+    pub timeout_secs: u64,
+    pub backoff_secs: u64,
+    pub last_error: Option<String>,
+    pub evidence_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload: Option<Value>,
+    pub step_runs: Vec<WorkflowStepRun>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// Counters for SONA learning loop status tracking.
 #[derive(Debug, Default)]
 pub struct LearningCounters {
@@ -111,6 +226,14 @@ pub struct HiveState<R: Repository> {
     micro_lora: Arc<RwLock<HashMap<AgentId, AgentLoraData>>>,
     /// Per-agent spawn metadata for supervision/restart flows.
     agent_spawn_specs: Arc<RwLock<HashMap<AgentId, AgentSpawnSpec>>>,
+    /// Strategoi-managed coding-agent schedules.
+    coding_agent_schedules: Arc<RwLock<HashMap<String, CodingAgentSchedule>>>,
+    /// Workflow control-plane definitions.
+    workflow_definitions: Arc<RwLock<HashMap<String, WorkflowDefinition>>>,
+    /// Single-flight guard for schedule execution to prevent duplicate concurrent runs.
+    coding_agent_scheduler_lock: Arc<Mutex<()>>,
+    /// Scheduler + workflow execution records (append-only per run_id).
+    coding_agent_workflow_runs: Arc<RwLock<HashMap<String, Vec<CodingAgentWorkflowRun>>>>,
     /// SONA: Trajectory recorder for capturing agent action sequences.
     trajectory_recorder: Arc<TrajectoryRecorder<R>>,
     /// SONA: Shared pattern store (persists across ReasoningBank instances).
@@ -152,6 +275,10 @@ impl<R: Repository + 'static> HiveState<R> {
             session_agents: Arc::new(RwLock::new(HashMap::new())),
             micro_lora: Arc::new(RwLock::new(HashMap::new())),
             agent_spawn_specs: Arc::new(RwLock::new(HashMap::new())),
+            coding_agent_schedules: Arc::new(RwLock::new(HashMap::new())),
+            workflow_definitions: Arc::new(RwLock::new(HashMap::new())),
+            coding_agent_scheduler_lock: Arc::new(Mutex::new(())),
+            coding_agent_workflow_runs: Arc::new(RwLock::new(HashMap::new())),
             trajectory_recorder,
             pattern_store,
             learning_counters: Arc::new(LearningCounters::default()),
@@ -216,6 +343,80 @@ impl<R: Repository + 'static> HiveState<R> {
     pub async fn get_agent_spawn_spec(&self, agent_id: AgentId) -> Option<AgentSpawnSpec> {
         let specs = self.agent_spawn_specs.read().await;
         specs.get(&agent_id).cloned()
+    }
+
+    /// Insert or update a coding-agent schedule.
+    pub async fn upsert_coding_agent_schedule(&self, schedule: CodingAgentSchedule) {
+        let mut schedules = self.coding_agent_schedules.write().await;
+        schedules.insert(schedule.schedule_id.clone(), schedule);
+    }
+
+    /// Retrieve one coding-agent schedule by ID.
+    pub async fn get_coding_agent_schedule(
+        &self,
+        schedule_id: &str,
+    ) -> Option<CodingAgentSchedule> {
+        let schedules = self.coding_agent_schedules.read().await;
+        schedules.get(schedule_id).cloned()
+    }
+
+    /// List coding-agent schedules.
+    pub async fn list_coding_agent_schedules(&self) -> Vec<CodingAgentSchedule> {
+        let schedules = self.coding_agent_schedules.read().await;
+        schedules.values().cloned().collect()
+    }
+
+    /// Insert or update a workflow definition.
+    pub async fn upsert_workflow_definition(&self, workflow: WorkflowDefinition) {
+        let mut workflows = self.workflow_definitions.write().await;
+        workflows.insert(workflow.workflow_id.clone(), workflow);
+    }
+
+    /// Retrieve one workflow definition by ID.
+    pub async fn get_workflow_definition(&self, workflow_id: &str) -> Option<WorkflowDefinition> {
+        let workflows = self.workflow_definitions.read().await;
+        workflows.get(workflow_id).cloned()
+    }
+
+    /// List all workflow definitions.
+    pub async fn list_workflow_definitions(&self) -> Vec<WorkflowDefinition> {
+        let workflows = self.workflow_definitions.read().await;
+        workflows.values().cloned().collect()
+    }
+
+    /// Single-flight lock for schedule execution.
+    pub fn coding_agent_scheduler_lock(&self) -> &Arc<Mutex<()>> {
+        &self.coding_agent_scheduler_lock
+    }
+
+    /// Insert or update a scheduler workflow run.
+    pub async fn upsert_coding_agent_workflow_run(&self, run: CodingAgentWorkflowRun) {
+        let mut runs = self.coding_agent_workflow_runs.write().await;
+        let history = runs.entry(run.run_id.clone()).or_default();
+        if history.last().is_some_and(|existing| existing == &run) {
+            return;
+        }
+        history.push(run);
+    }
+
+    /// List scheduler workflow runs.
+    pub async fn list_coding_agent_workflow_runs(&self) -> Vec<CodingAgentWorkflowRun> {
+        let runs = self.coding_agent_workflow_runs.read().await;
+        let mut flattened: Vec<CodingAgentWorkflowRun> = runs
+            .values()
+            .flat_map(|history| history.iter().cloned())
+            .collect();
+        flattened.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        flattened
+    }
+
+    /// Get latest transition snapshot for a workflow run ID.
+    pub async fn get_coding_agent_workflow_run(
+        &self,
+        run_id: &str,
+    ) -> Option<CodingAgentWorkflowRun> {
+        let runs = self.coding_agent_workflow_runs.read().await;
+        runs.get(run_id).and_then(|history| history.last().cloned())
     }
 
     /// Get the SONA trajectory recorder.
@@ -293,6 +494,7 @@ mod tests {
     use aletheiadb::AletheiaDB;
     use harness_orchestrator::OrchestratorConfig;
     use harness_persistence::AletheiaRepository;
+    use serde_json::Value;
 
     #[tokio::test]
     async fn test_hive_state_creation() {
@@ -307,5 +509,141 @@ mod tests {
         let state = HiveState::new(session, repo, process_manager);
         assert_eq!(state.population_cap(), 8);
         assert!(state.embedding_service().is_none());
+    }
+
+    fn sample_workflow_run(status: &str) -> CodingAgentWorkflowRun {
+        let now = Utc::now();
+        CodingAgentWorkflowRun {
+            run_id: "run-red-state-1".to_string(),
+            workflow_id: "workflow-red-state-1".to_string(),
+            schedule_id: "schedule-red-state-1".to_string(),
+            schedule_name: "workflow-state-red".to_string(),
+            task_id: TaskId::new(),
+            worker_agent_id: None,
+            created_by: None,
+            status: status.to_string(),
+            attempt: 1,
+            max_attempts: 3,
+            timeout_secs: 300,
+            backoff_secs: 30,
+            last_error: None,
+            evidence_status: "red_missing".to_string(),
+            payload: None,
+            step_runs: vec![WorkflowStepRun {
+                step_id: "step-red-1".to_string(),
+                kind: "run_tool".to_string(),
+                tool: Some("list_tasks".to_string()),
+                args: None,
+                status: status.to_string(),
+                attempt: 1,
+                max_attempts: 3,
+                timeout_secs: 300,
+                backoff_secs: 30,
+                last_error: None,
+                red_evidence: None,
+                green_evidence: None,
+                final_verification: None,
+            }],
+            notes: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_workflow_run_serialization_includes_evidence_gate_fields() {
+        let run = sample_workflow_run("task_created");
+        let serialized: Value = serde_json::to_value(run).expect("serialize workflow run");
+
+        for expected_field in [
+            "attempt",
+            "max_attempts",
+            "timeout_secs",
+            "backoff_secs",
+            "last_error",
+            "evidence_status",
+            "step_runs",
+        ] {
+            assert!(
+                serialized.get(expected_field).is_some(),
+                "missing expected workflow evidence field: {expected_field}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_workflow_run_status_uses_control_plane_lifecycle_values() {
+        let run = sample_workflow_run("queued");
+        let allowed = ["queued", "running", "succeeded", "failed", "blocked"];
+
+        assert!(
+            allowed.contains(&run.status.as_str()),
+            "workflow run status `{}` must be in control-plane lifecycle set",
+            run.status
+        );
+    }
+
+    #[tokio::test]
+    async fn test_workflow_run_updates_preserve_transition_history() {
+        let db = Arc::new(AletheiaDB::new().unwrap());
+        let repo = Arc::new(AletheiaRepository::new_anon(db));
+        let session = Session::new(8);
+        repo.create_session(&session).await.unwrap();
+
+        let config = OrchestratorConfig::default();
+        let process_manager = Arc::new(ProcessManager::new(config, repo.clone()));
+        let state = HiveState::new(session, repo, process_manager);
+
+        let mut first = sample_workflow_run("task_created");
+        first.run_id = "run-red-state-history".to_string();
+        let mut second = first.clone();
+        second.status = "failed".to_string();
+        second.attempt = 2;
+        second.last_error = Some("retry budget exhausted".to_string());
+
+        state.upsert_coding_agent_workflow_run(first).await;
+        state.upsert_coding_agent_workflow_run(second).await;
+
+        let history_count = state
+            .list_coding_agent_workflow_runs()
+            .await
+            .into_iter()
+            .filter(|run| run.run_id == "run-red-state-history")
+            .count();
+
+        assert_eq!(
+            history_count, 2,
+            "workflow run updates should preserve transition history"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_workflow_run_upsert_ignores_duplicate_snapshot() {
+        let db = Arc::new(AletheiaDB::new().unwrap());
+        let repo = Arc::new(AletheiaRepository::new_anon(db));
+        let session = Session::new(8);
+        repo.create_session(&session).await.unwrap();
+
+        let config = OrchestratorConfig::default();
+        let process_manager = Arc::new(ProcessManager::new(config, repo.clone()));
+        let state = HiveState::new(session, repo, process_manager);
+
+        let mut run = sample_workflow_run("queued");
+        run.run_id = "run-red-state-dedupe".to_string();
+
+        state.upsert_coding_agent_workflow_run(run.clone()).await;
+        state.upsert_coding_agent_workflow_run(run).await;
+
+        let history_count = state
+            .list_coding_agent_workflow_runs()
+            .await
+            .into_iter()
+            .filter(|candidate| candidate.run_id == "run-red-state-dedupe")
+            .count();
+
+        assert_eq!(
+            history_count, 1,
+            "identical workflow run snapshots should not duplicate history entries"
+        );
     }
 }

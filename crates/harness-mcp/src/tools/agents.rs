@@ -1,6 +1,7 @@
 //! Agent tool request/response types.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Request to register an agent.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -316,6 +317,412 @@ pub struct TeamRunbookPromptResponse {
     pub protocol_version: String,
     pub runbook: String,
     pub sections: Vec<String>,
+}
+
+fn default_schedule_cadence_minutes() -> u64 {
+    1440
+}
+
+fn default_schedule_auto_dispatch() -> bool {
+    true
+}
+
+fn default_schedule_task_title_template() -> String {
+    "Scheduled coding-agent run [{name}]".to_string()
+}
+
+fn default_schedule_task_priority() -> String {
+    "medium".to_string()
+}
+
+fn default_schedule_max_schedules() -> usize {
+    10
+}
+
+/// Request to register recurring coding-agent work (coverage, review, refactor).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ScheduleCodingAgentsRequest {
+    pub name: String,
+    #[serde(default = "default_schedule_cadence_minutes")]
+    pub cadence_minutes: u64,
+    /// Reusable task prompt template. Supports placeholders: {name}, {run_at}.
+    pub prompt_template: String,
+    /// Optional task title template. Supports placeholders: {name}, {run_at}.
+    #[serde(default = "default_schedule_task_title_template")]
+    pub task_title_template: String,
+    /// Priority for generated tasks: low, medium, high, critical.
+    #[serde(default = "default_schedule_task_priority")]
+    pub task_priority: String,
+    #[serde(default = "default_schedule_auto_dispatch")]
+    pub auto_dispatch: bool,
+    /// Optional RFC3339 timestamp for first run; defaults to now.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_at: Option<String>,
+    /// Optional agent ID for multi-client support.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
+
+/// Response from schedule_coding_agents.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ScheduleCodingAgentsResponse {
+    pub schedule_id: String,
+    pub name: String,
+    pub cadence_minutes: u64,
+    pub prompt_template: String,
+    pub task_title_template: String,
+    pub task_priority: String,
+    pub auto_dispatch: bool,
+    pub next_run_at: String,
+}
+
+/// Request to list coding-agent schedules.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ListCodingAgentSchedulesRequest {
+    #[serde(default)]
+    pub enabled_only: bool,
+    /// Optional agent ID for multi-client support.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
+
+/// Schedule metadata returned by list_coding_agent_schedules.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CodingAgentScheduleInfo {
+    pub schedule_id: String,
+    pub name: String,
+    pub cadence_minutes: u64,
+    pub prompt_template: String,
+    pub task_title_template: String,
+    pub task_priority: String,
+    pub auto_dispatch: bool,
+    pub enabled: bool,
+    pub created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_run_at: Option<String>,
+    pub next_run_at: String,
+}
+
+/// Response from list_coding_agent_schedules.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ListCodingAgentSchedulesResponse {
+    pub schedules: Vec<CodingAgentScheduleInfo>,
+}
+
+/// Request to execute due coding-agent schedules.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RunCodingAgentSchedulesRequest {
+    /// Optional schedule ID to run a specific schedule.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule_id: Option<String>,
+    #[serde(default = "default_schedule_max_schedules")]
+    pub max_schedules: usize,
+    #[serde(default)]
+    pub force_run: bool,
+    #[serde(default)]
+    pub dry_run: bool,
+    /// Optional agent ID for multi-client support.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
+
+/// Run output for one schedule execution.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CodingAgentScheduleRunResult {
+    pub schedule_id: String,
+    pub name: String,
+    pub executed: bool,
+    pub created_task_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_run_id: Option<String>,
+    pub dispatched_assignment_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spawned_agent_id: Option<String>,
+    pub next_run_at: String,
+}
+
+/// Response from run_coding_agent_schedules.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RunCodingAgentSchedulesResponse {
+    pub inspected_at: String,
+    pub inspected_count: usize,
+    pub executed_count: usize,
+    pub results: Vec<CodingAgentScheduleRunResult>,
+}
+
+fn default_workflow_max_concurrency() -> usize {
+    1
+}
+
+fn default_workflow_failure_policy() -> String {
+    "fail_fast".to_string()
+}
+
+fn default_workflow_step_kind() -> String {
+    "run_tool".to_string()
+}
+
+fn default_workflow_step_max_attempts() -> u32 {
+    1
+}
+
+fn default_workflow_step_timeout_secs() -> u64 {
+    300
+}
+
+fn default_workflow_step_backoff_secs() -> u64 {
+    30
+}
+
+/// One workflow step definition from create_workflow input.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WorkflowStepDefinitionInput {
+    pub step_id: String,
+    #[serde(default = "default_workflow_step_kind")]
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<Value>,
+    #[serde(default = "default_workflow_step_max_attempts")]
+    pub max_attempts: u32,
+    #[serde(default = "default_workflow_step_timeout_secs")]
+    pub timeout_secs: u64,
+    #[serde(default = "default_workflow_step_backoff_secs")]
+    pub backoff_secs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub red_evidence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub green_evidence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub final_verification: Option<String>,
+}
+
+/// Workflow definition payload from create_workflow.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WorkflowDefinitionInput {
+    pub steps: Vec<WorkflowStepDefinitionInput>,
+    #[serde(default = "default_workflow_max_concurrency")]
+    pub max_concurrency: usize,
+    #[serde(default = "default_workflow_failure_policy")]
+    pub failure_policy: String,
+    #[serde(default)]
+    pub retries: u32,
+    #[serde(default)]
+    pub timeout_secs: u64,
+    #[serde(default)]
+    pub backoff_secs: u64,
+}
+
+/// Request to create a workflow definition.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CreateWorkflowRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub definition: WorkflowDefinitionInput,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
+
+/// Response from create_workflow.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CreateWorkflowResponse {
+    pub workflow_id: String,
+    pub name: String,
+    pub status: String,
+    pub step_count: usize,
+    pub max_concurrency: usize,
+    pub failure_policy: String,
+}
+
+/// Request to list workflow definitions.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ListWorkflowsRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
+
+/// One workflow row from list_workflows.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WorkflowInfo {
+    pub workflow_id: String,
+    pub name: String,
+    pub description: String,
+    pub status: String,
+    pub step_count: usize,
+    pub max_concurrency: usize,
+    pub failure_policy: String,
+    pub retries: u32,
+    pub timeout_secs: u64,
+    pub backoff_secs: u64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Response from list_workflows.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ListWorkflowsResponse {
+    pub workflows: Vec<WorkflowInfo>,
+}
+
+/// Request to trigger a workflow run.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TriggerWorkflowRequest {
+    pub workflow_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
+
+/// Response from trigger_workflow.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TriggerWorkflowResponse {
+    pub workflow_run_id: String,
+    pub workflow_id: String,
+    pub status: String,
+}
+
+/// Request to list workflow runs.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ListWorkflowRunsRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
+
+/// One step run in a workflow run response.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StepRunInfo {
+    pub step_id: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<Value>,
+    pub status: String,
+    pub attempt: u32,
+    pub max_attempts: u32,
+    pub timeout_secs: u64,
+    pub backoff_secs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub red_evidence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub green_evidence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub final_verification: Option<String>,
+}
+
+/// One workflow run row from list/get responses.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WorkflowRunInfo {
+    pub workflow_run_id: String,
+    pub workflow_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload: Option<Value>,
+    pub status: String,
+    pub attempt: u32,
+    pub max_attempts: u32,
+    pub timeout_secs: u64,
+    pub backoff_secs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub step_runs: Vec<StepRunInfo>,
+}
+
+/// Response from list_workflow_runs.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ListWorkflowRunsResponse {
+    pub runs: Vec<WorkflowRunInfo>,
+}
+
+/// Request to get one workflow run.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GetWorkflowRunRequest {
+    pub workflow_run_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
+
+/// Response from get_workflow_run.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GetWorkflowRunResponse {
+    pub run: WorkflowRunInfo,
+}
+
+/// Request to pause a workflow definition.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PauseWorkflowRequest {
+    pub workflow_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
+
+/// Response from pause_workflow.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PauseWorkflowResponse {
+    pub workflow_id: String,
+    pub status: String,
+}
+
+/// Request to resume a paused workflow definition.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ResumeWorkflowRequest {
+    pub workflow_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
+
+/// Response from resume_workflow.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ResumeWorkflowResponse {
+    pub workflow_id: String,
+    pub status: String,
+}
+
+/// Request to retry a blocked/failed step.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RetryStepRequest {
+    pub workflow_run_id: String,
+    pub step_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
+
+/// Response from retry_step.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RetryStepResponse {
+    pub workflow_run_id: String,
+    pub step_id: String,
+    pub status: String,
+    pub attempt: u32,
+}
+
+/// Request to backfill workflow runs for a historical interval.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BackfillWorkflowRequest {
+    pub workflow_id: String,
+    pub from: String,
+    pub to: String,
+    #[serde(default)]
+    pub dry_run: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _agent_id: Option<String>,
+}
+
+/// Response from backfill_workflow.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BackfillWorkflowResponse {
+    pub workflow_id: String,
+    pub queued_run_ids: Vec<String>,
+    pub queued_count: usize,
+    pub dry_run: bool,
 }
 
 fn default_observability_window_minutes() -> u64 {

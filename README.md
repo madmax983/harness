@@ -34,7 +34,7 @@ Entity hierarchy:
 - **DirectMessage**: Agent-to-agent communication
 
 ### 3. MCP Server (`harness-mcp`)
-Model Context Protocol server exposing 21 tools for LLM integration:
+Model Context Protocol server exposing a broad tool surface for LLM integration, including workflow orchestration:
 
 **Task Management:**
 - `create_task`, `list_tasks`, `claim_task`, `update_task_status`, `assign_task`, `get_task_context`
@@ -47,6 +47,12 @@ Model Context Protocol server exposing 21 tools for LLM integration:
 
 **Product/Project/Plan:**
 - `create_product`, `list_products`, `create_project`, `list_projects`, `create_plan`, `list_plans`
+
+**Workflow Orchestration:**
+- `create_workflow`, `list_workflows`, `trigger_workflow`
+- `list_workflow_runs`, `get_workflow_run`
+- `pause_workflow`, `resume_workflow`
+- `retry_step`, `backfill_workflow`
 
 **Hive Status:**
 - `get_hive_status`
@@ -156,6 +162,45 @@ Options:
    ask_hive("How do we handle errors?")  # Search shared knowledge
    ```
 
+## Workflow Orchestration Quickstart
+
+```bash
+# 1) Define workflow with evidence gates
+create_workflow({
+  name: "harness-lib-gate",
+  definition: {
+    max_concurrency: 1,
+    failure_policy: "fail_fast",
+    retries: 1,
+    steps: [
+      { step_id: "red", tool: "task_completion_gate", red_evidence: "failing test evidence" },
+      { step_id: "green", tool: "task_completion_gate", green_evidence: "passing targeted test evidence" },
+      { step_id: "final", tool: "task_completion_gate", final_verification: "cargo test -p harness-mcp --lib && cargo clippy -p harness-mcp --lib -- -D warnings" }
+    ]
+  }
+})
+
+# 2) Queue and observe run state
+trigger_workflow({ workflow_id })
+list_workflow_runs({ workflow_id })
+get_workflow_run({ workflow_run_id })
+
+# 3) Operate workflow lifecycle
+pause_workflow({ workflow_id })
+resume_workflow({ workflow_id })
+retry_step({ workflow_run_id, step_id: "green" })
+backfill_workflow({ workflow_id, from: "2026-02-01T00:00:00Z", to: "2026-02-16T00:00:00Z", dry_run: true })
+```
+
+Status model:
+- `queued`, `running`, `succeeded`, `failed`, `blocked`
+
+Executor behavior:
+- Scheduler heartbeat consumes queued workflow runs.
+- Step transitions are persisted and queryable via `list_workflow_runs` / `get_workflow_run`.
+- Existing schedules are a compatibility layer where each schedule run emits a single-step workflow run (`workflow_run_id`).
+- `hyperv_vm` is currently a Phase-3 seam and intentionally blocks until VM execution is implemented.
+
 ## Example: Using Harness to Build Harness
 
 This codebase practices what it preaches! The Product/Project/Plan feature was built using harness itself:
@@ -164,7 +209,7 @@ This codebase practices what it preaches! The Product/Project/Plan feature was b
 - **3 Developer** agents implemented Product, Project, and Plan entities in parallel
 - **Tools Developer** built the MCP API layer
 - All coordinated through task tracking and knowledge sharing
-- **Result:** 109 tests passing, 21 MCP tools, production-ready code
+- **Result:** production-ready code with broad MCP coverage and full multi-agent coordination flows
 
 Meta-level dogfooding achieved! 🐕🍲
 
