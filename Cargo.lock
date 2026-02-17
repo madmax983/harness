@@ -1171,11 +1171,14 @@ name = "harness-tui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "crossterm 0.28.1",
- "harness-persistence",
+ "harness-mcp",
  "ratatui",
+ "rust-mcp-sdk",
  "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "tracing",

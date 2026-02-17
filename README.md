@@ -82,6 +82,23 @@ cargo run --bin harness-mcpd -- --port 3000
 
 MCP endpoint: `http://localhost:3000/sse`
 
+### Running MCP Operator TUI
+
+Connect a local TUI directly to the MCP server to inspect and execute tool calls:
+
+```bash
+# In one terminal: run server
+cargo run --bin harness-mcpd -- --port 3000
+
+# In another terminal: run operator TUI
+cargo run --bin harness-tui -- --server-url http://127.0.0.1:3000/sse
+```
+
+In the TUI:
+- Press `i` to enter tool command mode
+- Run commands as `tool_name {json_args}` (example: `list_tasks {}`)
+- Tool responses (including errors) are captured in the Tool Output panel
+
 ### Claude Desktop Configuration
 
 Add to `claude_desktop_config.json`:

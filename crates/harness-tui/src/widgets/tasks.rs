@@ -1,27 +1,35 @@
 //! Task queue widget showing a table of tasks.
 
-use harness_persistence::{Priority, TaskStatus};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Row, Table};
 
 use crate::AppState;
 
-fn status_icon(status: TaskStatus) -> &'static str {
-    match status {
-        TaskStatus::Pending => "[ ]",
-        TaskStatus::Claimed => "[>]",
-        TaskStatus::InProgress => "[~]",
-        TaskStatus::Completed => "[v]",
-        TaskStatus::Failed => "[x]",
+fn status_icon(status: &str) -> &'static str {
+    if status.eq_ignore_ascii_case("pending") {
+        "[ ]"
+    } else if status.eq_ignore_ascii_case("claimed") {
+        "[>]"
+    } else if status.eq_ignore_ascii_case("in_progress") {
+        "[~]"
+    } else if status.eq_ignore_ascii_case("completed") {
+        "[v]"
+    } else if status.eq_ignore_ascii_case("failed") {
+        "[x]"
+    } else {
+        "[?]"
     }
 }
 
-fn priority_style(priority: Priority) -> Style {
-    match priority {
-        Priority::Critical => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        Priority::High => Style::default().fg(Color::Yellow),
-        Priority::Medium => Style::default().fg(Color::White),
-        Priority::Low => Style::default().fg(Color::DarkGray),
+fn priority_style(priority: &str) -> Style {
+    if priority.eq_ignore_ascii_case("critical") {
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+    } else if priority.eq_ignore_ascii_case("high") {
+        Style::default().fg(Color::Yellow)
+    } else if priority.eq_ignore_ascii_case("medium") {
+        Style::default().fg(Color::White)
+    } else {
+        Style::default().fg(Color::DarkGray)
     }
 }
 
@@ -46,16 +54,13 @@ pub fn render_tasks(area: Rect, buf: &mut Buffer, state: &AppState) {
                 Style::default()
             };
 
-            let assignee = task
-                .assigned_to
-                .map(|a| a.to_string())
-                .unwrap_or_else(|| "-".to_string());
+            let assignee = task.assigned_to.clone().unwrap_or_else(|| "-".to_string());
 
             Row::new(vec![
-                Cell::from(status_icon(task.status)),
+                Cell::from(status_icon(&task.status)),
                 Cell::from(task.title.as_str()),
                 Cell::from(assignee),
-                Cell::from(format!("{:?}", task.priority)).style(priority_style(task.priority)),
+                Cell::from(task.priority.clone()).style(priority_style(&task.priority)),
             ])
             .style(row_style)
         })
@@ -63,8 +68,8 @@ pub fn render_tasks(area: Rect, buf: &mut Buffer, state: &AppState) {
 
     let widths = [
         Constraint::Length(5),
-        Constraint::Min(20),
-        Constraint::Length(14),
+        Constraint::Min(24),
+        Constraint::Length(18),
         Constraint::Length(10),
     ];
 
@@ -74,6 +79,5 @@ pub fn render_tasks(area: Rect, buf: &mut Buffer, state: &AppState) {
         .title_style(Style::default().fg(Color::Green));
 
     let table = Table::new(rows, widths).header(header).block(block);
-
     Widget::render(table, area, buf);
 }

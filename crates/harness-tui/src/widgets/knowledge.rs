@@ -1,26 +1,22 @@
 //! Knowledge stream widget showing recent knowledge entries.
 
-use harness_persistence::KnowledgeKind;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem};
 
 use crate::AppState;
+use crate::parse_knowledge_content;
 
-fn kind_style(kind: KnowledgeKind) -> Style {
-    match kind {
-        KnowledgeKind::Discovery => Style::default().fg(Color::Yellow),
-        KnowledgeKind::Decision => Style::default().fg(Color::Blue),
-        KnowledgeKind::Activity => Style::default().fg(Color::DarkGray),
-        KnowledgeKind::Blocker => Style::default().fg(Color::Red),
-    }
-}
-
-fn kind_label(kind: KnowledgeKind) -> &'static str {
-    match kind {
-        KnowledgeKind::Discovery => "Discovery",
-        KnowledgeKind::Decision => "Decision",
-        KnowledgeKind::Activity => "Activity",
-        KnowledgeKind::Blocker => "Blocker",
+fn kind_style(kind: &str) -> Style {
+    if kind.eq_ignore_ascii_case("discovery") {
+        Style::default().fg(Color::Yellow)
+    } else if kind.eq_ignore_ascii_case("decision") {
+        Style::default().fg(Color::Blue)
+    } else if kind.eq_ignore_ascii_case("activity") {
+        Style::default().fg(Color::DarkGray)
+    } else if kind.eq_ignore_ascii_case("blocker") {
+        Style::default().fg(Color::Red)
+    } else {
+        Style::default().fg(Color::Gray)
     }
 }
 
@@ -29,16 +25,30 @@ pub fn render_knowledge(area: Rect, buf: &mut Buffer, state: &AppState) {
     let items: Vec<ListItem> = state
         .recent_knowledge
         .iter()
-        .skip(state.knowledge_scroll)
-        .map(|k| {
-            let time = k.created_at.format("%H:%M");
+        .enumerate()
+        .map(|(index, entry)| {
+            let parsed = parse_knowledge_content(&entry.content);
+            let time = if entry.created_at.len() >= 16 {
+                entry.created_at[11..16].to_string()
+            } else {
+                entry.created_at.clone()
+            };
+            let row_style = if index == state.selected_knowledge {
+                Style::default().bg(Color::DarkGray)
+            } else {
+                Style::default()
+            };
             let line = Line::from(vec![
                 Span::styled(format!("{time} "), Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("[{}]", kind_label(k.kind)), kind_style(k.kind)),
-                Span::raw(format!(" {}: ", k.author_id)),
-                Span::raw(&k.content),
+                Span::styled(format!("[{}]", entry.kind), kind_style(&entry.kind)),
+                Span::raw(format!(" {}: ", entry.author)),
+                Span::styled(
+                    format!("{} ", parsed.kind),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::raw(parsed.summary),
             ]);
-            ListItem::new(line)
+            ListItem::new(line).style(row_style)
         })
         .collect();
 
@@ -48,6 +58,5 @@ pub fn render_knowledge(area: Rect, buf: &mut Buffer, state: &AppState) {
         .title_style(Style::default().fg(Color::Magenta));
 
     let list = List::new(items).block(block);
-
     Widget::render(list, area, buf);
 }

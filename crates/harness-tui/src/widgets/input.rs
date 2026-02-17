@@ -1,4 +1,4 @@
-//! Input bar widget for talking to the Strategoi.
+//! Input bar widget for tool invocation commands.
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
@@ -16,7 +16,7 @@ pub fn render_input(area: Rect, buf: &mut Buffer, state: &AppState) {
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(" talk to Strategoi", Style::default().fg(Color::DarkGray)),
+                Span::styled(" run tool command", Style::default().fg(Color::DarkGray)),
                 Span::styled(" | ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     "Tab",
@@ -25,6 +25,30 @@ pub fn render_input(area: Rect, buf: &mut Buffer, state: &AppState) {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(" switch view", Style::default().fg(Color::DarkGray)),
+                Span::styled(" | ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    "Up/Down",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" navigate", Style::default().fg(Color::DarkGray)),
+                Span::styled(" | ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    "o",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" focus output", Style::default().fg(Color::DarkGray)),
+                Span::styled(" | ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    "Enter",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" inspect selected", Style::default().fg(Color::DarkGray)),
                 Span::styled(" | ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     "q",
@@ -46,7 +70,7 @@ pub fn render_input(area: Rect, buf: &mut Buffer, state: &AppState) {
 
             let block = Block::default()
                 .borders(Borders::TOP)
-                .title(" Message Strategoi ")
+                .title(" Tool Command (tool_name {json_args}) ")
                 .title_style(Style::default().fg(Color::Green));
 
             Paragraph::new(input_line).block(block).render(area, buf);
