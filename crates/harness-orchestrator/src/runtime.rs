@@ -143,11 +143,7 @@ impl AgentRuntime for CodexRuntime {
 
         Ok(CommandSpec::new(
             cli_path,
-            vec![
-                "exec".to_string(),
-                prompt.to_string(),
-                "--json".to_string(),
-            ],
+            vec!["exec".to_string(), prompt.to_string(), "--json".to_string()],
         ))
     }
 }
