@@ -117,6 +117,9 @@ const CODING_AGENT_WORKFLOW_DEFINITION_KNOWLEDGE_PREFIX: &str =
 const CODING_AGENT_WORKFLOW_RUN_KNOWLEDGE_PREFIX: &str = "__coding_agent_workflow_run_v1__:";
 const CODING_AGENT_SCHEDULE_HYDRATION_LIMIT: usize = 10_000;
 const CODING_AGENT_HEARTBEAT_MAX_SCHEDULES: usize = 100;
+const CODEX_ROLLOUT_MISSING_PATH_SIGNAL: &str = "state db missing rollout path";
+const CODEX_ROLLOUT_LIST_COMPONENT: &str = "codex_core::rollout::list";
+const CODEX_STDIN_WAIT_SIGNAL: &str = "reading prompt from stdin";
 
 impl<R: Repository + 'static> HiveHandler<R> {
     /// Create a new handler.
@@ -2017,6 +2020,51 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
             .map_err(|e| HandlerError::InternalError(format!("Failed to restart process: {}", e)))
     }
 
+    fn has_codex_rollout_resume_failure(stderr: &str) -> bool {
+        let lower = stderr.to_ascii_lowercase();
+        lower.contains(CODEX_ROLLOUT_LIST_COMPONENT)
+            && lower.contains(CODEX_ROLLOUT_MISSING_PATH_SIGNAL)
+    }
+
+    fn has_stdin_wait_signal(stderr: &str) -> bool {
+        stderr
+            .to_ascii_lowercase()
+            .contains(CODEX_STDIN_WAIT_SIGNAL)
+    }
+
+    async fn detect_rollout_resume_failure(&self, agent_id: AgentId) -> Option<String> {
+        let (_, stderr) = self
+            .state
+            .process_manager()
+            .get_output(agent_id)
+            .await
+            .ok()?;
+        if !Self::has_codex_rollout_resume_failure(&stderr) {
+            return None;
+        }
+        if Self::has_stdin_wait_signal(&stderr) {
+            return Some("rollout_state_db_missing_path_waiting_stdin".to_string());
+        }
+        Some("rollout_state_db_missing_path".to_string())
+    }
+
+    async fn replay_task_context_after_watchdog_restart(
+        &self,
+        strategoi_id: AgentId,
+        worker_id: AgentId,
+        task_id: TaskId,
+    ) -> HandlerResult<()> {
+        let task = self.state.repository().get_task(task_id).await?;
+        let content = format!(
+            "Watchdog restarted your worker session after detecting a Codex rollout resume failure (`state db missing rollout path`). Resume this task immediately and post progress evidence in-thread.\nTask: {}\nDescription: {}",
+            task.title, task.description
+        );
+        let mut dm = DirectMessage::new(strategoi_id, worker_id, content, self.state.session_id());
+        dm = dm.with_task(task_id);
+        self.state.repository().create_direct_message(&dm).await?;
+        Ok(())
+    }
+
     fn parse_role(s: &str) -> HandlerResult<AgentRole> {
         match s {
             "strategoi" => Ok(AgentRole::Strategoi),
@@ -2092,11 +2140,51 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
         }
     }
 
+    fn task_status_token(status: TaskStatus) -> &'static str {
+        match status {
+            TaskStatus::Pending => "pending",
+            TaskStatus::Claimed => "claimed",
+            TaskStatus::InProgress => "in_progress",
+            TaskStatus::Completed => "completed",
+            TaskStatus::Failed => "failed",
+        }
+    }
+
+    fn product_status_token(status: ProductStatus) -> &'static str {
+        match status {
+            ProductStatus::Concept => "concept",
+            ProductStatus::Active => "active",
+            ProductStatus::Maintenance => "maintenance",
+            ProductStatus::Archived => "archived",
+        }
+    }
+
+    fn project_status_token(status: ProjectStatus) -> &'static str {
+        match status {
+            ProjectStatus::Planning => "planning",
+            ProjectStatus::Active => "active",
+            ProjectStatus::OnHold => "on_hold",
+            ProjectStatus::Completed => "completed",
+            ProjectStatus::Archived => "archived",
+        }
+    }
+
+    fn plan_status_token(status: PlanStatus) -> &'static str {
+        match status {
+            PlanStatus::Draft => "draft",
+            PlanStatus::Approved => "approved",
+            PlanStatus::InExecution => "in_execution",
+            PlanStatus::Paused => "paused",
+            PlanStatus::Completed => "completed",
+            PlanStatus::Abandoned => "abandoned",
+        }
+    }
+
     fn task_to_info(t: &Task) -> tools::TaskInfo {
         tools::TaskInfo {
             id: t.id.as_uuid().to_string(),
             title: t.title.clone(),
-            status: format!("{:?}", t.status).to_lowercase(),
+            status: Self::task_status_token(t.status).to_string(),
             priority: format!("{:?}", t.priority).to_lowercase(),
             assigned_to: t.assigned_to.map(|a| a.as_uuid().to_string()),
             created_at: t.created_at.to_rfc3339(),
@@ -2146,7 +2234,7 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
             id: p.id.as_uuid().to_string(),
             name: p.name.clone(),
             description: p.description.clone(),
-            status: format!("{:?}", p.status).to_lowercase(),
+            status: Self::product_status_token(p.status).to_string(),
             created_at: p.created_at.to_rfc3339(),
         }
     }
@@ -2156,7 +2244,7 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
             id: p.id.as_uuid().to_string(),
             name: p.name.clone(),
             description: p.description.clone(),
-            status: format!("{:?}", p.status).to_lowercase(),
+            status: Self::project_status_token(p.status).to_string(),
             product_id: p.product_id.as_uuid().to_string(),
             created_at: p.created_at.to_rfc3339(),
         }
@@ -2167,7 +2255,7 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
             id: p.id.as_uuid().to_string(),
             name: p.name.clone(),
             strategy: p.strategy.clone(),
-            status: format!("{:?}", p.status).to_lowercase(),
+            status: Self::plan_status_token(p.status).to_string(),
             project_id: p.project_id.as_uuid().to_string(),
             created_at: p.created_at.to_rfc3339(),
         }
@@ -4876,7 +4964,7 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
         &self,
         req: tools::SuperviseTeamRequest,
     ) -> HandlerResult<tools::SuperviseTeamResponse> {
-        self.require_strategoi(req._agent_id.as_deref()).await?;
+        let strategoi_id = self.require_strategoi(req._agent_id.as_deref()).await?;
 
         let now = Utc::now();
         let stale_after_secs_i64 = std::cmp::min(req.stale_after_secs, i64::MAX as u64) as i64;
@@ -4902,6 +4990,15 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
             }
         }
 
+        let assigned_task_by_agent: HashMap<AgentId, TaskId> = self
+            .state
+            .repository()
+            .list_tasks(self.state.session_id(), None)
+            .await?
+            .into_iter()
+            .filter_map(|task| task.assigned_to.map(|agent_id| (agent_id, task.id)))
+            .collect();
+
         let mut issues = Vec::new();
         let mut escalations = Vec::new();
         let mut restarted_agents = Vec::new();
@@ -4909,6 +5006,14 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
 
         for agent in agents {
             let is_running = self.state.process_manager().is_running(agent.id).await;
+            let rollout_resume_failure = if is_running {
+                self.detect_rollout_resume_failure(agent.id).await
+            } else {
+                None
+            };
+            let assigned_task_id = agent
+                .current_task
+                .or_else(|| assigned_task_by_agent.get(&agent.id).copied());
             let last_seen = last_activity
                 .get(&agent.id)
                 .copied()
@@ -4920,7 +5025,9 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
             };
 
             let mut issue: Option<String> = None;
-            if !is_running
+            if rollout_resume_failure.is_some() {
+                issue = Some("rollout_state_db_missing_path".to_string());
+            } else if !is_running
                 && matches!(
                     agent.status,
                     AgentStatus::Starting | AgentStatus::Active | AgentStatus::Idle
@@ -4929,7 +5036,7 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
                 issue = Some("crashed_or_not_running".to_string());
             } else if matches!(agent.status, AgentStatus::Crashed | AgentStatus::Killed) {
                 issue = Some("crashed_or_killed".to_string());
-            } else if stale && agent.current_task.is_some() {
+            } else if stale && assigned_task_id.is_some() {
                 issue = Some("blocked".to_string());
             } else if stale {
                 issue = Some("stale".to_string());
@@ -4939,21 +5046,67 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
 
             if let Some(issue_kind) = issue {
                 let mut action_taken = None;
-                if req.auto_restart && !is_running {
+                let should_restart = !is_running || rollout_resume_failure.is_some();
+                if req.auto_restart && should_restart {
                     if let Some(spec) = self.state.get_agent_spawn_spec(agent.id).await {
-                        match self.restart_agent_from_spec(agent.id, &spec).await {
-                            Ok(()) => {
-                                let id = agent.id.as_uuid().to_string();
-                                restarted_agents.push(id.clone());
-                                action_taken = Some("restarted_from_spawn_spec".to_string());
+                        if rollout_resume_failure.is_some() && is_running {
+                            match self.state.process_manager().kill(agent.id).await {
+                                Ok(()) => {}
+                                Err(err) => {
+                                    action_taken = Some(format!(
+                                        "watchdog_kill_failed_before_restart: {}",
+                                        err
+                                    ));
+                                }
                             }
-                            Err(err) => {
-                                action_taken = Some(format!("restart_failed: {}", err));
+                        }
+
+                        if action_taken.is_none() {
+                            match self.restart_agent_from_spec(agent.id, &spec).await {
+                                Ok(()) => {
+                                    let id = agent.id.as_uuid().to_string();
+                                    restarted_agents.push(id);
+                                    action_taken = Some(if rollout_resume_failure.is_some() {
+                                        "watchdog_restarted_from_spawn_spec".to_string()
+                                    } else {
+                                        "restarted_from_spawn_spec".to_string()
+                                    });
+
+                                    if rollout_resume_failure.is_some()
+                                        && let Some(task_id) = assigned_task_id
+                                        && let Err(err) = self
+                                            .replay_task_context_after_watchdog_restart(
+                                                strategoi_id,
+                                                agent.id,
+                                                task_id,
+                                            )
+                                            .await
+                                    {
+                                        action_taken = Some(format!(
+                                            "watchdog_restarted_but_task_replay_failed: {}",
+                                            err
+                                        ));
+                                    }
+                                }
+                                Err(err) => {
+                                    action_taken = Some(format!("restart_failed: {}", err));
+                                }
                             }
                         }
                     } else {
-                        action_taken = Some("restart_skipped_no_spawn_spec".to_string());
+                        action_taken = Some(if rollout_resume_failure.is_some() {
+                            "watchdog_restart_skipped_no_spawn_spec".to_string()
+                        } else {
+                            "restart_skipped_no_spawn_spec".to_string()
+                        });
                     }
+                }
+
+                if rollout_resume_failure.is_some()
+                    && action_taken.is_none()
+                    && let Some(signal) = rollout_resume_failure.as_deref()
+                {
+                    action_taken = Some(format!("watchdog_detected: {}", signal));
                 }
 
                 let last_activity_at = last_seen.map(|d| d.to_rfc3339());
@@ -7051,6 +7204,95 @@ mod tests {
         let list_resp: tools::ListTasksResponse = serde_json::from_value(resp).unwrap();
         assert_eq!(list_resp.tasks.len(), 1);
         assert_eq!(list_resp.tasks[0].title, "Implement auth");
+    }
+
+    #[tokio::test]
+    async fn test_list_tasks_reports_in_progress_with_snake_case() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "developer"}))
+            .await
+            .unwrap();
+
+        let create = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({
+                    "title": "Status contract task",
+                    "description": "Verify in_progress token",
+                }),
+            )
+            .await
+            .unwrap();
+        let create: tools::CreateTaskResponse = serde_json::from_value(create).unwrap();
+
+        handler
+            .call_tool(
+                "update_task_status",
+                serde_json::json!({
+                    "task_id": create.task_id,
+                    "status": "in_progress",
+                }),
+            )
+            .await
+            .unwrap();
+
+        let listed = handler
+            .call_tool("list_tasks", serde_json::json!({}))
+            .await
+            .unwrap();
+        let listed: tools::ListTasksResponse = serde_json::from_value(listed).unwrap();
+
+        let task = listed
+            .tasks
+            .iter()
+            .find(|task| task.id == create.task_id)
+            .unwrap();
+        assert_eq!(task.status, "in_progress");
+    }
+
+    #[tokio::test]
+    async fn test_list_projects_and_plans_use_snake_case_status_tokens() {
+        let (state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let product = Product::new("Product", "Product desc", state.session_id());
+        state.repository().create_product(&product).await.unwrap();
+
+        let mut project = Project::new("Project", "Project desc", product.id, state.session_id());
+        project.status = ProjectStatus::OnHold;
+        state.repository().create_project(&project).await.unwrap();
+
+        let mut plan = Plan::new("Plan", "Plan strategy", project.id, state.session_id());
+        plan.status = PlanStatus::InExecution;
+        state.repository().create_plan(&plan).await.unwrap();
+
+        let projects = handler
+            .call_tool("list_projects", serde_json::json!({}))
+            .await
+            .unwrap();
+        let projects: tools::ListProjectsResponse = serde_json::from_value(projects).unwrap();
+        let project_id = project.id.as_uuid().to_string();
+        let project = projects
+            .projects
+            .iter()
+            .find(|item| item.id == project_id)
+            .unwrap();
+        assert_eq!(project.status, "on_hold");
+
+        let plans = handler
+            .call_tool("list_plans", serde_json::json!({}))
+            .await
+            .unwrap();
+        let plans: tools::ListPlansResponse = serde_json::from_value(plans).unwrap();
+        let plan_id = plan.id.as_uuid().to_string();
+        let plan = plans.plans.iter().find(|item| item.id == plan_id).unwrap();
+        assert_eq!(plan.status, "in_execution");
     }
 
     #[tokio::test]
@@ -9154,6 +9396,136 @@ mod tests {
         } else {
             ("sh".to_string(), vec!["-c".to_string(), ":".to_string()])
         }
+    }
+
+    fn test_shell_for_sleep() -> (String, Vec<String>) {
+        if cfg!(windows) {
+            (
+                "cmd.exe".to_string(),
+                vec!["/c".to_string(), "timeout /t 5 > nul".to_string()],
+            )
+        } else {
+            (
+                "sh".to_string(),
+                vec!["-c".to_string(), "sleep 5".to_string()],
+            )
+        }
+    }
+
+    fn test_shell_for_rollout_resume_failure() -> (String, Vec<String>) {
+        if cfg!(windows) {
+            (
+                "cmd.exe".to_string(),
+                vec![
+                    "/c".to_string(),
+                    "echo ERROR codex_core::rollout::list: state db missing rollout path for thread 019c5d28 1>&2 && echo Reading prompt from stdin... 1>&2 && timeout /t 5 > nul".to_string(),
+                ],
+            )
+        } else {
+            (
+                "sh".to_string(),
+                vec![
+                    "-c".to_string(),
+                    "echo 'ERROR codex_core::rollout::list: state db missing rollout path for thread 019c5d28' 1>&2; echo 'Reading prompt from stdin...' 1>&2; sleep 5".to_string(),
+                ],
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn test_supervise_team_watchdog_restarts_rollout_resume_failure_and_replays_task() {
+        let (state, handler) = setup().await;
+
+        let strategoi = handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+        let strategoi: tools::RegisterAgentResponse = serde_json::from_value(strategoi).unwrap();
+
+        let worker = Agent::new(AgentRole::Developer, state.session_id());
+        state.repository().create_agent(&worker).await.unwrap();
+
+        let task = Task::new(
+            "watchdog replay task",
+            "Ensure restarted worker receives task replay context",
+            Priority::High,
+            state.session_id(),
+        );
+        state.repository().create_task(&task).await.unwrap();
+        state
+            .repository()
+            .assign_task(task.id, worker.id)
+            .await
+            .unwrap();
+
+        let (fail_cmd, fail_args) = test_shell_for_rollout_resume_failure();
+        state
+            .process_manager()
+            .spawn_with_cli(
+                worker.id,
+                &fail_cmd,
+                &fail_args,
+                "simulate codex resume failure",
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+
+        let (fresh_cmd, fresh_args) = test_shell_for_sleep();
+        state
+            .set_agent_spawn_spec(
+                worker.id,
+                AgentSpawnSpec {
+                    role: "developer".to_string(),
+                    cli_command: fresh_cmd,
+                    cli_args: fresh_args,
+                    custom_prompt: None,
+                    directive: None,
+                    poll_interval_secs: 30,
+                },
+            )
+            .await;
+
+        let response = handler
+            .call_tool(
+                "supervise_team",
+                serde_json::json!({
+                    "auto_restart": true,
+                    "_agent_id": strategoi.agent_id
+                }),
+            )
+            .await
+            .unwrap();
+        let response: tools::SuperviseTeamResponse = serde_json::from_value(response).unwrap();
+
+        let worker_id = worker.id.as_uuid().to_string();
+        assert!(response.restarted_agents.contains(&worker_id));
+        let issue = response
+            .issues
+            .iter()
+            .find(|entry| entry.agent_id == worker_id)
+            .expect("worker issue must be reported");
+        assert_eq!(issue.issue, "rollout_state_db_missing_path");
+        assert_eq!(
+            issue.action_taken.as_deref(),
+            Some("watchdog_restarted_from_spawn_spec")
+        );
+
+        let thread_messages = state
+            .repository()
+            .get_thread_messages(task.id, 20)
+            .await
+            .unwrap();
+        let replay = thread_messages
+            .iter()
+            .find(|msg| msg.from_agent.as_uuid().to_string() == strategoi.agent_id)
+            .expect("watchdog should replay task context to restarted worker");
+        assert!(
+            replay
+                .content
+                .contains("Watchdog restarted your worker session")
+        );
+        assert!(replay.content.contains("watchdog replay task"));
     }
 
     #[tokio::test]

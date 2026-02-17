@@ -13,6 +13,9 @@ use crate::config::OrchestratorConfig;
 use crate::prompts;
 use crate::runtime::{AgentRuntime, AgentRuntimeKind, build_runtime};
 
+const CODEX_ROLLOUT_MISSING_PATH_SIGNAL: &str = "state db missing rollout path";
+const CODEX_ROLLOUT_LIST_COMPONENT: &str = "codex_core::rollout::list";
+
 /// Process handle with captured output and session tracking.
 struct ProcessHandle {
     child: Child,
@@ -72,9 +75,13 @@ fn prepare_prompt_for_cli_arg(prompt: &str, uses_cmd_wrapper: bool) -> String {
         return prompt.to_string();
     }
 
-    // `cmd.exe` treats raw newlines as command separators, so keep content but
-    // collapse line breaks into a single argument-safe string.
-    prompt.replace("\r\n", "\n").replace(['\n', '\r'], " | ")
+    // `cmd.exe` treats raw newlines and metacharacters as control operators.
+    // Flatten and quote the prompt so wrapper invocations receive one safe arg.
+    let flattened = prompt.replace("\r\n", "\n").replace(['\n', '\r'], " ");
+    let sanitized = flattened
+        .replace('"', "'")
+        .replace(['|', '&', '<', '>', '^'], " ");
+    format!("\"{sanitized}\"")
 }
 
 impl<R: Repository + 'static> ProcessManager<R> {
@@ -252,6 +259,59 @@ impl<R: Repository + 'static> ProcessManager<R> {
         }
     }
 
+    fn resolve_program_args_for_cli(
+        cli_command: &str,
+        mut resolved_args: Vec<String>,
+    ) -> (String, Vec<String>) {
+        if cfg!(windows) && (cli_command.ends_with(".cmd") || cli_command.ends_with(".bat")) {
+            // Windows batch files need cmd.exe wrapper
+            let mut cmd_args = vec!["/c".to_string(), cli_command.to_string()];
+            cmd_args.append(&mut resolved_args);
+            ("cmd.exe".to_string(), cmd_args)
+        } else if cfg!(windows)
+            && !cli_command.contains('\\')
+            && !cli_command.contains('/')
+            && !cli_command.ends_with(".exe")
+        {
+            // Bare command on Windows - might be .cmd in PATH, try cmd.exe wrapper
+            let mut cmd_args = vec!["/c".to_string(), cli_command.to_string()];
+            cmd_args.append(&mut resolved_args);
+            ("cmd.exe".to_string(), cmd_args)
+        } else {
+            // Direct execution (Unix or Windows .exe)
+            (cli_command.to_string(), resolved_args)
+        }
+    }
+
+    async fn spawn_command_process(
+        &self,
+        agent_id: AgentId,
+        program: &str,
+        args: &[String],
+        cli_session_id: Option<String>,
+    ) -> ProcessResult<()> {
+        let child = Command::new(program)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| {
+                ProcessError::SpawnFailed(format!("Failed to spawn '{}': {}", program, e))
+            })?;
+
+        let mut handle = Self::create_process_handle(child);
+        handle.cli_session_id = cli_session_id;
+
+        self.repository
+            .update_agent_status(agent_id, AgentStatus::Starting)
+            .await
+            .map_err(|e| ProcessError::Repository(e.to_string()))?;
+
+        self.processes.write().await.insert(agent_id, handle);
+        Ok(())
+    }
+
     /// Internal: spawn an agent process and track it.
     async fn spawn_process(&self, agent_id: AgentId, prompt: &str) -> ProcessResult<()> {
         let spec = self
@@ -305,55 +365,14 @@ impl<R: Repository + 'static> ProcessManager<R> {
         let prompt_for_arg = prepare_prompt_for_cli_arg(&full_prompt, uses_cmd_wrapper);
 
         // Replace {PROMPT} placeholder in args with actual prompt
-        let mut resolved_args: Vec<String> = cli_args
+        let resolved_args: Vec<String> = cli_args
             .iter()
             .map(|arg| arg.replace("{PROMPT}", &prompt_for_arg))
             .collect();
 
-        // Platform-aware command resolution
-        let (program, args) =
-            if cfg!(windows) && (cli_command.ends_with(".cmd") || cli_command.ends_with(".bat")) {
-                // Windows batch files need cmd.exe wrapper
-                let mut cmd_args = vec!["/c".to_string(), cli_command.to_string()];
-                cmd_args.append(&mut resolved_args);
-                ("cmd.exe".to_string(), cmd_args)
-            } else if cfg!(windows)
-                && !cli_command.contains('\\')
-                && !cli_command.contains('/')
-                && !cli_command.ends_with(".exe")
-            {
-                // Bare command on Windows - might be .cmd in PATH, try cmd.exe wrapper
-                let mut cmd_args = vec!["/c".to_string(), cli_command.to_string()];
-                cmd_args.append(&mut resolved_args);
-                ("cmd.exe".to_string(), cmd_args)
-            } else {
-                // Direct execution (Unix or Windows .exe)
-                (cli_command.to_string(), resolved_args)
-            };
-
-        let child = Command::new(&program)
-            .args(&args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                ProcessError::SpawnFailed(format!("Failed to spawn '{}': {}", program, e))
-            })?;
-
-        // Create process handle with output capture
-        let handle = Self::create_process_handle(child);
-
-        // Update status to Starting
-        self.repository
-            .update_agent_status(agent_id, AgentStatus::Starting)
+        let (program, args) = Self::resolve_program_args_for_cli(cli_command, resolved_args);
+        self.spawn_command_process(agent_id, &program, &args, None)
             .await
-            .map_err(|e| ProcessError::Repository(e.to_string()))?;
-
-        // Store process handle
-        self.processes.write().await.insert(agent_id, handle);
-
-        Ok(())
     }
 
     /// Kill an agent's process.
@@ -474,6 +493,24 @@ impl<R: Repository + 'static> ProcessManager<R> {
         None
     }
 
+    fn has_codex_rollout_resume_failure(stderr: &str) -> bool {
+        let lower = stderr.to_ascii_lowercase();
+        lower.contains(CODEX_ROLLOUT_LIST_COMPONENT)
+            && lower.contains(CODEX_ROLLOUT_MISSING_PATH_SIGNAL)
+    }
+
+    async fn wait_for_codex_resume_failure_signal(&self, agent_id: AgentId) -> bool {
+        for _ in 0..20 {
+            if let Ok((_, stderr)) = self.get_output(agent_id).await
+                && Self::has_codex_rollout_resume_failure(&stderr)
+            {
+                return true;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        }
+        false
+    }
+
     /// Command an agent to continue with a new prompt (strategoi-centric orchestration).
     /// Uses CLI-specific resume functionality (e.g., `codex exec resume <SESSION_ID>`).
     pub async fn command_agent(
@@ -505,8 +542,18 @@ impl<R: Repository + 'static> ProcessManager<R> {
         let uses_cmd_wrapper = requires_windows_cmd_wrapper(cli_command);
         let prompt_for_arg = prepare_prompt_for_cli_arg(&full_prompt, uses_cmd_wrapper);
 
+        let fresh_args: Vec<String> = cli_args
+            .iter()
+            .map(|arg| arg.replace("{PROMPT}", &prompt_for_arg))
+            .collect();
+
+        let is_codex_resume_attempt = matches!(
+            (runtime_kind, session_id.as_ref()),
+            (AgentRuntimeKind::Codex, Some(_))
+        );
+
         // Build resume command with runtime-specific logic
-        let mut resolved_args: Vec<String> = match (runtime_kind, session_id.as_ref()) {
+        let resolved_args: Vec<String> = match (runtime_kind, session_id.as_ref()) {
             // Codex with session: exec resume <SESSION_ID> <PROMPT> [--json and other flags]
             (AgentRuntimeKind::Codex, Some(sid)) => {
                 let mut args = vec![
@@ -535,53 +582,27 @@ impl<R: Repository + 'static> ProcessManager<R> {
                     runtime = ?runtime_kind,
                     "Session resume not implemented for this runtime, spawning fresh"
                 );
-                cli_args
-                    .iter()
-                    .map(|arg| arg.replace("{PROMPT}", &prompt_for_arg))
-                    .collect()
+                fresh_args.clone()
             }
             // No session: use original args with prompt replacement
-            (_, None) => cli_args
-                .iter()
-                .map(|arg| arg.replace("{PROMPT}", &prompt_for_arg))
-                .collect(),
+            (_, None) => fresh_args.clone(),
         };
 
-        // Platform-aware command resolution (same as spawn_process_with_cli)
-        let (program, args) = if uses_cmd_wrapper {
-            let mut cmd_args = vec!["/c".to_string(), cli_command.to_string()];
-            cmd_args.append(&mut resolved_args);
-            ("cmd.exe".to_string(), cmd_args)
-        } else {
-            (cli_command.to_string(), resolved_args)
-        };
+        let (program, args) = Self::resolve_program_args_for_cli(cli_command, resolved_args);
+        self.spawn_command_process(agent_id, &program, &args, session_id.clone())
+            .await?;
 
-        // Spawn new process
-        let child = Command::new(&program)
-            .args(&args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                ProcessError::SpawnFailed(format!("Failed to command '{}': {}", program, e))
-            })?;
-
-        let mut handle = Self::create_process_handle(child);
-
-        // Preserve session ID if we had one
-        if let Some(sid) = session_id {
-            handle.cli_session_id = Some(sid);
+        if is_codex_resume_attempt && self.wait_for_codex_resume_failure_signal(agent_id).await {
+            tracing::warn!(
+                agent_id = %agent_id,
+                "Codex resume failed with rollout path error; respawning fresh command"
+            );
+            let _ = self.kill(agent_id).await;
+            let (fresh_program, fallback_args) =
+                Self::resolve_program_args_for_cli(cli_command, fresh_args);
+            self.spawn_command_process(agent_id, &fresh_program, &fallback_args, None)
+                .await?;
         }
-
-        // Update status to Starting
-        self.repository
-            .update_agent_status(agent_id, AgentStatus::Starting)
-            .await
-            .map_err(|e| ProcessError::Repository(e.to_string()))?;
-
-        // Store new process handle
-        self.processes.write().await.insert(agent_id, handle);
 
         Ok(())
     }
@@ -605,13 +626,80 @@ impl<R: Repository + 'static> ProcessManager<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
     use harness_persistence::{InMemoryRepository, Session};
+    use uuid::Uuid;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     fn test_cli_path() -> String {
         if cfg!(windows) {
             std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string())
         } else {
             "sh".to_string()
+        }
+    }
+
+    fn spawn_sleeping_child() -> Child {
+        if cfg!(windows) {
+            Command::new(test_cli_path())
+                .arg("/c")
+                .arg("timeout /t 5 > nul")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap()
+        } else {
+            Command::new(test_cli_path())
+                .arg("-c")
+                .arg("sleep 5")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap()
+        }
+    }
+
+    fn write_fake_codex_cli_script() -> (String, PathBuf, PathBuf) {
+        let unique = Uuid::new_v4();
+        let temp_dir = std::env::temp_dir();
+        let log_path = temp_dir.join(format!("fake-codex-log-{unique}.txt"));
+
+        if cfg!(windows) {
+            let script_path = temp_dir.join(format!("fake-codex-{unique}.cmd"));
+            let script = format!(
+                "@echo off\r\nif \"%1\"==\"exec\" if \"%2\"==\"resume\" (\r\n>>\"{log}\" echo resume\r\necho ERROR codex_core::rollout::list: state db missing rollout path for thread stale 1>&2\r\necho Reading prompt from stdin... 1>&2\r\ntimeout /t 1 > nul\r\nexit /b 0\r\n)\r\n>>\"{log}\" echo fresh\r\necho FRESH_OK\r\ntimeout /t 2 > nul\r\n",
+                log = log_path.display()
+            );
+            fs::write(&script_path, script).unwrap();
+            (
+                script_path.to_string_lossy().to_string(),
+                script_path,
+                log_path,
+            )
+        } else {
+            let script_path = temp_dir.join(format!("fake-codex-{unique}.sh"));
+            let script = format!(
+                "#!/bin/sh\nif [ \"$1\" = \"exec\" ] && [ \"$2\" = \"resume\" ]; then\n  echo resume >> \"{log}\"\n  echo \"ERROR codex_core::rollout::list: state db missing rollout path for thread stale\" 1>&2\n  echo \"Reading prompt from stdin...\" 1>&2\n  sleep 1\n  exit 0\nfi\necho fresh >> \"{log}\"\necho \"FRESH_OK\"\nsleep 2\n",
+                log = log_path.display()
+            );
+            fs::write(&script_path, script).unwrap();
+            #[cfg(unix)]
+            {
+                let mut perms = fs::metadata(&script_path).unwrap().permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&script_path, perms).unwrap();
+            }
+            (
+                script_path.to_string_lossy().to_string(),
+                script_path,
+                log_path,
+            )
         }
     }
 
@@ -855,6 +943,63 @@ mod tests {
             .extract_session_id(agent.id, AgentRuntimeKind::Codex)
             .await;
         assert_eq!(session_id, Some("abc-123-def".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_command_agent_falls_back_to_fresh_when_codex_resume_fails() {
+        let repo = Arc::new(InMemoryRepository::new());
+        let config = OrchestratorConfig {
+            population_cap: 8,
+            agent_cli_path: test_cli_path(),
+            ..Default::default()
+        };
+
+        let manager = ProcessManager::new(config, repo.clone());
+        let session = Session::new(8);
+        repo.create_session(&session).await.unwrap();
+
+        let agent = Agent::new(AgentRole::Developer, session.id);
+        repo.create_agent(&agent).await.unwrap();
+
+        // Preload a stale session ID so command_agent attempts codex resume first.
+        let stale_child = spawn_sleeping_child();
+        let mut stale_handle =
+            ProcessManager::<InMemoryRepository>::create_process_handle(stale_child);
+        stale_handle.cli_session_id = Some("stale-session-id".to_string());
+        manager
+            .processes
+            .write()
+            .await
+            .insert(agent.id, stale_handle);
+
+        let (fake_codex_cli, script_path, log_path) = write_fake_codex_cli_script();
+        let cli_args = vec!["fresh".to_string(), "{PROMPT}".to_string()];
+
+        manager
+            .command_agent(agent.id, &fake_codex_cli, &cli_args, "Continue the task")
+            .await
+            .unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+        let (stdout, stderr) = manager.get_output(agent.id).await.unwrap();
+        let log = fs::read_to_string(&log_path).unwrap_or_default();
+        assert!(
+            stdout.contains("FRESH_OK"),
+            "expected fresh fallback output; stdout={stdout:?} stderr={stderr:?} log={log:?}"
+        );
+
+        assert!(
+            log.contains("resume"),
+            "expected resume attempt in log: {log:?}"
+        );
+        assert!(
+            log.contains("fresh"),
+            "expected fresh fallback in log: {log:?}"
+        );
+
+        let _ = fs::remove_file(script_path);
+        let _ = fs::remove_file(log_path);
+        let _ = manager.kill(agent.id).await;
     }
 
     #[tokio::test]

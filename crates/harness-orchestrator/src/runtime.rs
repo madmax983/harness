@@ -13,7 +13,7 @@ use crate::config::{McpServerConfig, McpTransport};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentRuntimeKind {
-    /// Anthropic Claude CLI-compatible invocation (`-p` + `--mcp-config`).
+    /// Anthropic Claude CLI-compatible invocation (`-p` + JSON output/tool flags).
     #[default]
     Claude,
     /// OpenAI Codex CLI invocation (`exec`).
@@ -144,10 +144,9 @@ impl AgentRuntime for CodexRuntime {
         Ok(CommandSpec::new(
             cli_path,
             vec![
-                "e".to_string(),
+                "exec".to_string(),
                 prompt.to_string(),
                 "--json".to_string(),
-                "--yolo".to_string(),
             ],
         ))
     }
@@ -207,7 +206,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_runtime_includes_inline_mcp_config() {
+    fn claude_runtime_uses_prompt_json_and_allowed_tools_flags() {
         let runtime = build_runtime(AgentRuntimeKind::Claude);
         let spec = runtime
             .build_command(
@@ -218,10 +217,17 @@ mod tests {
             .expect("build command");
 
         assert_eq!(spec.program, "claude");
-        assert_eq!(spec.args[0], "-p");
-        assert_eq!(spec.args[1], "hello");
-        assert_eq!(spec.args[2], "--mcp-config");
-        assert!(spec.args[3].contains("\"url\""));
+        assert_eq!(
+            spec.args,
+            vec![
+                "-p".to_string(),
+                "hello".to_string(),
+                "--output-format".to_string(),
+                "json".to_string(),
+                "--allowedTools".to_string(),
+                r#""Bash,Read,Edit""#.to_string(),
+            ]
+        );
     }
 
     #[test]
