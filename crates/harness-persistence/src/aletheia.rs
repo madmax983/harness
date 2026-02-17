@@ -23,7 +23,7 @@ use std::sync::Arc;
 use aletheiadb::api::transaction::{ReadTransaction, WriteTransaction};
 use aletheiadb::core::Node;
 use aletheiadb::core::id::NodeId;
-use aletheiadb::core::property::PropertyMapBuilder;
+use aletheiadb::core::property::{PropertyMapBuilder, PropertyValue};
 use aletheiadb::index::VectorIndex;
 use aletheiadb::index::vector::temporal::TemporalVectorConfig;
 use aletheiadb::index::vector::{DistanceMetric, HnswConfig, HnswIndex, HnswIndexBuilder};
@@ -153,12 +153,61 @@ impl AletheiaRepository {
 
     // --- Index management ---
 
+    /// Returns true when `node_id` points at a valid Harness index node.
+    fn is_valid_index_node_id(&self, node_id: NodeId) -> RepositoryResult<bool> {
+        self.db_read(|tx| {
+            let Ok(node) = tx.get_node(node_id) else {
+                return Ok(false);
+            };
+
+            let has_marker = node
+                .get_property(INDEX_KEY_SELF)
+                .and_then(|value| value.as_str())
+                == Some("harness-index");
+
+            Ok(node.has_label_str(LABEL_INDEX) && has_marker)
+        })
+    }
+
+    /// Find the oldest surviving Harness index node, if one exists.
+    fn find_oldest_index_node(&self) -> RepositoryResult<Option<NodeId>> {
+        self.db_read(|tx| {
+            let mut candidates = tx.find_nodes_by_property(
+                LABEL_INDEX,
+                INDEX_KEY_SELF,
+                &PropertyValue::from("harness-index"),
+            );
+            candidates.sort_by_key(|node_id| node_id.as_u64());
+            Ok(candidates.into_iter().next())
+        })
+    }
+
     fn get_or_create_index_node(&self) -> RepositoryResult<NodeId> {
         {
             let cache = self.index_node_id.read();
-            if let Some(node_id) = *cache {
+            if let Some(node_id) = *cache
+                && self.is_valid_index_node_id(node_id)?
+            {
                 return Ok(node_id);
             }
+        }
+
+        // Drop stale in-memory cache and attempt to recover from persisted graph state.
+        *self.index_node_id.write() = None;
+        if let Some(node_id) = self.find_oldest_index_node()? {
+            *self.index_node_id.write() = Some(node_id);
+
+            if !self.skip_file_io {
+                use std::fs;
+                use std::path::Path;
+
+                let index_file = Path::new(".harness-index");
+                fs::write(index_file, node_id.as_u64().to_string()).map_err(|e| {
+                    RepositoryError::Database(format!("Failed to write index file: {e}"))
+                })?;
+            }
+
+            return Ok(node_id);
         }
 
         let node_id = if self.skip_file_io {
@@ -176,15 +225,48 @@ impl AletheiaRepository {
             let index_file = Path::new(".harness-index");
 
             if index_file.exists() {
-                let content = fs::read_to_string(index_file).map_err(|e| {
-                    RepositoryError::Database(format!("Failed to read index file: {e}"))
-                })?;
-                let id_u64: u64 = content
-                    .trim()
-                    .parse()
-                    .map_err(|e| RepositoryError::Database(format!("Invalid index file: {e}")))?;
-                NodeId::new(id_u64)
-                    .map_err(|e| RepositoryError::Database(format!("Invalid NodeId: {e}")))?
+                let candidate = fs::read_to_string(index_file)
+                    .ok()
+                    .and_then(|content| content.trim().parse::<u64>().ok())
+                    .and_then(|value| NodeId::new(value).ok());
+
+                if let Some(candidate) = candidate {
+                    if self.is_valid_index_node_id(candidate)? {
+                        candidate
+                    } else if let Some(recovered) = self.find_oldest_index_node()? {
+                        fs::write(index_file, recovered.as_u64().to_string()).map_err(|e| {
+                            RepositoryError::Database(format!("Failed to write index file: {e}"))
+                        })?;
+                        recovered
+                    } else {
+                        let created = self.db_write(|tx| {
+                            let props = PropertyMapBuilder::new()
+                                .insert(INDEX_KEY_SELF, "harness-index")
+                                .build();
+                            Ok(tx.create_node(LABEL_INDEX, props)?)
+                        })?;
+                        fs::write(index_file, created.as_u64().to_string()).map_err(|e| {
+                            RepositoryError::Database(format!("Failed to write index file: {e}"))
+                        })?;
+                        created
+                    }
+                } else if let Some(recovered) = self.find_oldest_index_node()? {
+                    fs::write(index_file, recovered.as_u64().to_string()).map_err(|e| {
+                        RepositoryError::Database(format!("Failed to write index file: {e}"))
+                    })?;
+                    recovered
+                } else {
+                    let created = self.db_write(|tx| {
+                        let props = PropertyMapBuilder::new()
+                            .insert(INDEX_KEY_SELF, "harness-index")
+                            .build();
+                        Ok(tx.create_node(LABEL_INDEX, props)?)
+                    })?;
+                    fs::write(index_file, created.as_u64().to_string()).map_err(|e| {
+                        RepositoryError::Database(format!("Failed to write index file: {e}"))
+                    })?;
+                    created
+                }
             } else {
                 let node_id = self.db_write(|tx| {
                     let props = PropertyMapBuilder::new()
@@ -1851,6 +1933,46 @@ mod tests {
         let agent = Agent::new(AgentRole::Developer, session.id);
         repo.create_agent(&agent).await.unwrap();
         (repo, session, agent)
+    }
+
+    #[test]
+    fn index_recovery_picks_oldest_valid_node_when_cache_is_stale() {
+        let db = Arc::new(AletheiaDB::new().expect("db"));
+        let repo = AletheiaRepository::new_anon(db);
+
+        let oldest = repo.get_or_create_index_node().expect("first index node");
+        let newer = repo
+            .db_write(|tx| {
+                let props = PropertyMapBuilder::new()
+                    .insert(INDEX_KEY_SELF, "harness-index")
+                    .build();
+                Ok(tx.create_node(LABEL_INDEX, props)?)
+            })
+            .expect("second index node");
+        assert!(newer.as_u64() > oldest.as_u64());
+
+        let stale = NodeId::new(999_999).expect("valid stale node id");
+        *repo.index_node_id.write() = Some(stale);
+
+        let recovered = repo
+            .get_or_create_index_node()
+            .expect("recovered index node");
+        assert_eq!(recovered, oldest);
+    }
+
+    #[test]
+    fn index_recovery_creates_new_when_no_index_node_exists() {
+        let db = Arc::new(AletheiaDB::new().expect("db"));
+        let repo = AletheiaRepository::new_anon(db);
+
+        let stale = NodeId::new(999_999).expect("valid stale node id");
+        *repo.index_node_id.write() = Some(stale);
+
+        let recovered = repo.get_or_create_index_node().expect("created index node");
+        assert!(
+            repo.is_valid_index_node_id(recovered)
+                .expect("index node validity check")
+        );
     }
 
     // === Session tests ===
