@@ -1,0 +1,95 @@
+# Example team templates for `spawn_team_from_template`.
+#
+# Usage:
+# - Per call: pass `template_path` in the tool request.
+# - Global: set `HARNESS_TEAM_TEMPLATE_PATH` to this file path.
+#
+# Notes:
+# - Template lookup is case-insensitive.
+# - If `template_path`/env is used, requested templates must exist in this file.
+# - `spawn_team_from_template` requires at least 2 members.
+
+[templates.feature]
+[[templates.feature.members]]
+name = "feature-architect"
+role = "architect"
+cli_command = "codex"
+cli_args = ["exec", "{PROMPT}", "--json"]
+custom_prompt = "Own decomposition and interfaces."
+directive = "Define slices, risk checkpoints, and handoff criteria."
+
+[[templates.feature.members]]
+name = "feature-developer"
+role = "developer"
+cli_command = "codex"
+cli_args = ["exec", "{PROMPT}", "--json"]
+custom_prompt = "Implement vertical slices with tests first."
+directive = "Build core path, then edge behavior and regression tests."
+
+[[templates.feature.members]]
+name = "feature-tester"
+role = "tester"
+cli_command = "codex"
+cli_args = ["exec", "{PROMPT}", "--json"]
+custom_prompt = "Validate failure modes and acceptance criteria."
+directive = "Focus on behavior regressions and clear blocker reporting."
+
+[templates.bugfix]
+[[templates.bugfix.members]]
+name = "bugfix-investigator"
+role = "developer"
+cli_command = "codex"
+cli_args = ["exec", "{PROMPT}", "--json"]
+custom_prompt = "Prioritize root-cause analysis."
+directive = "Reproduce issue, isolate cause, propose minimal patch."
+
+[[templates.bugfix.members]]
+name = "bugfix-reviewer"
+role = "tester"
+cli_command = "codex"
+cli_args = ["exec", "{PROMPT}", "--json"]
+custom_prompt = "Act as independent validator."
+directive = "Confirm fix and check neighboring regressions."
+
+[templates.incident]
+[[templates.incident.members]]
+name = "incident-commander"
+role = "architect"
+cli_command = "codex"
+cli_args = ["exec", "{PROMPT}", "--json"]
+custom_prompt = "Coordinate mitigation and communication."
+directive = "Drive containment and assign concrete follow-ups."
+
+[[templates.incident.members]]
+name = "incident-responder"
+role = "developer"
+cli_command = "codex"
+cli_args = ["exec", "{PROMPT}", "--json"]
+custom_prompt = "Execute mitigations with rollback paths."
+directive = "Apply mitigations with explicit verification checks."
+
+[[templates.incident.members]]
+name = "incident-validation"
+role = "tester"
+cli_command = "codex"
+cli_args = ["exec", "{PROMPT}", "--json"]
+custom_prompt = "Continuously validate recovery confidence."
+directive = "Monitor impact and escalate unresolved risk immediately."
+
+# Custom template example (use with `template = "review"`).
+[templates.review]
+[[templates.review.members]]
+name = "review-producer"
+role = "developer"
+cli_command = "codex"
+cli_args = ["exec", "{PROMPT}", "--json"]
+custom_prompt = "Produce high-signal findings with file/line refs."
+directive = "Prioritize correctness, regressions, and missing tests."
+
+[[templates.review.members]]
+name = "review-consumer"
+role = "developer"
+cli_command = "codex"
+cli_args = ["exec", "{PROMPT}", "--json"]
+custom_prompt = "Fix findings with strict RED/GREEN/final evidence."
+directive = "Close fix tasks only after explicit command evidence."

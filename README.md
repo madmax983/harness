@@ -42,6 +42,9 @@ Model Context Protocol server exposing a broad tool surface for LLM integration,
 **Agent Coordination:**
 - `register_agent`, `list_agents`, `send_direct_message`, `get_messages`, `get_thread_messages`
 
+**Team Orchestration:**
+- `spawn_agent`, `spawn_team_and_handshake`, `spawn_team_from_template`, `supervise_team`, `dispatch_ready_tasks`
+
 **Knowledge Sharing:**
 - `share_knowledge`, `ask_hive` (semantic search), `fish_knowledge` (associative memory)
 
@@ -200,6 +203,38 @@ Executor behavior:
 - Step transitions are persisted and queryable via `list_workflow_runs` / `get_workflow_run`.
 - Existing schedules are a compatibility layer where each schedule run emits a single-step workflow run (`workflow_run_id`).
 - `hyperv_vm` is currently a Phase-3 seam and intentionally blocks until VM execution is implemented.
+
+## Configurable Team Templates
+
+`spawn_team_from_template` supports built-in templates (`feature`, `bugfix`, `incident`) and custom TOML templates.
+
+Template source precedence:
+1. `template_path` on the `spawn_team_from_template` request
+2. `HARNESS_TEAM_TEMPLATE_PATH` environment variable
+3. Built-in templates in code
+
+Important behavior:
+- If `template_path` or `HARNESS_TEAM_TEMPLATE_PATH` is set, the requested template must exist in that TOML file.
+- Built-in templates are not used as fallback when a TOML path/env is active.
+- Template lookup is case-insensitive.
+
+CLI defaults and overrides:
+- Per-member defaults when omitted in TOML: `cli_command = "claude"` and `cli_args = ["-p", "{PROMPT}", "--allowedTools", "Bash,Read,Edit"]`.
+- Request-level `cli_command` and `cli_args` override all template members for that spawn request.
+- Request-level `directive` is appended as a global directive for each spawned member.
+
+Example template file:
+- `docs/examples/team-templates.example.toml`
+
+Example request:
+```bash
+spawn_team_from_template({
+  template: "review",
+  template_path: "C:\\Users\\markm\\harness\\docs\\examples\\team-templates.example.toml",
+  cli_command: "codex",
+  cli_args: ["exec", "{PROMPT}", "--json"]
+})
+```
 
 ## Example: Using Harness to Build Harness
 
