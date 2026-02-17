@@ -121,6 +121,15 @@ const CODEX_ROLLOUT_MISSING_PATH_SIGNAL: &str = "state db missing rollout path";
 const CODEX_ROLLOUT_LIST_COMPONENT: &str = "codex_core::rollout::list";
 const CODEX_STDIN_WAIT_SIGNAL: &str = "reading prompt from stdin";
 
+fn compare_scores_desc(lhs: f32, rhs: f32) -> std::cmp::Ordering {
+    match (lhs.is_nan(), rhs.is_nan()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        (false, false) => rhs.total_cmp(&lhs),
+    }
+}
+
 impl<R: Repository + 'static> HiveHandler<R> {
     /// Create a new handler.
     pub fn new(state: Arc<HiveState<R>>) -> Self {
@@ -935,6 +944,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
             workflow_id: run.workflow_id.clone(),
             payload: run.payload.clone(),
             status: run.status.clone(),
+            evidence_status: run.evidence_status.clone(),
             attempt: run.attempt,
             max_attempts: run.max_attempts,
             timeout_secs: run.timeout_secs,
@@ -3715,7 +3725,7 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
 
         // Sort by score and limit
         let mut sorted_results: Vec<_> = results.into_values().collect();
-        sorted_results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        sorted_results.sort_by(|a, b| compare_scores_desc(a.1, b.1));
         sorted_results.truncate(req.limit);
 
         Ok(tools::FishKnowledgeResponse {
@@ -4420,6 +4430,12 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
                 } else {
                     step.kind.to_ascii_lowercase()
                 };
+                if !matches!(kind.as_str(), "run_tool" | "hyperv_vm") {
+                    return Err(HandlerError::InvalidArgs(format!(
+                        "unsupported workflow step kind '{}' (supported: run_tool, hyperv_vm)",
+                        kind
+                    )));
+                }
                 if kind == "run_tool" && step.tool.as_deref().is_none_or(str::is_empty) {
                     return Err(HandlerError::InvalidArgs(
                         "run_tool steps require non-empty tool".to_string(),
@@ -7156,6 +7172,22 @@ mod tests {
         (state, handler)
     }
 
+    #[test]
+    fn test_desc_score_sort_with_nan_does_not_panic() {
+        let result = std::panic::catch_unwind(|| {
+            let mut scores = [0.9_f32, f32::NAN, 0.1_f32];
+            scores.sort_by(|a, b| compare_scores_desc(*a, *b));
+            assert_eq!(scores[0], 0.9_f32);
+            assert_eq!(scores[1], 0.1_f32);
+            assert!(scores[2].is_nan());
+        });
+
+        assert!(
+            result.is_ok(),
+            "score sorting should not panic when similarity contains NaN"
+        );
+    }
+
     #[tokio::test]
     async fn test_register_agent() {
         let (_state, handler) = setup().await;
@@ -8031,11 +8063,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            resp.get("allowed")
+        assert!(
+            !resp
+                .get("allowed")
                 .and_then(serde_json::Value::as_bool)
-                .unwrap(),
-            false
+                .unwrap()
         );
         let missing_checks = resp
             .get("missing_checks")
@@ -8602,6 +8634,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_create_workflow_rejects_unknown_step_kind() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let err = handler
+            .call_tool(
+                "create_workflow",
+                serde_json::json!({
+                    "name": "workflow-invalid-step-kind-red",
+                    "description": "Reject unsupported workflow step kinds.",
+                    "definition": {
+                        "steps": [
+                            { "step_id": "step-invalid", "kind": "typo_kind", "tool": "list_tasks" }
+                        ]
+                    }
+                }),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("unsupported workflow step kind"),
+            "create_workflow should reject unknown step kinds with a clear validation error"
+        );
+    }
+
+    #[tokio::test]
     async fn test_executor_heartbeat_transitions_workflow_run_status() {
         let (_state, handler) = setup().await;
 
@@ -8761,6 +8824,13 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some(workflow_run_id.as_str())
         );
+        assert_eq!(
+            runs[0]
+                .get("evidence_status")
+                .and_then(serde_json::Value::as_str),
+            Some("pending"),
+            "list_workflow_runs should expose run-level evidence status"
+        );
 
         let fetched = handler
             .call_tool(
@@ -8777,6 +8847,14 @@ mod tests {
                 .and_then(|run| run.get("status"))
                 .and_then(serde_json::Value::as_str),
             Some("queued")
+        );
+        assert_eq!(
+            fetched
+                .get("run")
+                .and_then(|run| run.get("evidence_status"))
+                .and_then(serde_json::Value::as_str),
+            Some("pending"),
+            "get_workflow_run should expose run-level evidence status"
         );
 
         let retry = handler
