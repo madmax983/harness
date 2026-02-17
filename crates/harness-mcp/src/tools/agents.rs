@@ -229,6 +229,9 @@ pub struct TemplateSpawnedMember {
 pub struct SpawnTeamFromTemplateRequest {
     /// Template name: feature, bugfix, incident.
     pub template: String,
+    /// Optional path to a TOML template file (supports custom template names).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub template_path: Option<String>,
     /// Optional global CLI override for all members.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cli_command: Option<String>,
@@ -625,6 +628,7 @@ pub struct WorkflowRunInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload: Option<Value>,
     pub status: String,
+    pub evidence_status: String,
     pub attempt: u32,
     pub max_attempts: u32,
     pub timeout_secs: u64,

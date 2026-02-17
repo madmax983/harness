@@ -1062,6 +1062,13 @@ pub fn tool_definitions() -> Vec<Tool> {
                     prop("string", "Template name: feature, bugfix, incident"),
                 ),
                 (
+                    "template_path".into(),
+                    prop(
+                        "string",
+                        "Optional path to a TOML template file (supports custom template names)",
+                    ),
+                ),
+                (
                     "cli_command".into(),
                     prop(
                         "string",

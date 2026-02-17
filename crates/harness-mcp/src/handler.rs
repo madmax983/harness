@@ -14,6 +14,7 @@ use harness_persistence::{
     Project, ProjectId, ProjectStatus, Repository, RepositoryError, Task, TaskId, TaskPattern,
     TaskStatus, TriggerKind,
 };
+use serde::Deserialize;
 use tokio::sync::RwLock;
 
 use crate::state::{AgentSpawnSpec, HiveState};
@@ -101,6 +102,32 @@ struct TeamTemplateMember {
     directive: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct TeamTemplateTomlConfig {
+    #[serde(default)]
+    templates: HashMap<String, TeamTemplateTomlDefinition>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamTemplateTomlDefinition {
+    #[serde(default)]
+    members: Vec<TeamTemplateTomlMember>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamTemplateTomlMember {
+    name: String,
+    role: String,
+    #[serde(default)]
+    cli_command: Option<String>,
+    #[serde(default)]
+    cli_args: Option<Vec<String>>,
+    #[serde(default)]
+    custom_prompt: Option<String>,
+    #[serde(default)]
+    directive: Option<String>,
+}
+
 struct SpawnWorkerParams<'a> {
     role: &'a str,
     cli_command: &'a str,
@@ -117,6 +144,7 @@ const CODING_AGENT_WORKFLOW_DEFINITION_KNOWLEDGE_PREFIX: &str =
 const CODING_AGENT_WORKFLOW_RUN_KNOWLEDGE_PREFIX: &str = "__coding_agent_workflow_run_v1__:";
 const CODING_AGENT_SCHEDULE_HYDRATION_LIMIT: usize = 10_000;
 const CODING_AGENT_HEARTBEAT_MAX_SCHEDULES: usize = 100;
+const TEAM_TEMPLATE_PATH_ENV: &str = "HARNESS_TEAM_TEMPLATE_PATH";
 const CODEX_ROLLOUT_MISSING_PATH_SIGNAL: &str = "state db missing rollout path";
 const CODEX_ROLLOUT_LIST_COMPONENT: &str = "codex_core::rollout::list";
 const CODEX_STDIN_WAIT_SIGNAL: &str = "reading prompt from stdin";
@@ -1770,137 +1798,265 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
         Self::node_id_fallback(node_id)
     }
 
-    fn build_team_template_members(
-        template: TeamTemplateKind,
+    fn default_team_template_cli_args() -> Vec<String> {
+        vec![
+            "-p".into(),
+            "{PROMPT}".into(),
+            "--allowedTools".into(),
+            "Bash,Read,Edit".into(),
+        ]
+    }
+
+    fn normalize_optional_text(value: Option<String>) -> Option<String> {
+        value.and_then(|v| {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+    }
+
+    fn append_global_directive(
+        base: Option<&str>,
+        global_directive: Option<&str>,
+    ) -> Option<String> {
+        let base = base.map(str::trim).filter(|s| !s.is_empty());
+        let global = global_directive.map(str::trim).filter(|s| !s.is_empty());
+        match (base, global) {
+            (Some(b), Some(g)) => Some(format!("{b}\n\nGlobal directive:\n{g}")),
+            (Some(b), None) => Some(b.to_string()),
+            (None, Some(g)) => Some(format!("Global directive:\n{g}")),
+            (None, None) => None,
+        }
+    }
+
+    fn apply_team_template_overrides(
+        members: Vec<TeamTemplateMember>,
         global_cli_command: Option<&str>,
         global_cli_args: Option<&[String]>,
         global_directive: Option<&str>,
     ) -> Vec<TeamTemplateMember> {
-        let default_cli_command = global_cli_command.unwrap_or("claude");
-        let default_cli_args = global_cli_args.map(|a| a.to_vec()).unwrap_or_else(|| {
-            vec![
-                "-p".into(),
-                "{PROMPT}".into(),
-                "--allowedTools".into(),
-                "Bash,Read,Edit".into(),
-            ]
-        });
-        let append_global = |base: &str| -> String {
-            if let Some(extra) = global_directive
-                && !extra.trim().is_empty()
-            {
-                format!("{}\n\nGlobal directive:\n{}", base, extra.trim())
-            } else {
-                base.to_string()
+        let global_cli_command = global_cli_command
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(std::string::ToString::to_string);
+        let global_cli_args = global_cli_args.map(|args| args.to_vec());
+
+        members
+            .into_iter()
+            .map(|member| TeamTemplateMember {
+                name: member.name,
+                role: member.role,
+                cli_command: global_cli_command.clone().unwrap_or(member.cli_command),
+                cli_args: global_cli_args.clone().unwrap_or(member.cli_args),
+                custom_prompt: member.custom_prompt,
+                directive: Self::append_global_directive(
+                    member.directive.as_deref(),
+                    global_directive,
+                ),
+            })
+            .collect()
+    }
+
+    fn load_team_template_members_from_toml(
+        path: &str,
+        requested_template: &str,
+    ) -> HandlerResult<(String, Vec<TeamTemplateMember>)> {
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            HandlerError::InvalidArgs(format!("Failed to read template_path '{path}': {e}"))
+        })?;
+        let parsed: TeamTemplateTomlConfig = toml::from_str(&content).map_err(|e| {
+            HandlerError::InvalidArgs(format!("Invalid team template TOML at '{path}': {e}"))
+        })?;
+
+        let requested = requested_template.trim();
+        if requested.is_empty() {
+            return Err(HandlerError::InvalidArgs(
+                "template cannot be empty".to_string(),
+            ));
+        }
+
+        let mut templates = parsed.templates;
+        let template_name = templates
+            .keys()
+            .find(|name| name.eq_ignore_ascii_case(requested))
+            .cloned()
+            .ok_or_else(|| {
+                let mut available = templates.keys().cloned().collect::<Vec<_>>();
+                available.sort();
+                HandlerError::InvalidArgs(format!(
+                    "Template '{requested}' not found in '{path}'. Available templates: {}",
+                    if available.is_empty() {
+                        "<none>".to_string()
+                    } else {
+                        available.join(", ")
+                    }
+                ))
+            })?;
+
+        let definition = templates
+            .remove(&template_name)
+            .ok_or_else(|| HandlerError::InternalError("Template lookup failed".to_string()))?;
+        if definition.members.is_empty() {
+            return Err(HandlerError::InvalidArgs(format!(
+                "Template '{template_name}' in '{path}' must define at least one member"
+            )));
+        }
+
+        let mut members = Vec::with_capacity(definition.members.len());
+        for member in definition.members {
+            let name = member.name.trim();
+            if name.is_empty() {
+                return Err(HandlerError::InvalidArgs(format!(
+                    "Template '{template_name}' in '{path}' has a member with empty name"
+                )));
             }
-        };
+            let role = member.role.trim();
+            if role.is_empty() {
+                return Err(HandlerError::InvalidArgs(format!(
+                    "Template '{template_name}' in '{path}' has member '{name}' with empty role"
+                )));
+            }
+            let cli_command = member
+                .cli_command
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("claude")
+                .to_string();
+            let cli_args = member
+                .cli_args
+                .unwrap_or_else(Self::default_team_template_cli_args);
+
+            members.push(TeamTemplateMember {
+                name: name.to_string(),
+                role: role.to_string(),
+                cli_command,
+                cli_args,
+                custom_prompt: Self::normalize_optional_text(member.custom_prompt),
+                directive: Self::normalize_optional_text(member.directive),
+            });
+        }
+
+        Ok((template_name, members))
+    }
+
+    fn build_team_template_members(template: TeamTemplateKind) -> Vec<TeamTemplateMember> {
+        let default_cli_command = "claude".to_string();
+        let default_cli_args = Self::default_team_template_cli_args();
 
         match template {
             TeamTemplateKind::Feature => vec![
                 TeamTemplateMember {
                     name: "feature-architect".to_string(),
                     role: "architect".to_string(),
-                    cli_command: default_cli_command.to_string(),
+                    cli_command: default_cli_command.clone(),
                     cli_args: default_cli_args.clone(),
                     custom_prompt: Some(
                         "Own technical decomposition, interface contracts, and risk checkpoints."
                             .to_string(),
                     ),
-                    directive: Some(append_global(
-                        "Define implementation slices and handoff criteria for coding and testing.",
-                    )),
+                    directive: Some(
+                        "Define implementation slices and handoff criteria for coding and testing."
+                            .to_string(),
+                    ),
                 },
                 TeamTemplateMember {
                     name: "feature-developer".to_string(),
                     role: "developer".to_string(),
-                    cli_command: default_cli_command.to_string(),
+                    cli_command: default_cli_command.clone(),
                     cli_args: default_cli_args.clone(),
                     custom_prompt: Some(
                         "Implement high-confidence slices with tight feedback loops and test evidence."
                             .to_string(),
                     ),
-                    directive: Some(append_global(
-                        "Build core feature path first, then edge behavior and regression coverage.",
-                    )),
+                    directive: Some(
+                        "Build core feature path first, then edge behavior and regression coverage."
+                            .to_string(),
+                    ),
                 },
                 TeamTemplateMember {
                     name: "feature-tester".to_string(),
                     role: "tester".to_string(),
-                    cli_command: default_cli_command.to_string(),
-                    cli_args: default_cli_args,
+                    cli_command: default_cli_command.clone(),
+                    cli_args: default_cli_args.clone(),
                     custom_prompt: Some(
                         "Focus on behavior regressions, failure modes, and completion criteria."
                             .to_string(),
                     ),
-                    directive: Some(append_global(
-                        "Validate acceptance criteria and publish blockers quickly.",
-                    )),
+                    directive: Some(
+                        "Validate acceptance criteria and publish blockers quickly.".to_string(),
+                    ),
                 },
             ],
             TeamTemplateKind::Bugfix => vec![
                 TeamTemplateMember {
                     name: "bugfix-investigator".to_string(),
                     role: "developer".to_string(),
-                    cli_command: default_cli_command.to_string(),
+                    cli_command: default_cli_command.clone(),
                     cli_args: default_cli_args.clone(),
                     custom_prompt: Some(
                         "Prioritize root-cause analysis, minimal blast radius changes, and regression tests."
                             .to_string(),
                     ),
-                    directive: Some(append_global(
-                        "Reproduce issue, isolate root cause, and propose minimal corrective patch.",
-                    )),
+                    directive: Some(
+                        "Reproduce issue, isolate root cause, and propose minimal corrective patch."
+                            .to_string(),
+                    ),
                 },
                 TeamTemplateMember {
                     name: "bugfix-reviewer".to_string(),
                     role: "tester".to_string(),
-                    cli_command: default_cli_command.to_string(),
-                    cli_args: default_cli_args,
+                    cli_command: default_cli_command.clone(),
+                    cli_args: default_cli_args.clone(),
                     custom_prompt: Some(
                         "Act as independent validator for bugfix quality and side effects.".to_string(),
                     ),
-                    directive: Some(append_global(
-                        "Confirm fix and verify no regressions in neighboring behavior.",
-                    )),
+                    directive: Some(
+                        "Confirm fix and verify no regressions in neighboring behavior.".to_string(),
+                    ),
                 },
             ],
             TeamTemplateKind::Incident => vec![
                 TeamTemplateMember {
                     name: "incident-commander".to_string(),
                     role: "architect".to_string(),
-                    cli_command: default_cli_command.to_string(),
+                    cli_command: default_cli_command.clone(),
                     cli_args: default_cli_args.clone(),
                     custom_prompt: Some(
                         "Coordinate triage order, mitigation actions, and communication cadence."
                             .to_string(),
                     ),
-                    directive: Some(append_global(
-                        "Drive immediate containment plan and assign concrete follow-ups.",
-                    )),
+                    directive: Some(
+                        "Drive immediate containment plan and assign concrete follow-ups.".to_string(),
+                    ),
                 },
                 TeamTemplateMember {
                     name: "incident-responder".to_string(),
                     role: "developer".to_string(),
-                    cli_command: default_cli_command.to_string(),
+                    cli_command: default_cli_command.clone(),
                     cli_args: default_cli_args.clone(),
                     custom_prompt: Some(
                         "Execute mitigations quickly and keep rollback path explicit.".to_string(),
                     ),
-                    directive: Some(append_global(
-                        "Apply mitigation with explicit verification checks and report outcomes.",
-                    )),
+                    directive: Some(
+                        "Apply mitigation with explicit verification checks and report outcomes."
+                            .to_string(),
+                    ),
                 },
                 TeamTemplateMember {
                     name: "incident-validation".to_string(),
                     role: "tester".to_string(),
-                    cli_command: default_cli_command.to_string(),
+                    cli_command: default_cli_command,
                     cli_args: default_cli_args,
                     custom_prompt: Some(
                         "Continuously validate service health and recovery confidence.".to_string(),
                     ),
-                    directive: Some(append_global(
-                        "Monitor mitigation impact and flag unresolved risk immediately.",
-                    )),
+                    directive: Some(
+                        "Monitor mitigation impact and flag unresolved risk immediately.".to_string(),
+                    ),
                 },
             ],
         }
@@ -4330,11 +4486,30 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
         req: tools::SpawnTeamFromTemplateRequest,
     ) -> HandlerResult<tools::SpawnTeamFromTemplateResponse> {
         self.require_strategoi(req._agent_id.as_deref()).await?;
-        let template_kind = Self::parse_template_kind(&req.template)?;
+        let requested_template = req.template.trim();
+        if requested_template.is_empty() {
+            return Err(HandlerError::InvalidArgs(
+                "template cannot be empty".to_string(),
+            ));
+        }
         let handshake_mode = Self::parse_handshake_mode(&req.handshake_mode)?;
 
-        let members = Self::build_team_template_members(
-            template_kind,
+        let template_path = req
+            .template_path
+            .clone()
+            .or_else(|| std::env::var(TEAM_TEMPLATE_PATH_ENV).ok());
+        let (template_name, base_members) = if let Some(path) = template_path.as_deref() {
+            Self::load_team_template_members_from_toml(path, requested_template)?
+        } else {
+            let template_kind = Self::parse_template_kind(requested_template)?;
+            (
+                template_kind.as_str().to_string(),
+                Self::build_team_template_members(template_kind),
+            )
+        };
+
+        let members = Self::apply_team_template_overrides(
+            base_members,
             req.cli_command.as_deref(),
             req.cli_args.as_deref(),
             req.directive.as_deref(),
@@ -4373,7 +4548,7 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
         let message_body = req.handshake_message.unwrap_or_else(|| {
             format!(
                 "Template '{}' handshake seeded (mode: {}).",
-                template_kind.as_str(),
+                template_name,
                 handshake_mode.as_str()
             )
         });
@@ -4383,7 +4558,7 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
             .await?;
 
         Ok(tools::SpawnTeamFromTemplateResponse {
-            template: template_kind.as_str().to_string(),
+            template: template_name,
             members: spawned_members,
             message_ids,
             handshake_mode: handshake_mode.as_str().to_string(),
@@ -7155,6 +7330,8 @@ mod tests {
     use aletheiadb::AletheiaDB;
     use harness_orchestrator::{OrchestratorConfig, ProcessManager};
     use harness_persistence::{AletheiaRepository, InMemoryRepository, Session};
+    use std::io::Write;
+    use tempfile::NamedTempFile;
 
     async fn setup() -> (
         Arc<HiveState<InMemoryRepository>>,
@@ -9430,6 +9607,110 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("Invalid template: unknown. Use 'feature', 'bugfix', or 'incident'")
+        );
+    }
+
+    #[test]
+    fn test_load_team_template_members_from_toml_reads_custom_template() {
+        let mut file = NamedTempFile::new().unwrap();
+        write!(
+            file,
+            r#"
+[templates.review]
+[[templates.review.members]]
+name = "review-developer"
+role = "developer"
+directive = "Review critical behavior and edge cases."
+
+[[templates.review.members]]
+name = "review-tester"
+role = "tester"
+"#
+        )
+        .unwrap();
+
+        let path = file.path().to_string_lossy().to_string();
+        let (template_name, members) =
+            HiveHandler::<InMemoryRepository>::load_team_template_members_from_toml(
+                &path, "review",
+            )
+            .unwrap();
+
+        assert_eq!(template_name, "review");
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[0].name, "review-developer");
+        assert_eq!(members[0].role, "developer");
+        assert_eq!(members[0].cli_command, "claude");
+        assert_eq!(
+            members[0].cli_args,
+            HiveHandler::<InMemoryRepository>::default_team_template_cli_args()
+        );
+        assert_eq!(
+            members[0].directive.as_deref(),
+            Some("Review critical behavior and edge cases.")
+        );
+        assert_eq!(members[1].name, "review-tester");
+        assert_eq!(members[1].role, "tester");
+    }
+
+    #[test]
+    fn test_load_team_template_members_from_toml_reports_missing_template() {
+        let mut file = NamedTempFile::new().unwrap();
+        write!(
+            file,
+            r#"
+[templates.feature]
+[[templates.feature.members]]
+name = "feature-dev"
+role = "developer"
+"#
+        )
+        .unwrap();
+
+        let path = file.path().to_string_lossy().to_string();
+        let err = HiveHandler::<InMemoryRepository>::load_team_template_members_from_toml(
+            &path, "custom",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Template 'custom' not found"));
+    }
+
+    #[tokio::test]
+    async fn test_spawn_team_from_template_uses_template_path_for_custom_template() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let mut file = NamedTempFile::new().unwrap();
+        write!(
+            file,
+            r#"
+[templates.custom]
+[[templates.custom.members]]
+name = "custom-dev"
+role = "developer"
+"#
+        )
+        .unwrap();
+
+        let err = handler
+            .call_tool(
+                "spawn_team_from_template",
+                serde_json::json!({
+                    "template": "custom",
+                    "template_path": file.path().to_string_lossy().to_string()
+                }),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("Template must contain at least 2 members"),
+            "custom templates should be loaded from template_path before built-in validation"
         );
     }
 
