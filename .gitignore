@@ -11,3 +11,4 @@ aletheiadb/
 .harness-index
 .harness-mcp-session
 .harness-entity-index.json
+.worktrees/
