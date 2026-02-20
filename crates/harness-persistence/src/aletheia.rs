@@ -18,12 +18,14 @@
 //! (DirectMessage)─[:DM_THREAD]───►(Task)
 //! ```
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use aletheiadb::api::transaction::{ReadTransaction, WriteTransaction};
 use aletheiadb::core::Node;
 use aletheiadb::core::id::NodeId;
-use aletheiadb::core::property::{PropertyMapBuilder, PropertyValue};
+use aletheiadb::core::property::PropertyMapBuilder;
 use aletheiadb::index::VectorIndex;
 use aletheiadb::index::vector::temporal::TemporalVectorConfig;
 use aletheiadb::index::vector::{DistanceMetric, HnswConfig, HnswIndex, HnswIndexBuilder};
@@ -31,6 +33,7 @@ use aletheiadb::{AletheiaDB, ReadOps, WriteOps};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     Agent, AgentId, AgentRole, AgentStatus, DirectMessage, DirectMessageId, Knowledge, KnowledgeId,
@@ -47,7 +50,6 @@ const LABEL_DIRECT_MESSAGE: &str = "DirectMessage";
 const LABEL_PRODUCT: &str = "Product";
 const LABEL_PROJECT: &str = "Project";
 const LABEL_PLAN: &str = "Plan";
-const LABEL_INDEX: &str = "HarnessIndex";
 const LABEL_TRAJECTORY: &str = "Trajectory";
 
 const EDGE_CONTAINS_AGENT: &str = "CONTAINS_AGENT";
@@ -67,12 +69,24 @@ const EDGE_AGENT_TRAJECTORY: &str = "AGENT_TRAJECTORY";
 const EDGE_TASK_TRAJECTORY: &str = "TASK_TRAJECTORY";
 const EDGE_CONTAINS_TRAJECTORY: &str = "CONTAINS_TRAJECTORY";
 
-const INDEX_KEY_SELF: &str = "_index_node_id";
+const ENTITY_INDEX_FILE: &str = ".harness-entity-index.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct PersistedEntityIndex {
+    entries: Vec<PersistedEntityIndexEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedEntityIndexEntry {
+    key: String,
+    node_id: u64,
+}
 
 /// AletheiaDB-backed repository for production use.
 pub struct AletheiaRepository {
     db: Arc<AletheiaDB>,
-    index_node_id: RwLock<Option<NodeId>>,
+    entity_index: RwLock<HashMap<String, NodeId>>,
+    entity_index_loaded: AtomicBool,
     /// When true, skip file I/O for the index node (for anonymous/in-memory DBs).
     skip_file_io: bool,
     /// Optional HNSW vector index for semantic knowledge search.
@@ -84,18 +98,20 @@ impl AletheiaRepository {
     pub fn new(db: Arc<AletheiaDB>) -> Self {
         Self {
             db,
-            index_node_id: RwLock::new(None),
+            entity_index: RwLock::new(HashMap::new()),
+            entity_index_loaded: AtomicBool::new(false),
             skip_file_io: false,
             vector_index: None,
         }
     }
 
     /// Create a new AletheiaRepository for an anonymous (in-memory) DB.
-    /// Skips `.harness-index` file I/O so tests don't interfere with each other.
+    /// Skips sidecar entity index file I/O so tests don't interfere with each other.
     pub fn new_anon(db: Arc<AletheiaDB>) -> Self {
         Self {
             db,
-            index_node_id: RwLock::new(None),
+            entity_index: RwLock::new(HashMap::new()),
+            entity_index_loaded: AtomicBool::new(false),
             skip_file_io: true,
             vector_index: None,
         }
@@ -153,160 +169,124 @@ impl AletheiaRepository {
 
     // --- Index management ---
 
-    /// Returns true when `node_id` points at a valid Harness index node.
-    fn is_valid_index_node_id(&self, node_id: NodeId) -> RepositoryResult<bool> {
-        self.db_read(|tx| {
-            let Ok(node) = tx.get_node(node_id) else {
-                return Ok(false);
-            };
-
-            let has_marker = node
-                .get_property(INDEX_KEY_SELF)
-                .and_then(|value| value.as_str())
-                == Some("harness-index");
-
-            Ok(node.has_label_str(LABEL_INDEX) && has_marker)
-        })
-    }
-
-    /// Find the oldest surviving Harness index node, if one exists.
-    fn find_oldest_index_node(&self) -> RepositoryResult<Option<NodeId>> {
-        self.db_read(|tx| {
-            let mut candidates = tx.find_nodes_by_property(
-                LABEL_INDEX,
-                INDEX_KEY_SELF,
-                &PropertyValue::from("harness-index"),
-            );
-            candidates.sort_by_key(|node_id| node_id.as_u64());
-            Ok(candidates.into_iter().next())
-        })
-    }
-
-    fn get_or_create_index_node(&self) -> RepositoryResult<NodeId> {
-        {
-            let cache = self.index_node_id.read();
-            if let Some(node_id) = *cache
-                && self.is_valid_index_node_id(node_id)?
-            {
-                return Ok(node_id);
-            }
+    fn ensure_entity_index_loaded(&self) -> RepositoryResult<()> {
+        if self.entity_index_loaded.load(Ordering::Acquire) {
+            return Ok(());
         }
 
-        // Drop stale in-memory cache and attempt to recover from persisted graph state.
-        *self.index_node_id.write() = None;
-        if let Some(node_id) = self.find_oldest_index_node()? {
-            *self.index_node_id.write() = Some(node_id);
-
-            if !self.skip_file_io {
-                use std::fs;
-                use std::path::Path;
-
-                let index_file = Path::new(".harness-index");
-                fs::write(index_file, node_id.as_u64().to_string()).map_err(|e| {
-                    RepositoryError::Database(format!("Failed to write index file: {e}"))
-                })?;
-            }
-
-            return Ok(node_id);
+        let loaded = self.load_entity_index_from_disk()?;
+        let mut cache = self.entity_index.write();
+        if !self.entity_index_loaded.load(Ordering::Relaxed) {
+            *cache = loaded;
+            self.entity_index_loaded.store(true, Ordering::Release);
         }
 
-        let node_id = if self.skip_file_io {
-            // Anonymous DB: always create a fresh index node, no file persistence.
-            self.db_write(|tx| {
-                let props = PropertyMapBuilder::new()
-                    .insert(INDEX_KEY_SELF, "harness-index")
-                    .build();
-                Ok(tx.create_node(LABEL_INDEX, props)?)
-            })?
-        } else {
-            use std::fs;
-            use std::path::Path;
+        Ok(())
+    }
 
-            let index_file = Path::new(".harness-index");
+    fn load_entity_index_from_disk(&self) -> RepositoryResult<HashMap<String, NodeId>> {
+        if self.skip_file_io {
+            return Ok(HashMap::new());
+        }
 
-            if index_file.exists() {
-                let candidate = fs::read_to_string(index_file)
-                    .ok()
-                    .and_then(|content| content.trim().parse::<u64>().ok())
-                    .and_then(|value| NodeId::new(value).ok());
+        use std::fs;
+        use std::path::Path;
 
-                if let Some(candidate) = candidate {
-                    if self.is_valid_index_node_id(candidate)? {
-                        candidate
-                    } else if let Some(recovered) = self.find_oldest_index_node()? {
-                        fs::write(index_file, recovered.as_u64().to_string()).map_err(|e| {
-                            RepositoryError::Database(format!("Failed to write index file: {e}"))
-                        })?;
-                        recovered
-                    } else {
-                        let created = self.db_write(|tx| {
-                            let props = PropertyMapBuilder::new()
-                                .insert(INDEX_KEY_SELF, "harness-index")
-                                .build();
-                            Ok(tx.create_node(LABEL_INDEX, props)?)
-                        })?;
-                        fs::write(index_file, created.as_u64().to_string()).map_err(|e| {
-                            RepositoryError::Database(format!("Failed to write index file: {e}"))
-                        })?;
-                        created
-                    }
-                } else if let Some(recovered) = self.find_oldest_index_node()? {
-                    fs::write(index_file, recovered.as_u64().to_string()).map_err(|e| {
-                        RepositoryError::Database(format!("Failed to write index file: {e}"))
-                    })?;
-                    recovered
-                } else {
-                    let created = self.db_write(|tx| {
-                        let props = PropertyMapBuilder::new()
-                            .insert(INDEX_KEY_SELF, "harness-index")
-                            .build();
-                        Ok(tx.create_node(LABEL_INDEX, props)?)
-                    })?;
-                    fs::write(index_file, created.as_u64().to_string()).map_err(|e| {
-                        RepositoryError::Database(format!("Failed to write index file: {e}"))
-                    })?;
-                    created
+        let path = Path::new(ENTITY_INDEX_FILE);
+        if !path.exists() {
+            return Ok(HashMap::new());
+        }
+
+        let raw = fs::read_to_string(path).map_err(|e| {
+            RepositoryError::Database(format!(
+                "Failed to read sidecar entity index '{}': {e}",
+                path.display()
+            ))
+        })?;
+
+        if raw.trim().is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let persisted: PersistedEntityIndex = serde_json::from_str(&raw).map_err(|e| {
+            RepositoryError::Database(format!(
+                "Failed to parse sidecar entity index '{}': {e}",
+                path.display()
+            ))
+        })?;
+
+        let mut map = HashMap::with_capacity(persisted.entries.len());
+        for entry in persisted.entries {
+            match NodeId::new(entry.node_id) {
+                Ok(node_id) => {
+                    map.insert(entry.key, node_id);
                 }
-            } else {
-                let node_id = self.db_write(|tx| {
-                    let props = PropertyMapBuilder::new()
-                        .insert(INDEX_KEY_SELF, "harness-index")
-                        .build();
-                    Ok(tx.create_node(LABEL_INDEX, props)?)
-                })?;
-                fs::write(index_file, node_id.as_u64().to_string()).map_err(|e| {
-                    RepositoryError::Database(format!("Failed to write index file: {e}"))
-                })?;
-                node_id
+                Err(e) => {
+                    tracing::warn!(
+                        key = %entry.key,
+                        node_id = entry.node_id,
+                        error = %e,
+                        "Skipping invalid sidecar entity index entry"
+                    );
+                }
             }
-        };
+        }
 
-        *self.index_node_id.write() = Some(node_id);
-        Ok(node_id)
+        Ok(map)
+    }
+
+    fn persist_entity_index(&self) -> RepositoryResult<()> {
+        if self.skip_file_io {
+            return Ok(());
+        }
+
+        use std::fs;
+        use std::path::Path;
+
+        let mut entries: Vec<PersistedEntityIndexEntry> = self
+            .entity_index
+            .read()
+            .iter()
+            .map(|(key, node_id)| PersistedEntityIndexEntry {
+                key: key.clone(),
+                node_id: node_id.as_u64(),
+            })
+            .collect();
+        entries.sort_by(|a, b| a.key.cmp(&b.key));
+
+        let payload = PersistedEntityIndex { entries };
+        let encoded = serde_json::to_string(&payload).map_err(|e| {
+            RepositoryError::Database(format!("Failed to serialize sidecar entity index: {e}"))
+        })?;
+
+        let path = Path::new(ENTITY_INDEX_FILE);
+        fs::write(path, encoded).map_err(|e| {
+            RepositoryError::Database(format!(
+                "Failed to write sidecar entity index '{}': {e}",
+                path.display()
+            ))
+        })?;
+
+        Ok(())
     }
 
     fn index_set(&self, key: &str, node_id: NodeId) -> RepositoryResult<()> {
-        let index_id = self.get_or_create_index_node()?;
-        self.db_write(|tx| {
-            let props = PropertyMapBuilder::new()
-                .insert(key, node_id.as_u64() as i64)
-                .build();
-            Ok(tx.update_node(index_id, props)?)
-        })
+        self.ensure_entity_index_loaded()?;
+        self.entity_index.write().insert(key.to_string(), node_id);
+        self.persist_entity_index()
     }
 
     fn index_get(&self, key: &str) -> RepositoryResult<NodeId> {
-        let index_id = self.get_or_create_index_node()?;
-        let node = self.db_read(|tx| Ok(tx.get_node(index_id)?))?;
-        let node_id_i64 = node
-            .get_property(key)
-            .and_then(|v| v.as_int())
-            .ok_or_else(|| RepositoryError::NotFound {
-                entity_type: "IndexEntry".into(),
-                id: key.to_string(),
-            })?;
-        NodeId::new(node_id_i64 as u64)
-            .map_err(|e| RepositoryError::Database(format!("Invalid NodeId: {e}")))
+        self.ensure_entity_index_loaded()?;
+
+        if let Some(node_id) = self.entity_index.read().get(key).copied() {
+            return Ok(node_id);
+        }
+
+        Err(RepositoryError::NotFound {
+            entity_type: "IndexEntry".into(),
+            id: key.to_string(),
+        })
     }
 
     // --- Index key formatters ---
@@ -1936,43 +1916,35 @@ mod tests {
     }
 
     #[test]
-    fn index_recovery_picks_oldest_valid_node_when_cache_is_stale() {
+    fn index_set_and_get_roundtrip_uses_sidecar_cache() {
         let db = Arc::new(AletheiaDB::new().expect("db"));
         let repo = AletheiaRepository::new_anon(db);
-
-        let oldest = repo.get_or_create_index_node().expect("first index node");
-        let newer = repo
+        let target = repo
             .db_write(|tx| {
-                let props = PropertyMapBuilder::new()
-                    .insert(INDEX_KEY_SELF, "harness-index")
-                    .build();
-                Ok(tx.create_node(LABEL_INDEX, props)?)
+                Ok(tx.create_node(
+                    LABEL_SESSION,
+                    PropertyMapBuilder::new().insert("id", "target").build(),
+                )?)
             })
-            .expect("second index node");
-        assert!(newer.as_u64() > oldest.as_u64());
+            .expect("target node");
 
-        let stale = NodeId::new(999_999).expect("valid stale node id");
-        *repo.index_node_id.write() = Some(stale);
-
-        let recovered = repo
-            .get_or_create_index_node()
-            .expect("recovered index node");
-        assert_eq!(recovered, oldest);
+        repo.index_set("session:test", target)
+            .expect("index write should succeed");
+        let resolved = repo
+            .index_get("session:test")
+            .expect("index get should resolve");
+        assert_eq!(resolved, target);
     }
 
     #[test]
-    fn index_recovery_creates_new_when_no_index_node_exists() {
+    fn index_get_missing_key_returns_not_found() {
         let db = Arc::new(AletheiaDB::new().expect("db"));
         let repo = AletheiaRepository::new_anon(db);
 
-        let stale = NodeId::new(999_999).expect("valid stale node id");
-        *repo.index_node_id.write() = Some(stale);
-
-        let recovered = repo.get_or_create_index_node().expect("created index node");
-        assert!(
-            repo.is_valid_index_node_id(recovered)
-                .expect("index node validity check")
-        );
+        let err = repo
+            .index_get("session:missing")
+            .expect_err("missing index key should fail");
+        assert!(matches!(err, RepositoryError::NotFound { .. }));
     }
 
     // === Session tests ===

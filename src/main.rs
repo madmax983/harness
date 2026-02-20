@@ -374,6 +374,8 @@ async fn main() -> Result<()> {
         })
         .historical(
             HistoricalConfigBuilder::new()
+                .max_versions_per_entity(100000)
+                .unwrap()
                 .enable_cold_storage(true)
                 .cold_storage_path(db_path.join("cold.redb"))
                 .migration_age_threshold(std::time::Duration::from_secs(3600))

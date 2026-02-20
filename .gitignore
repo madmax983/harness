@@ -10,3 +10,4 @@ aletheiadb/
 .harness-data/
 .harness-index
 .harness-mcp-session
+.harness-entity-index.json
