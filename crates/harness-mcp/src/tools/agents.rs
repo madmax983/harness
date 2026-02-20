@@ -450,6 +450,8 @@ pub struct RunCodingAgentSchedulesResponse {
     pub inspected_at: String,
     pub inspected_count: usize,
     pub executed_count: usize,
+    /// Number of queued workflow runs consumed by the executor heartbeat.
+    pub workflow_runs_consumed: usize,
     pub results: Vec<CodingAgentScheduleRunResult>,
 }
 

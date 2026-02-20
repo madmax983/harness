@@ -1556,6 +1556,7 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
             inspected_at: now.to_rfc3339(),
             inspected_count,
             executed_count,
+            workflow_runs_consumed: 0,
             results,
         })
     }
@@ -1722,7 +1723,7 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
     pub(crate) async fn run_coding_agent_scheduler_heartbeat_once(
         &self,
     ) -> HandlerResult<tools::RunCodingAgentSchedulesResponse> {
-        let response = self
+        let mut response = self
             .run_coding_agent_schedules_core(
                 None,
                 CODING_AGENT_HEARTBEAT_MAX_SCHEDULES,
@@ -1730,7 +1731,16 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
                 false,
             )
             .await?;
-        let _ = self.run_workflow_executor_heartbeat_once().await?;
+        let workflow_runs_consumed = self.run_workflow_executor_heartbeat_once().await?;
+        response.workflow_runs_consumed = workflow_runs_consumed;
+        if workflow_runs_consumed > 0 {
+            tracing::debug!(
+                inspected_count = response.inspected_count,
+                executed_count = response.executed_count,
+                workflow_runs_consumed,
+                "Scheduler heartbeat consumed queued workflow runs"
+            );
+        }
         Ok(response)
     }
 
@@ -8419,6 +8429,12 @@ mod tests {
                 .and_then(serde_json::Value::as_u64),
             Some(1)
         );
+        assert_eq!(
+            run.get("workflow_runs_consumed")
+                .and_then(serde_json::Value::as_u64),
+            Some(0),
+            "direct run_coding_agent_schedules calls should not consume queued workflow runs"
+        );
         let results = run
             .get("results")
             .and_then(serde_json::Value::as_array)
@@ -8565,6 +8581,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(run.executed_count, 1);
+        assert_eq!(
+            run.workflow_runs_consumed, 1,
+            "heartbeat should report one consumed compatibility workflow run"
+        );
         assert_eq!(run.results.len(), 1);
         assert_eq!(run.results[0].schedule_id, schedule_id);
         assert!(run.results[0].executed);
@@ -9146,10 +9166,18 @@ mod tests {
             .unwrap()
             .to_string();
 
-        handler
+        let heartbeat = handler
             .run_coding_agent_scheduler_heartbeat_once()
             .await
             .unwrap();
+        assert_eq!(
+            heartbeat.executed_count, 0,
+            "no schedules are due in this scenario; executed_count tracks schedules only"
+        );
+        assert_eq!(
+            heartbeat.workflow_runs_consumed, 1,
+            "executor should still consume the queued workflow run"
+        );
 
         let run = handler
             .call_tool(

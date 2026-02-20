@@ -251,11 +251,12 @@ pub async fn start_mcp_server<R: Repository + 'static>(
                 .await
             {
                 Ok(run) => {
-                    if run.executed_count > 0 {
+                    if run.executed_count > 0 || run.workflow_runs_consumed > 0 {
                         tracing::info!(
                             inspected_count = run.inspected_count,
                             executed_count = run.executed_count,
-                            "Coding-agent scheduler heartbeat executed due schedules"
+                            workflow_runs_consumed = run.workflow_runs_consumed,
+                            "Coding-agent scheduler heartbeat completed work"
                         );
                     }
                 }
