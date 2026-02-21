@@ -338,6 +338,10 @@ fn default_schedule_task_priority() -> String {
     "medium".to_string()
 }
 
+fn default_schedule_backend() -> String {
+    "local_cli".to_string()
+}
+
 fn default_schedule_max_schedules() -> usize {
     10
 }
@@ -358,6 +362,18 @@ pub struct ScheduleCodingAgentsRequest {
     pub task_priority: String,
     #[serde(default = "default_schedule_auto_dispatch")]
     pub auto_dispatch: bool,
+    /// Execution backend: local_cli (default) or jules.
+    #[serde(default = "default_schedule_backend")]
+    pub backend: String,
+    /// Jules source context (required when backend=jules).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jules_source: Option<String>,
+    /// Optional director state file path for Jules runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jules_state_path: Option<String>,
+    /// Optional max cycles for `director run --max-cycles`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jules_max_cycles: Option<u32>,
     /// Optional RFC3339 timestamp for first run; defaults to now.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start_at: Option<String>,
@@ -376,6 +392,13 @@ pub struct ScheduleCodingAgentsResponse {
     pub task_title_template: String,
     pub task_priority: String,
     pub auto_dispatch: bool,
+    pub backend: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jules_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jules_state_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jules_max_cycles: Option<u32>,
     pub next_run_at: String,
 }
 
@@ -399,6 +422,13 @@ pub struct CodingAgentScheduleInfo {
     pub task_title_template: String,
     pub task_priority: String,
     pub auto_dispatch: bool,
+    pub backend: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jules_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jules_state_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jules_max_cycles: Option<u32>,
     pub enabled: bool,
     pub created_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]

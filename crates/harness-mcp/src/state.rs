@@ -84,6 +84,10 @@ pub struct AgentSpawnSpec {
     pub poll_interval_secs: u64,
 }
 
+fn default_schedule_backend() -> String {
+    "local_cli".to_string()
+}
+
 /// Scheduled coding-agent maintenance workload definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodingAgentSchedule {
@@ -94,6 +98,14 @@ pub struct CodingAgentSchedule {
     pub task_title_template: String,
     pub task_priority: String,
     pub auto_dispatch: bool,
+    #[serde(default = "default_schedule_backend")]
+    pub backend: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jules_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jules_state_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jules_max_cycles: Option<u32>,
     pub enabled: bool,
     pub created_by: AgentId,
     pub created_at: DateTime<Utc>,

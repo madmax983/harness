@@ -4,6 +4,7 @@
 //! via the MCP protocol. The handler dispatches tool calls by name.
 
 use std::collections::HashMap;
+use std::process::Stdio;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -16,6 +17,7 @@ use harness_persistence::{
 };
 use serde::Deserialize;
 use tokio::sync::RwLock;
+use tokio::time::{Duration, timeout};
 
 use crate::state::{AgentSpawnSpec, HiveState};
 use crate::tools;
@@ -92,6 +94,21 @@ enum NudgeMode {
     Replan,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScheduleDispatchBackend {
+    LocalCli,
+    Jules,
+}
+
+impl ScheduleDispatchBackend {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalCli => "local_cli",
+            Self::Jules => "jules",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct TeamTemplateMember {
     name: String,
@@ -128,6 +145,26 @@ struct TeamTemplateTomlMember {
     directive: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct JulesDispatchOutcome {
+    status: String,
+    evidence_status: String,
+    notes: String,
+    last_error: Option<String>,
+    payload: Option<serde_json::Value>,
+    dispatched_assignment_count: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct JulesDirectorJsonOutput {
+    #[serde(default)]
+    schema_version: Option<u32>,
+    #[serde(default)]
+    exit_code: Option<i32>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
 struct SpawnWorkerParams<'a> {
     role: &'a str,
     cli_command: &'a str,
@@ -148,6 +185,9 @@ const TEAM_TEMPLATE_PATH_ENV: &str = "HARNESS_TEAM_TEMPLATE_PATH";
 const CODEX_ROLLOUT_MISSING_PATH_SIGNAL: &str = "state db missing rollout path";
 const CODEX_ROLLOUT_LIST_COMPONENT: &str = "codex_core::rollout::list";
 const CODEX_STDIN_WAIT_SIGNAL: &str = "reading prompt from stdin";
+const JULES_DIRECTOR_COMMAND_ENV: &str = "HARNESS_JULES_DIRECTOR_COMMAND";
+const JULES_DIRECTOR_TIMEOUT_ENV: &str = "HARNESS_JULES_DIRECTOR_TIMEOUT_SECS";
+const JULES_DIRECTOR_DEFAULT_TIMEOUT_SECS: u64 = 120;
 
 fn compare_scores_desc(lhs: f32, rhs: f32) -> std::cmp::Ordering {
     match (lhs.is_nan(), rhs.is_nan()) {
@@ -931,6 +971,47 @@ impl<R: Repository + 'static> HiveHandler<R> {
         Ok(base + chrono::Duration::minutes(cadence_i64))
     }
 
+    fn parse_schedule_dispatch_backend(raw: &str) -> HandlerResult<ScheduleDispatchBackend> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "local_cli" => Ok(ScheduleDispatchBackend::LocalCli),
+            "jules" => Ok(ScheduleDispatchBackend::Jules),
+            other => Err(HandlerError::InvalidArgs(format!(
+                "Invalid backend: {other}. Use 'local_cli' or 'jules'"
+            ))),
+        }
+    }
+
+    fn jules_director_command() -> String {
+        std::env::var(JULES_DIRECTOR_COMMAND_ENV).unwrap_or_else(|_| "director".to_string())
+    }
+
+    fn jules_director_timeout_secs() -> u64 {
+        std::env::var(JULES_DIRECTOR_TIMEOUT_ENV)
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(JULES_DIRECTOR_DEFAULT_TIMEOUT_SECS)
+    }
+
+    fn truncate_for_payload(value: &str, max_chars: usize) -> String {
+        let mut iter = value.chars();
+        let truncated: String = iter.by_ref().take(max_chars).collect();
+        if iter.next().is_some() {
+            format!("{truncated}...(truncated)")
+        } else {
+            truncated
+        }
+    }
+
+    fn map_jules_exit_code(exit_code: i32) -> (&'static str, &'static str, &'static str) {
+        match exit_code {
+            0 => ("queued", "pending", "jules_dispatched"),
+            10 | 12 | 13 | 14 => ("blocked", "blocked", "jules_permanent_error"),
+            11 => ("failed", "failed", "jules_transient_error"),
+            _ => ("failed", "failed", "jules_unknown_error"),
+        }
+    }
+
     fn schedule_to_info(
         schedule: &crate::state::CodingAgentSchedule,
     ) -> tools::CodingAgentScheduleInfo {
@@ -942,6 +1023,10 @@ impl<R: Repository + 'static> HiveHandler<R> {
             task_title_template: schedule.task_title_template.clone(),
             task_priority: schedule.task_priority.clone(),
             auto_dispatch: schedule.auto_dispatch,
+            backend: schedule.backend.clone(),
+            jules_source: schedule.jules_source.clone(),
+            jules_state_path: schedule.jules_state_path.clone(),
+            jules_max_cycles: schedule.jules_max_cycles,
             enabled: schedule.enabled,
             created_at: schedule.created_at.to_rfc3339(),
             last_run_at: schedule.last_run_at.map(|ts| ts.to_rfc3339()),
@@ -1393,6 +1478,197 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
         .await
     }
 
+    async fn dispatch_schedule_to_jules(
+        &self,
+        schedule: &crate::state::CodingAgentSchedule,
+        task_id: TaskId,
+        run_at: DateTime<Utc>,
+    ) -> JulesDispatchOutcome {
+        let Some(source_raw) = schedule.jules_source.as_deref() else {
+            return JulesDispatchOutcome {
+                status: "blocked".to_string(),
+                evidence_status: "blocked".to_string(),
+                notes: "jules_config_invalid".to_string(),
+                last_error: Some(
+                    "backend=jules requires non-empty jules_source on the schedule".to_string(),
+                ),
+                payload: None,
+                dispatched_assignment_count: 0,
+            };
+        };
+        let source = source_raw.trim();
+        if source.is_empty() {
+            return JulesDispatchOutcome {
+                status: "blocked".to_string(),
+                evidence_status: "blocked".to_string(),
+                notes: "jules_config_invalid".to_string(),
+                last_error: Some(
+                    "backend=jules requires non-empty jules_source on the schedule".to_string(),
+                ),
+                payload: None,
+                dispatched_assignment_count: 0,
+            };
+        }
+
+        if schedule.jules_max_cycles.is_some_and(|value| value == 0) {
+            return JulesDispatchOutcome {
+                status: "blocked".to_string(),
+                evidence_status: "blocked".to_string(),
+                notes: "jules_config_invalid".to_string(),
+                last_error: Some("jules_max_cycles must be greater than 0".to_string()),
+                payload: None,
+                dispatched_assignment_count: 0,
+            };
+        }
+
+        let rendered_prompt = Self::render_schedule_template(
+            &schedule.prompt_template,
+            &schedule.name,
+            &run_at.to_rfc3339(),
+        );
+        let goal = format!(
+            "Schedule '{}' dispatch for harness task {} at {}.\n\nPrompt:\n{}",
+            schedule.name,
+            task_id.as_uuid(),
+            run_at.to_rfc3339(),
+            rendered_prompt
+        );
+
+        let command = Self::jules_director_command();
+        let mut args = vec!["run".to_string(), goal, source.to_string()];
+        if let Some(max_cycles) = schedule.jules_max_cycles {
+            args.push("--max-cycles".to_string());
+            args.push(max_cycles.to_string());
+        }
+        if let Some(state_path) = schedule
+            .jules_state_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            args.push("--state".to_string());
+            args.push(state_path.to_string());
+        }
+        args.push("--json".to_string());
+
+        let timeout_secs = Self::jules_director_timeout_secs();
+        let command_lower = command.to_ascii_lowercase();
+        let use_cmd_wrapper =
+            cfg!(windows) && (command_lower.ends_with(".cmd") || command_lower.ends_with(".bat"));
+        let mut process = if use_cmd_wrapper {
+            let mut wrapped = tokio::process::Command::new("cmd.exe");
+            wrapped.arg("/c").arg(&command);
+            wrapped
+        } else {
+            tokio::process::Command::new(&command)
+        };
+        process
+            .args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let output = match timeout(Duration::from_secs(timeout_secs), process.output()).await {
+            Err(_) => {
+                return JulesDispatchOutcome {
+                    status: "blocked".to_string(),
+                    evidence_status: "blocked".to_string(),
+                    notes: "jules_command_timeout".to_string(),
+                    last_error: Some(format!(
+                        "Jules director command timed out after {timeout_secs}s"
+                    )),
+                    payload: Some(serde_json::json!({
+                        "backend": "jules",
+                        "director_command": command,
+                        "director_args": args,
+                        "timeout_secs": timeout_secs,
+                    })),
+                    dispatched_assignment_count: 0,
+                };
+            }
+            Ok(Err(error)) => {
+                return JulesDispatchOutcome {
+                    status: "blocked".to_string(),
+                    evidence_status: "blocked".to_string(),
+                    notes: "jules_command_spawn_failed".to_string(),
+                    last_error: Some(format!("Failed to launch Jules director command: {error}")),
+                    payload: Some(serde_json::json!({
+                        "backend": "jules",
+                        "director_command": command,
+                        "director_args": args,
+                    })),
+                    dispatched_assignment_count: 0,
+                };
+            }
+            Ok(Ok(output)) => output,
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout_trimmed = stdout.trim();
+        let stderr_trimmed = stderr.trim();
+        let process_exit_code = output.status.code().unwrap_or(-1);
+
+        let parsed = match serde_json::from_str::<JulesDirectorJsonOutput>(stdout_trimmed) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                return JulesDispatchOutcome {
+                    status: "blocked".to_string(),
+                    evidence_status: "blocked".to_string(),
+                    notes: "jules_invalid_output".to_string(),
+                    last_error: Some(format!("Jules director output was not valid JSON: {error}")),
+                    payload: Some(serde_json::json!({
+                        "backend": "jules",
+                        "director_command": command,
+                        "director_args": args,
+                        "process_exit_code": process_exit_code,
+                        "stdout": Self::truncate_for_payload(stdout_trimmed, 1024),
+                        "stderr": Self::truncate_for_payload(stderr_trimmed, 1024),
+                    })),
+                    dispatched_assignment_count: 0,
+                };
+            }
+        };
+
+        let director_exit_code = parsed.exit_code.unwrap_or(process_exit_code);
+        let (status, evidence_status, notes) = Self::map_jules_exit_code(director_exit_code);
+        let parsed_error = parsed
+            .error
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string);
+        let stderr_error =
+            (!stderr_trimmed.is_empty()).then(|| Self::truncate_for_payload(stderr_trimmed, 1024));
+        let last_error = if status == "queued" {
+            None
+        } else {
+            parsed_error.or(stderr_error).or_else(|| {
+                Some(format!(
+                    "Jules director exited with code {director_exit_code}"
+                ))
+            })
+        };
+
+        JulesDispatchOutcome {
+            status: status.to_string(),
+            evidence_status: evidence_status.to_string(),
+            notes: notes.to_string(),
+            last_error,
+            payload: Some(serde_json::json!({
+                "backend": "jules",
+                "director_command": command,
+                "director_args": args,
+                "process_exit_code": process_exit_code,
+                "director_exit_code": director_exit_code,
+                "schema_version": parsed.schema_version,
+                "error": parsed.error,
+                "stdout": Self::truncate_for_payload(stdout_trimmed, 1024),
+                "stderr": Self::truncate_for_payload(stderr_trimmed, 1024),
+            })),
+            dispatched_assignment_count: usize::from(status == "queued"),
+        }
+    }
+
     async fn run_coding_agent_schedules_core(
         &self,
         schedule_id: Option<&str>,
@@ -1484,32 +1760,55 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
                     updated_at: now,
                 };
                 if schedule.auto_dispatch {
-                    let assignments = self.assign_tasks_to_idle_workers(&created_ids).await?;
-                    dispatched_assignment_count = assignments.len();
-                    if let Some((_task_id, assigned_agent_id)) = assignments.first() {
-                        workflow_run.worker_agent_id = Some(*assigned_agent_id);
-                        workflow_run.notes = Some("assigned_existing_worker".to_string());
-                    } else {
-                        match self
-                            .spawn_worker_for_scheduled_task(&schedule, created_id, now)
-                            .await
-                        {
-                            Ok(agent_id) => {
-                                dispatched_assignment_count = 1;
-                                spawned_agent_id = Some(agent_id.as_uuid().to_string());
-                                workflow_run.worker_agent_id = Some(agent_id);
-                                workflow_run.notes = Some("spawned_worker".to_string());
+                    match Self::parse_schedule_dispatch_backend(&schedule.backend) {
+                        Ok(ScheduleDispatchBackend::LocalCli) => {
+                            let assignments =
+                                self.assign_tasks_to_idle_workers(&created_ids).await?;
+                            dispatched_assignment_count = assignments.len();
+                            if let Some((_task_id, assigned_agent_id)) = assignments.first() {
+                                workflow_run.worker_agent_id = Some(*assigned_agent_id);
+                                workflow_run.notes = Some("assigned_existing_worker".to_string());
+                            } else {
+                                match self
+                                    .spawn_worker_for_scheduled_task(&schedule, created_id, now)
+                                    .await
+                                {
+                                    Ok(agent_id) => {
+                                        dispatched_assignment_count = 1;
+                                        spawned_agent_id = Some(agent_id.as_uuid().to_string());
+                                        workflow_run.worker_agent_id = Some(agent_id);
+                                        workflow_run.notes = Some("spawned_worker".to_string());
+                                    }
+                                    Err(error) => {
+                                        workflow_run.status = "blocked".to_string();
+                                        workflow_run.evidence_status = "blocked".to_string();
+                                        workflow_run.last_error = Some(error.to_string());
+                                        workflow_run.notes = Some("dispatch_failed".to_string());
+                                        tracing::warn!(
+                                            schedule_id = %schedule.schedule_id,
+                                            error = %error,
+                                            "Scheduler failed to spawn worker for due schedule"
+                                        );
+                                    }
+                                }
                             }
-                            Err(error) => {
-                                workflow_run.status = "blocked".to_string();
-                                workflow_run.last_error = Some(error.to_string());
-                                workflow_run.notes = Some("dispatch_failed".to_string());
-                                tracing::warn!(
-                                    schedule_id = %schedule.schedule_id,
-                                    error = %error,
-                                    "Scheduler failed to spawn worker for due schedule"
-                                );
-                            }
+                        }
+                        Ok(ScheduleDispatchBackend::Jules) => {
+                            let outcome = self
+                                .dispatch_schedule_to_jules(&schedule, created_id, now)
+                                .await;
+                            dispatched_assignment_count = outcome.dispatched_assignment_count;
+                            workflow_run.status = outcome.status;
+                            workflow_run.evidence_status = outcome.evidence_status;
+                            workflow_run.last_error = outcome.last_error;
+                            workflow_run.notes = Some(outcome.notes);
+                            workflow_run.payload = outcome.payload;
+                        }
+                        Err(error) => {
+                            workflow_run.status = "blocked".to_string();
+                            workflow_run.evidence_status = "blocked".to_string();
+                            workflow_run.last_error = Some(error.to_string());
+                            workflow_run.notes = Some("dispatch_failed".to_string());
                         }
                     }
                 }
@@ -1524,7 +1823,12 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
                     .upsert_coding_agent_schedule(schedule.clone())
                     .await;
                 self.persist_coding_agent_schedule(&schedule).await?;
-                workflow_run.updated_at = Utc::now();
+                let next_updated_at = Utc::now();
+                workflow_run.updated_at = if next_updated_at <= workflow_run.updated_at {
+                    workflow_run.updated_at + chrono::Duration::microseconds(1)
+                } else {
+                    next_updated_at
+                };
                 workflow_run_id = Some(workflow_run.run_id.clone());
                 self.upsert_and_persist_coding_agent_workflow_run(
                     workflow_run,
@@ -4994,6 +5298,45 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
         }
         let task_priority = req.task_priority.to_ascii_lowercase();
         let _ = Self::parse_priority(&task_priority)?;
+        let backend_kind = Self::parse_schedule_dispatch_backend(req.backend.trim())?;
+        let backend = backend_kind.as_str().to_string();
+        let jules_source = req
+            .jules_source
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string);
+        let jules_state_path = req
+            .jules_state_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string);
+        if req.jules_max_cycles.is_some_and(|value| value == 0) {
+            return Err(HandlerError::InvalidArgs(
+                "jules_max_cycles must be greater than 0".to_string(),
+            ));
+        }
+        match backend_kind {
+            ScheduleDispatchBackend::LocalCli => {
+                if jules_source.is_some()
+                    || jules_state_path.is_some()
+                    || req.jules_max_cycles.is_some()
+                {
+                    return Err(HandlerError::InvalidArgs(
+                        "jules_source, jules_state_path, and jules_max_cycles require backend='jules'"
+                            .to_string(),
+                    ));
+                }
+            }
+            ScheduleDispatchBackend::Jules => {
+                if jules_source.is_none() {
+                    return Err(HandlerError::InvalidArgs(
+                        "backend='jules' requires non-empty jules_source".to_string(),
+                    ));
+                }
+            }
+        }
 
         let now = Utc::now();
         let start_at = if let Some(start_at_raw) = req.start_at.as_deref() {
@@ -5013,6 +5356,10 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
             task_title_template: task_title_template.to_string(),
             task_priority: task_priority.clone(),
             auto_dispatch: req.auto_dispatch,
+            backend: backend.clone(),
+            jules_source: jules_source.clone(),
+            jules_state_path: jules_state_path.clone(),
+            jules_max_cycles: req.jules_max_cycles,
             enabled: true,
             created_by: strategoi_id,
             created_at: now,
@@ -5030,6 +5377,10 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
             task_title_template: task_title_template.to_string(),
             task_priority,
             auto_dispatch: req.auto_dispatch,
+            backend,
+            jules_source,
+            jules_state_path,
+            jules_max_cycles: req.jules_max_cycles,
             next_run_at: start_at.to_rfc3339(),
         })
     }
@@ -8735,6 +9086,271 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_schedule_coding_agents_jules_backend_validation_and_roundtrip() {
+        let (_state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let err = handler
+            .call_tool(
+                "schedule_coding_agents",
+                serde_json::json!({
+                    "name": "jules-missing-source",
+                    "cadence_minutes": 60,
+                    "prompt_template": "Run jules review",
+                    "backend": "jules"
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("jules_source"),
+            "jules backend should require a non-empty jules_source"
+        );
+
+        let schedule = handler
+            .call_tool(
+                "schedule_coding_agents",
+                serde_json::json!({
+                    "name": "jules-scheduled-review",
+                    "cadence_minutes": 720,
+                    "prompt_template": "Run jules review and open PR with findings fixes.",
+                    "task_title_template": "Jules run [{name}]",
+                    "task_priority": "high",
+                    "auto_dispatch": false,
+                    "backend": "jules",
+                    "jules_source": "github.com/acme/harness",
+                    "jules_max_cycles": 42
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            schedule.get("backend").and_then(serde_json::Value::as_str),
+            Some("jules")
+        );
+        assert_eq!(
+            schedule
+                .get("jules_source")
+                .and_then(serde_json::Value::as_str),
+            Some("github.com/acme/harness")
+        );
+        assert_eq!(
+            schedule
+                .get("jules_max_cycles")
+                .and_then(serde_json::Value::as_u64),
+            Some(42)
+        );
+
+        let listed = handler
+            .call_tool("list_coding_agent_schedules", serde_json::json!({}))
+            .await
+            .unwrap();
+        let schedules = listed
+            .get("schedules")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        assert_eq!(schedules.len(), 1);
+        assert_eq!(
+            schedules[0]
+                .get("backend")
+                .and_then(serde_json::Value::as_str),
+            Some("jules")
+        );
+        assert_eq!(
+            schedules[0]
+                .get("jules_source")
+                .and_then(serde_json::Value::as_str),
+            Some("github.com/acme/harness")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_auto_dispatch_jules_backend_records_dispatched_run() {
+        let (_state, handler) = setup().await;
+        let _env_lock = jules_env_lock().lock().unwrap();
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let fake_director =
+            write_fake_jules_director_script(0, r#"{"schema_version":1,"exit_code":0}"#);
+        let _env_guard =
+            EnvVarGuard::set_path("HARNESS_JULES_DIRECTOR_COMMAND", fake_director.path());
+
+        let schedule = handler
+            .call_tool(
+                "schedule_coding_agents",
+                serde_json::json!({
+                    "name": "jules-auto-dispatch",
+                    "cadence_minutes": 60,
+                    "prompt_template": "Perform scheduled code review and follow-up fixes.",
+                    "task_title_template": "Jules auto [{name}]",
+                    "task_priority": "high",
+                    "auto_dispatch": true,
+                    "backend": "jules",
+                    "jules_source": "github.com/acme/harness"
+                }),
+            )
+            .await
+            .unwrap();
+        let schedule_id = schedule
+            .get("schedule_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap()
+            .to_string();
+
+        let run = handler
+            .call_tool(
+                "run_coding_agent_schedules",
+                serde_json::json!({
+                    "schedule_id": schedule_id,
+                    "force_run": true
+                }),
+            )
+            .await
+            .unwrap();
+
+        let results = run
+            .get("results")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0]
+                .get("dispatched_assignment_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(1),
+            "jules dispatch should count as one successful auto-dispatch"
+        );
+        assert!(
+            results[0].get("spawned_agent_id").is_none(),
+            "jules backend should not spawn a local worker process"
+        );
+
+        let workflow_run_id = results[0]
+            .get("workflow_run_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap()
+            .to_string();
+        let workflow_run = handler
+            .call_tool(
+                "get_workflow_run",
+                serde_json::json!({ "workflow_run_id": workflow_run_id }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            workflow_run
+                .get("run")
+                .and_then(|run| run.get("status"))
+                .and_then(serde_json::Value::as_str),
+            Some("queued")
+        );
+        assert_eq!(
+            workflow_run
+                .get("run")
+                .and_then(|run| run.get("payload"))
+                .and_then(|payload| payload.get("backend"))
+                .and_then(serde_json::Value::as_str),
+            Some("jules")
+        );
+        assert_eq!(
+            workflow_run
+                .get("run")
+                .and_then(|run| run.get("payload"))
+                .and_then(|payload| payload.get("director_exit_code"))
+                .and_then(serde_json::Value::as_i64),
+            Some(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_auto_dispatch_jules_backend_marks_invalid_json_blocked() {
+        let (_state, handler) = setup().await;
+        let _env_lock = jules_env_lock().lock().unwrap();
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        let fake_director = write_fake_jules_director_script(0, "not-json");
+        let _env_guard =
+            EnvVarGuard::set_path("HARNESS_JULES_DIRECTOR_COMMAND", fake_director.path());
+
+        let schedule = handler
+            .call_tool(
+                "schedule_coding_agents",
+                serde_json::json!({
+                    "name": "jules-invalid-json",
+                    "cadence_minutes": 60,
+                    "prompt_template": "Simulate invalid jules output",
+                    "task_title_template": "Jules invalid [{name}]",
+                    "task_priority": "high",
+                    "auto_dispatch": true,
+                    "backend": "jules",
+                    "jules_source": "github.com/acme/harness"
+                }),
+            )
+            .await
+            .unwrap();
+        let schedule_id = schedule
+            .get("schedule_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap()
+            .to_string();
+
+        let run = handler
+            .call_tool(
+                "run_coding_agent_schedules",
+                serde_json::json!({
+                    "schedule_id": schedule_id,
+                    "force_run": true
+                }),
+            )
+            .await
+            .unwrap();
+        let workflow_run_id = run
+            .get("results")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|results| results.first())
+            .and_then(|result| result.get("workflow_run_id"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap()
+            .to_string();
+
+        let workflow_run = handler
+            .call_tool(
+                "get_workflow_run",
+                serde_json::json!({ "workflow_run_id": workflow_run_id }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            workflow_run
+                .get("run")
+                .and_then(|run| run.get("status"))
+                .and_then(serde_json::Value::as_str),
+            Some("blocked"),
+            "invalid jules output should block the workflow run"
+        );
+        assert!(
+            workflow_run
+                .get("run")
+                .and_then(|run| run.get("last_error"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|message| message.contains("JSON")),
+            "invalid output should surface a JSON parse error"
+        );
+    }
+
+    #[tokio::test]
     async fn test_scheduler_run_records_workflow_run_state() {
         let (_state, handler) = setup().await;
 
@@ -9797,6 +10413,78 @@ role = "developer"
                 vec!["-c".to_string(), "sleep 5".to_string()],
             )
         }
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+            let original = std::env::var_os(key);
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(original) = self.original.take() {
+                unsafe {
+                    std::env::set_var(self.key, original);
+                }
+            } else {
+                unsafe {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    fn write_fake_jules_director_script(
+        exit_code: i32,
+        stdout_payload: &str,
+    ) -> tempfile::NamedTempFile {
+        let mut script = if cfg!(windows) {
+            tempfile::Builder::new()
+                .prefix("fake-jules-director-")
+                .suffix(".cmd")
+                .tempfile()
+                .expect("create temp .cmd script")
+        } else {
+            tempfile::Builder::new()
+                .prefix("fake-jules-director-")
+                .suffix(".sh")
+                .tempfile()
+                .expect("create temp .sh script")
+        };
+
+        if cfg!(windows) {
+            writeln!(script, "@echo off").unwrap();
+            writeln!(script, "echo {stdout_payload}").unwrap();
+            writeln!(script, "exit /b {exit_code}").unwrap();
+        } else {
+            writeln!(script, "#!/bin/sh").unwrap();
+            writeln!(script, "printf '%s\\n' '{stdout_payload}'").unwrap();
+            writeln!(script, "exit {exit_code}").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = script.as_file().metadata().unwrap().permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(script.path(), perms).unwrap();
+            }
+        }
+
+        script
+    }
+
+    fn jules_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
 
     fn test_shell_for_rollout_resume_failure() -> (String, Vec<String>) {

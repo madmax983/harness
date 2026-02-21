@@ -1277,6 +1277,32 @@ pub fn tool_definitions() -> Vec<Tool> {
                     ),
                 ),
                 (
+                    "backend".into(),
+                    prop_with_default(
+                        "string",
+                        "Execution backend: local_cli (default) or jules",
+                        serde_json::Value::String("local_cli".into()),
+                    ),
+                ),
+                (
+                    "jules_source".into(),
+                    prop(
+                        "string",
+                        "Jules source context (required when backend=jules)",
+                    ),
+                ),
+                (
+                    "jules_state_path".into(),
+                    prop("string", "Optional director state file path for Jules runs"),
+                ),
+                (
+                    "jules_max_cycles".into(),
+                    prop(
+                        "integer",
+                        "Optional max cycles for `director run --max-cycles`",
+                    ),
+                ),
+                (
                     "start_at".into(),
                     prop(
                         "string",
