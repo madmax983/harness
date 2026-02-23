@@ -2160,6 +2160,30 @@ pub fn tool_definitions() -> Vec<Tool> {
                 ),
             ])),
         ),
+        // --- Chaos Engine ---
+        make_tool(
+            "inject_chaos",
+            "Inject controlled failures (kill agents, block tasks) into the hive to test resilience.",
+            vec!["kind"],
+            with_agent_id(HashMap::from([
+                (
+                    "kind".into(),
+                    prop("string", "Chaos kind: 'kill_agent' or 'block_task'"),
+                ),
+                (
+                    "target_agent_id".into(),
+                    prop("string", "Optional agent ID to kill (random if omitted)"),
+                ),
+                (
+                    "target_task_id".into(),
+                    prop("string", "Optional task ID to block (random if omitted)"),
+                ),
+                (
+                    "duration".into(),
+                    prop("integer", "Optional duration in seconds (reserved for future use)"),
+                ),
+            ])),
+        ),
     ]
 }
 
@@ -2172,7 +2196,7 @@ mod tests {
     #[test]
     fn test_tool_definitions_returns_expected_count() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 82);
+        assert_eq!(tools.len(), 83);
     }
 
     #[test]
