@@ -737,6 +737,12 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 let resp = self.handle_trigger_learning_cycle(req).await?;
                 Ok(serde_json::to_value(resp).unwrap())
             }
+            "dream_simulation" => {
+                let req: tools::DreamSimulationRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_dream_simulation(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
 
             _ => Err(HandlerError::UnknownTool(name.to_string())),
         }
@@ -818,6 +824,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
             "query_reasoning_bank",
             "get_learning_status",
             "trigger_learning_cycle",
+            "dream_simulation",
         ]
     }
 
@@ -7683,6 +7690,92 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
             ))),
         }
     }
+
+    async fn handle_dream_simulation(
+        &self,
+        req: tools::DreamSimulationRequest,
+    ) -> HandlerResult<tools::DreamSimulationResponse> {
+        let session_id = self.state.session_id();
+        let repo = self.state.repository();
+        let recorder = self.state.trajectory_recorder();
+        let bank = self.state.reasoning_bank();
+
+        // 1. Fetch recent trajectory events
+        let lookback = req.lookback_limit.min(200); // Cap at 200
+        let recent_events = recorder
+            .query(harness_persistence::TrajectoryQuery::new().with_limit(lookback))
+            .await
+            .unwrap_or_default();
+
+        // 2. Fetch active tasks
+        let active_tasks = repo
+            .list_tasks(session_id, Some(TaskStatus::InProgress))
+            .await?;
+
+        // 3. Find relevant patterns for active tasks
+        let mut insights = Vec::new();
+        let mut patterns_found = 0;
+
+        for task in &active_tasks {
+            // Find failure patterns for this task type
+            let fail_query = PatternQuery::new(&task.title)
+                .with_success_only(false)
+                .with_limit(3);
+
+            if let Ok(similars) = bank.find_similar(fail_query).await {
+                for sim in similars {
+                    if !sim.pattern.success() && sim.similarity > 0.1 {
+                        insights.push(tools::DreamInsight {
+                            kind: "risk".to_string(),
+                            description: format!(
+                                "Potential risk for task '{}': similar pattern '{}' failed previously ({:.0}% match).",
+                                task.title,
+                                sim.pattern.description(),
+                                sim.similarity * 100.0
+                            ),
+                            confidence: sim.similarity,
+                            related_task_ids: vec![task.id.as_uuid().to_string()],
+                        });
+                        patterns_found += 1;
+                    } else if sim.pattern.success() && sim.similarity > 0.1 {
+                        insights.push(tools::DreamInsight {
+                            kind: "opportunity".to_string(),
+                            description: format!(
+                                "Success pattern for task '{}': consider approach from '{}' ({:.0}% match).",
+                                task.title,
+                                sim.pattern.description(),
+                                sim.similarity * 100.0
+                            ),
+                            confidence: sim.similarity,
+                            related_task_ids: vec![task.id.as_uuid().to_string()],
+                        });
+                        patterns_found += 1;
+                    }
+                }
+            }
+        }
+
+        // 4. Generate narrative forecast (simplified heuristic for now)
+        let narrative = if insights.is_empty() {
+            "The hive is calm. No immediate risks detected based on historical patterns. Proceed with current trajectory.".to_string()
+        } else {
+            format!(
+                "The dream reveals {} potential futures. Focus attention on {} active tasks with high-risk patterns.",
+                insights.len(),
+                active_tasks.len()
+            )
+        };
+
+        Ok(tools::DreamSimulationResponse {
+            simulation_id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            recent_events_count: recent_events.len(),
+            active_tasks_count: active_tasks.len(),
+            patterns_found,
+            insights,
+            narrative_forecast: narrative,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -8034,7 +8127,8 @@ mod tests {
         assert!(names.contains(&"hive_observability_snapshot"));
         assert!(names.contains(&"collect_agent_artifacts"));
         assert!(names.contains(&"refresh_session"));
-        assert_eq!(names.len(), 71);
+        assert!(names.contains(&"dream_simulation"));
+        assert_eq!(names.len(), 72);
     }
 
     #[tokio::test]
@@ -11457,5 +11551,77 @@ role = "developer"
             HiveHandler::<AletheiaRepository>::node_id_to_entity_id(db.as_ref(), node_id, "edge");
 
         assert_eq!(mapped, format!("node-{}", node_id.as_u64()));
+    }
+
+    #[tokio::test]
+    async fn test_dream_simulation_returns_context() {
+        let (state, handler) = setup().await;
+
+        handler
+            .call_tool("register_agent", serde_json::json!({"role": "strategoi"}))
+            .await
+            .unwrap();
+
+        // 1. Create a task that is "In Progress" to trigger active task logic
+        let task_resp = handler
+            .call_tool(
+                "create_task",
+                serde_json::json!({
+                    "title": "Implement authentication",
+                    "description": "Add JWT support",
+                    "priority": "high"
+                }),
+            )
+            .await
+            .unwrap();
+        let task_resp: tools::CreateTaskResponse = serde_json::from_value(task_resp).unwrap();
+
+        handler
+            .call_tool(
+                "update_task_status",
+                serde_json::json!({
+                    "task_id": task_resp.task_id,
+                    "status": "in_progress",
+                    "summary": "Starting work"
+                }),
+            )
+            .await
+            .unwrap();
+
+        // 2. Add a pattern to ReasoningBank that indicates risk for "authentication"
+        let bank = state.reasoning_bank();
+        let pattern = TaskPattern::new(
+            "implement_feature",
+            AgentRole::Developer,
+            false, // failed pattern
+            "Failed to implement authentication due to token expiration bug",
+        );
+        bank.store_pattern(pattern).await.unwrap();
+
+        // 3. Call dream_simulation
+        let resp = handler
+            .call_tool(
+                "dream_simulation",
+                serde_json::json!({
+                    "lookback_limit": 10
+                }),
+            )
+            .await
+            .unwrap();
+
+        let dream: tools::DreamSimulationResponse = serde_json::from_value(resp).unwrap();
+
+        // Verify response structure
+        assert!(!dream.simulation_id.is_empty());
+        assert_eq!(dream.active_tasks_count, 1);
+
+        // Should find the risk pattern we just added
+        assert!(dream.patterns_found > 0);
+        let risk = dream.insights.iter().find(|i| i.kind == "risk").unwrap();
+        assert!(risk.description.contains("risk for task 'Implement authentication'"));
+        assert!(risk.description.contains("token expiration bug"));
+
+        // Narrative should be generated
+        assert!(!dream.narrative_forecast.is_empty());
     }
 }
