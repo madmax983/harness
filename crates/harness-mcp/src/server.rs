@@ -2132,6 +2132,34 @@ pub fn tool_definitions() -> Vec<Tool> {
                 ),
             )])),
         ),
+        // --- Dream Simulation ---
+        make_tool(
+            "dream_simulation",
+            "Generates a simulation context based on recent hive activity and historical patterns. Use this to predict future blockers or opportunities.",
+            vec![],
+            with_agent_id(HashMap::from([
+                (
+                    "project_id".into(),
+                    prop("string", "Optional project ID to focus the dream on"),
+                ),
+                (
+                    "lookback_limit".into(),
+                    prop_with_default(
+                        "integer",
+                        "Number of recent events to analyze (default: 50)",
+                        serde_json::Value::Number(50.into()),
+                    ),
+                ),
+                (
+                    "detailed_patterns".into(),
+                    prop_with_default(
+                        "boolean",
+                        "Whether to return detailed pattern data",
+                        serde_json::Value::Bool(false),
+                    ),
+                ),
+            ])),
+        ),
     ]
 }
 
@@ -2144,7 +2172,7 @@ mod tests {
     #[test]
     fn test_tool_definitions_returns_expected_count() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 81);
+        assert_eq!(tools.len(), 82);
     }
 
     #[test]
