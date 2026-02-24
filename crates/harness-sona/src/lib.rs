@@ -20,6 +20,8 @@ mod merit;
 mod service;
 mod types;
 
+pub mod experimental;
+
 pub use base_lora::BaseLoRA;
 pub use config::{BaseLoRAConfig, LearningLoopConfig, SonaConfig};
 pub use contribution::ContributionWeight;
