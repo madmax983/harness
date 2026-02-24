@@ -13,6 +13,7 @@ pub mod sona;
 
 // Nova experimental features
 pub mod activity_resonance;
+pub mod chaos;
 pub mod concept_algebra;
 pub mod graph_layout;
 pub mod link_prediction;
@@ -39,6 +40,7 @@ pub use sona::*;
 
 // Nova experimental features
 pub use activity_resonance::*;
+pub use chaos::*;
 pub use concept_algebra::*;
 pub use graph_layout::*;
 pub use link_prediction::*;

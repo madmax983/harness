@@ -743,6 +743,12 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 let resp = self.handle_dream_simulation(req).await?;
                 Ok(serde_json::to_value(resp).unwrap())
             }
+            "inject_chaos" => {
+                let req: tools::InjectChaosRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_inject_chaos(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
 
             _ => Err(HandlerError::UnknownTool(name.to_string())),
         }
@@ -825,6 +831,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
             "get_learning_status",
             "trigger_learning_cycle",
             "dream_simulation",
+            "inject_chaos",
         ]
     }
 
@@ -7776,6 +7783,20 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
             narrative_forecast: narrative,
         })
     }
+
+    async fn handle_inject_chaos(
+        &self,
+        req: tools::InjectChaosRequest,
+    ) -> HandlerResult<tools::InjectChaosResponse> {
+        // Enforce Strategoi-only access to prevent random agents from nuking the hive
+        self.require_strategoi(req._agent_id.as_deref()).await?;
+
+        let engine = crate::experimental::chaos::ChaosEngine::new(self.state.clone());
+        engine
+            .inject(req)
+            .await
+            .map_err(|e| HandlerError::InternalError(e))
+    }
 }
 
 #[cfg(test)]
@@ -8128,7 +8149,8 @@ mod tests {
         assert!(names.contains(&"collect_agent_artifacts"));
         assert!(names.contains(&"refresh_session"));
         assert!(names.contains(&"dream_simulation"));
-        assert_eq!(names.len(), 72);
+        assert!(names.contains(&"inject_chaos"));
+        assert_eq!(names.len(), 73);
     }
 
     #[tokio::test]

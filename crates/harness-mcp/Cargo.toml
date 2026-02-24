@@ -19,6 +19,7 @@ tracing.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 toml = "0.8"
+rand = "0.8"
 
 [dev-dependencies]
 tokio-test = "0.4"
