@@ -3,11 +3,11 @@
 //! Provides capabilities to simulate adverse conditions like agent failure
 //! and task blocking to test system resilience.
 
-use std::sync::Arc;
-use rand::seq::SliceRandom;
-use harness_persistence::{Repository, TaskStatus};
 use crate::state::HiveState;
 use crate::tools;
+use harness_persistence::{Repository, TaskStatus};
+use rand::seq::SliceRandom;
+use std::sync::Arc;
 
 /// The Chaos Engine allows injecting failures into the hive.
 pub struct ChaosEngine<R: Repository> {
@@ -51,13 +51,13 @@ impl<R: Repository + 'static> ChaosEngine<R> {
                 .map_err(|e| e.to_string())?;
 
             // Filter out strategoi to avoid killing the commander (unless explicit)
-            let eligible: Vec<_> = agents
-                .into_iter()
-                .filter(|a| !a.is_strategoi)
-                .collect();
+            let eligible: Vec<_> = agents.into_iter().filter(|a| !a.is_strategoi).collect();
 
             if eligible.is_empty() {
-                return Err("No eligible agents to kill (strategoi is protected from random kills)".to_string());
+                return Err(
+                    "No eligible agents to kill (strategoi is protected from random kills)"
+                        .to_string(),
+                );
             }
 
             let mut rng = rand::thread_rng();
@@ -128,10 +128,13 @@ impl<R: Repository + 'static> ChaosEngine<R> {
 mod tests {
     use super::*;
     use harness_orchestrator::{OrchestratorConfig, ProcessManager};
-    use harness_persistence::{Agent, AgentRole, InMemoryRepository, Session, Task, Priority, };
+    use harness_persistence::{Agent, AgentRole, InMemoryRepository, Priority, Session, Task};
     use std::sync::Arc;
 
-    async fn setup() -> (Arc<HiveState<InMemoryRepository>>, ChaosEngine<InMemoryRepository>) {
+    async fn setup() -> (
+        Arc<HiveState<InMemoryRepository>>,
+        ChaosEngine<InMemoryRepository>,
+    ) {
         let repo = Arc::new(InMemoryRepository::new());
         let session = Session::new(8);
         repo.create_session(&session).await.unwrap();
@@ -173,7 +176,11 @@ mod tests {
 
         let task = Task::new("Work", "Do work", Priority::Medium, state.session_id());
         state.repository().create_task(&task).await.unwrap();
-        state.repository().update_task_status(task.id, TaskStatus::InProgress, None).await.unwrap();
+        state
+            .repository()
+            .update_task_status(task.id, TaskStatus::InProgress, None)
+            .await
+            .unwrap();
 
         let res = engine.block_random_task(None).await.unwrap();
 

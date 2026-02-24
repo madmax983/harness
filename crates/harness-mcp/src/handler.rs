@@ -11640,7 +11640,10 @@ role = "developer"
         // Should find the risk pattern we just added
         assert!(dream.patterns_found > 0);
         let risk = dream.insights.iter().find(|i| i.kind == "risk").unwrap();
-        assert!(risk.description.contains("risk for task 'Implement authentication'"));
+        assert!(
+            risk.description
+                .contains("risk for task 'Implement authentication'")
+        );
         assert!(risk.description.contains("token expiration bug"));
 
         // Narrative should be generated

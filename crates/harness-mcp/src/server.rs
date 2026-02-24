@@ -2180,7 +2180,10 @@ pub fn tool_definitions() -> Vec<Tool> {
                 ),
                 (
                     "duration".into(),
-                    prop("integer", "Optional duration in seconds (reserved for future use)"),
+                    prop(
+                        "integer",
+                        "Optional duration in seconds (reserved for future use)",
+                    ),
                 ),
             ])),
         ),
