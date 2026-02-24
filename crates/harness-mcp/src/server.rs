@@ -2160,6 +2160,40 @@ pub fn tool_definitions() -> Vec<Tool> {
                 ),
             ])),
         ),
+        make_tool(
+            "generate_hive_music",
+            "Generate an audio representation (sonification) of hive activity and collective merit. Returns a base64-encoded WAV file.",
+            vec![],
+            with_agent_id(HashMap::from([
+                (
+                    "window_minutes".into(),
+                    prop_with_default(
+                        "integer",
+                        "Time window to analyze (default: 60)",
+                        serde_json::Value::Number(60.into()),
+                    ),
+                ),
+                (
+                    "scale".into(),
+                    prop(
+                        "string",
+                        "Musical scale: major, minor, diminished, pentatonic, auto",
+                    ),
+                ),
+                (
+                    "tempo".into(),
+                    prop("integer", "Tempo in BPM (default: auto based on success rate)"),
+                ),
+                (
+                    "include_messages".into(),
+                    prop_with_default(
+                        "boolean",
+                        "Include message chatter in the soundscape",
+                        serde_json::Value::Bool(true),
+                    ),
+                ),
+            ])),
+        ),
         // --- Chaos Engine ---
         make_tool(
             "inject_chaos",
@@ -2196,7 +2230,7 @@ mod tests {
     #[test]
     fn test_tool_definitions_returns_expected_count() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 83);
+        assert_eq!(tools.len(), 84);
     }
 
     #[test]

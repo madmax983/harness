@@ -743,6 +743,12 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 let resp = self.handle_dream_simulation(req).await?;
                 Ok(serde_json::to_value(resp).unwrap())
             }
+            "generate_hive_music" => {
+                let req: tools::GenerateHiveMusicRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_generate_hive_music(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
             "inject_chaos" => {
                 let req: tools::InjectChaosRequest = serde_json::from_value(arguments)
                     .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
@@ -831,6 +837,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
             "get_learning_status",
             "trigger_learning_cycle",
             "dream_simulation",
+            "generate_hive_music",
             "inject_chaos",
         ]
     }
@@ -7698,6 +7705,15 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
         }
     }
 
+    async fn handle_generate_hive_music(
+        &self,
+        req: tools::GenerateHiveMusicRequest,
+    ) -> HandlerResult<tools::GenerateHiveMusicResponse> {
+        crate::experimental::sonification::generate_music(&self.state, req)
+            .await
+            .map_err(|e: anyhow::Error| HandlerError::InternalError(e.to_string()))
+    }
+
     async fn handle_dream_simulation(
         &self,
         req: tools::DreamSimulationRequest,
@@ -8149,8 +8165,9 @@ mod tests {
         assert!(names.contains(&"collect_agent_artifacts"));
         assert!(names.contains(&"refresh_session"));
         assert!(names.contains(&"dream_simulation"));
+        assert!(names.contains(&"generate_hive_music"));
         assert!(names.contains(&"inject_chaos"));
-        assert_eq!(names.len(), 73);
+        assert_eq!(names.len(), 74);
     }
 
     #[tokio::test]

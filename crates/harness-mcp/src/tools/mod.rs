@@ -53,3 +53,5 @@ pub use temporal_narrative::*;
 pub use temporal_path::*;
 pub use temporal_patterns::*;
 pub use temporal_snapshots::*;
+pub mod sonification;
+pub use sonification::*;

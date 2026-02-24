@@ -1101,7 +1101,9 @@ name = "harness-mcp"
 version = "0.1.0"
 dependencies = [
  "aletheiadb",
+ "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "harness-orchestrator",
  "harness-persistence",
