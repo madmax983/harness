@@ -76,6 +76,11 @@ impl TaskPattern {
     pub fn created_at(&self) -> DateTime<Utc> {
         self.created_at
     }
+
+    /// Get the session ID.
+    pub fn session_id(&self) -> Option<SessionId> {
+        self.session_id
+    }
 }
 
 /// A pattern with its similarity score, returned from `find_similar`.
