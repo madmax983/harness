@@ -749,6 +749,12 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 let resp = self.handle_inject_chaos(req).await?;
                 Ok(serde_json::to_value(resp).unwrap())
             }
+            "check_safety" => {
+                let req: tools::CheckSafetyRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_check_safety(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
 
             _ => Err(HandlerError::UnknownTool(name.to_string())),
         }
@@ -832,6 +838,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
             "trigger_learning_cycle",
             "dream_simulation",
             "inject_chaos",
+            "check_safety",
         ]
     }
 
@@ -7795,7 +7802,33 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
         engine
             .inject(req)
             .await
-            .map_err(|e| HandlerError::InternalError(e))
+            .map_err(HandlerError::InternalError)
+    }
+
+    async fn handle_check_safety(
+        &self,
+        req: tools::CheckSafetyRequest,
+    ) -> HandlerResult<tools::CheckSafetyResponse> {
+        let bank = self.state.reasoning_bank();
+        let safety_net = harness_sona::experimental::safety_net::SafetyNet::new();
+        let safety_net = if let Some(t) = req.threshold {
+            safety_net.with_threshold(t)
+        } else {
+            safety_net
+        };
+
+        let assessment = safety_net
+            .assess_risk(&bank, &req.action)
+            .await
+            .map_err(|e| HandlerError::InternalError(e.to_string()))?;
+
+        Ok(tools::CheckSafetyResponse {
+            risk_level: assessment.risk_level,
+            warning: assessment.warning,
+            similar_failures: assessment.similar_failures,
+            similar_successes: assessment.similar_successes,
+            confidence: assessment.confidence,
+        })
     }
 }
 
@@ -8150,7 +8183,8 @@ mod tests {
         assert!(names.contains(&"refresh_session"));
         assert!(names.contains(&"dream_simulation"));
         assert!(names.contains(&"inject_chaos"));
-        assert_eq!(names.len(), 73);
+        assert!(names.contains(&"check_safety"));
+        assert_eq!(names.len(), 74);
     }
 
     #[tokio::test]

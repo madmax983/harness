@@ -2187,6 +2187,26 @@ pub fn tool_definitions() -> Vec<Tool> {
                 ),
             ])),
         ),
+        // --- Safety Net ---
+        make_tool(
+            "check_safety",
+            "Proactively check if a planned action matches known failure patterns from the hive's collective experience.",
+            vec!["action"],
+            with_agent_id(HashMap::from([
+                (
+                    "action".into(),
+                    prop("string", "Description of the action to check"),
+                ),
+                (
+                    "threshold".into(),
+                    prop_with_default(
+                        "number",
+                        "Minimum similarity score (0.0-1.0) to trigger a warning",
+                        serde_json::Value::Number(serde_json::Number::from_f64(0.1).unwrap()),
+                    ),
+                ),
+            ])),
+        ),
     ]
 }
 
@@ -2199,7 +2219,7 @@ mod tests {
     #[test]
     fn test_tool_definitions_returns_expected_count() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 83);
+        assert_eq!(tools.len(), 84);
     }
 
     #[test]
