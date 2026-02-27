@@ -3,7 +3,7 @@
 //! Compares sequential vs parallel performance across different delta set sizes.
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use harness_sona::{AggregationStrategy, BaseLoRA, InternalBaseLoRAConfig, LoRADelta};
+use harness_sona::{AggregationStrategy, BaseLoRA, BaseLoRAConfig, LoRADelta};
 use std::time::Duration;
 
 /// Generate synthetic LoRA deltas for benchmarking.
@@ -26,12 +26,12 @@ fn bench_federated_average(c: &mut Criterion) {
     let mut group = c.benchmark_group("federated_average");
     group.measurement_time(Duration::from_secs(10));
 
-    let config = InternalBaseLoRAConfig {
+    let config = BaseLoRAConfig {
         rank: 128,
         alpha: 1.0,
         aggregation_strategy: AggregationStrategy::FederatedAverage,
-        min_contributions: 1,
-        staleness_threshold: Duration::from_secs(3600),
+        min_participants: 1,
+        staleness_threshold_secs: 3600,
     };
 
     // Test different delta set sizes
@@ -60,12 +60,12 @@ fn bench_weighted_average(c: &mut Criterion) {
     let mut group = c.benchmark_group("weighted_average");
     group.measurement_time(Duration::from_secs(10));
 
-    let config = InternalBaseLoRAConfig {
+    let config = BaseLoRAConfig {
         rank: 128,
         alpha: 1.0,
         aggregation_strategy: AggregationStrategy::WeightedAverage,
-        min_contributions: 1,
-        staleness_threshold: Duration::from_secs(3600),
+        min_participants: 1,
+        staleness_threshold_secs: 3600,
     };
 
     // Test different delta set sizes
@@ -94,12 +94,12 @@ fn bench_varying_dimensions(c: &mut Criterion) {
     let mut group = c.benchmark_group("varying_dimensions");
     group.measurement_time(Duration::from_secs(10));
 
-    let config = InternalBaseLoRAConfig {
+    let config = BaseLoRAConfig {
         rank: 128,
         alpha: 1.0,
         aggregation_strategy: AggregationStrategy::FederatedAverage,
-        min_contributions: 1,
-        staleness_threshold: Duration::from_secs(3600),
+        min_participants: 1,
+        staleness_threshold_secs: 3600,
     };
 
     let delta_count = 100; // Large enough to trigger parallelization
