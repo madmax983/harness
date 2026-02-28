@@ -113,10 +113,10 @@ async fn test_fisher_information_computation() {
     let mut gradients: Vec<Vec<f32>> = Vec::new();
     for sample_idx in 0..100 {
         let mut grad = vec![0.0f32; dim];
-        for d in 0..dim {
+        for (d, g) in grad.iter_mut().enumerate().take(dim) {
             // Gradient magnitude decreases with dimension index
             let magnitude = 1.0 / (1.0 + d as f32);
-            grad[d] = magnitude * ((sample_idx as f32 * 0.1).sin());
+            *g = magnitude * ((sample_idx as f32 * 0.1).sin());
         }
         gradients.push(grad);
     }
@@ -409,10 +409,9 @@ async fn test_multi_task_temporal_decay() {
 
     // Running Fisher ~ gamma * F_old + F_new
     // So running[i] should be approximately gamma * old_fisher[i] + new_fisher[i]
-    for d in 0..dim {
+    for (d, &actual) in running.iter().enumerate().take(dim) {
         let expected =
             gamma * old_snapshot.fisher_diagonal()[d] + new_snapshot.fisher_diagonal()[d];
-        let actual = running[d];
         let tolerance = expected.abs() * 0.1 + 1e-6;
         assert!(
             (actual - expected).abs() < tolerance,
@@ -500,7 +499,7 @@ async fn test_forgetting_penalty_gradient() {
     // lambda = 2.0, deviation = 1.0 for all dims
     // Expected: [2.0*1.0*1.0, 2.0*2.0*1.0, 2.0*0.5*1.0, 2.0*0.0*1.0]
     //         = [2.0, 4.0, 1.0, 0.0]
-    let expected = vec![2.0, 4.0, 1.0, 0.0];
+    let expected = [2.0, 4.0, 1.0, 0.0];
     for i in 0..dim {
         assert!(
             (penalty_gradient[i] - expected[i]).abs() < 1e-4,
@@ -554,8 +553,8 @@ async fn test_weight_importance_ranking() {
     let mut gradients = Vec::new();
     for s in 0..50 {
         let mut grad = vec![0.0f32; dim];
-        for d in 0..dim {
-            grad[d] = (10.0 / (1.0 + d as f32)) * ((s as f32 * 0.1).sin());
+        for (d, g) in grad.iter_mut().enumerate().take(dim) {
+            *g = (10.0 / (1.0 + d as f32)) * ((s as f32 * 0.1).sin());
         }
         gradients.push(grad);
     }

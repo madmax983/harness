@@ -45,15 +45,18 @@ impl SagaStepCriteria {
         if event.trigger_kind() != self.trigger_kind {
             return false;
         }
-        if let Some(req_success) = self.success_required {
-            if event.success() != req_success {
-                return false;
-            }
+        if let Some(req_success) = self.success_required
+            && event.success() != req_success
+        {
+            return false;
         }
-        if let Some(ref keyword) = self.summary_contains {
-            if !event.summary().to_lowercase().contains(&keyword.to_lowercase()) {
-                return false;
-            }
+        if let Some(ref keyword) = self.summary_contains
+            && !event
+                .summary()
+                .to_lowercase()
+                .contains(&keyword.to_lowercase())
+        {
+            return false;
         }
         true
     }
@@ -121,18 +124,18 @@ impl SagaDetector {
         for event in events {
             for (def_idx, definition) in self.definitions.iter().enumerate() {
                 // 1. Check if this event starts a new instance of this saga
-                if let Some(first_step) = definition.steps.first() {
-                    if first_step.matches(event) {
-                        if definition.steps.len() == 1 {
-                            // Immediate match for single-step saga
-                            matches.push(SagaMatch {
-                                saga_name: definition.name.clone(),
-                                events: vec![event.clone()],
-                            });
-                        } else {
-                            // Start tracking a new attempt
-                            active_states[def_idx].push((1, vec![event.clone()]));
-                        }
+                if let Some(first_step) = definition.steps.first()
+                    && first_step.matches(event)
+                {
+                    if definition.steps.len() == 1 {
+                        // Immediate match for single-step saga
+                        matches.push(SagaMatch {
+                            saga_name: definition.name.clone(),
+                            events: vec![event.clone()],
+                        });
+                    } else {
+                        // Start tracking a new attempt
+                        active_states[def_idx].push((1, vec![event.clone()]));
                     }
                 }
 
@@ -182,8 +185,8 @@ impl Default for SagaDetector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use harness_persistence::{AgentId, TrajectoryEventId};
     use chrono::Utc;
+    use harness_persistence::{AgentId, TrajectoryEventId};
 
     // Helper to create a dummy event
     fn make_event(kind: TriggerKind, summary: &str, success: bool) -> TrajectoryEvent {
@@ -240,7 +243,7 @@ mod tests {
             vec![
                 SagaStepCriteria::new(TriggerKind::TaskComplete).with_summary("Design"),
                 SagaStepCriteria::new(TriggerKind::TaskComplete).with_summary("Code"),
-            ]
+            ],
         );
         detector.register_saga(def);
 
@@ -265,7 +268,7 @@ mod tests {
             vec![
                 SagaStepCriteria::new(TriggerKind::KnowledgeShare),
                 SagaStepCriteria::new(TriggerKind::ProjectClose),
-            ]
+            ],
         );
         detector.register_saga(def);
 
@@ -278,8 +281,14 @@ mod tests {
 
         let matches = detector.detect(&events);
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].events[0].trigger_kind(), TriggerKind::KnowledgeShare);
-        assert_eq!(matches[0].events[1].trigger_kind(), TriggerKind::ProjectClose);
+        assert_eq!(
+            matches[0].events[0].trigger_kind(),
+            TriggerKind::KnowledgeShare
+        );
+        assert_eq!(
+            matches[0].events[1].trigger_kind(),
+            TriggerKind::ProjectClose
+        );
     }
 
     #[test]
@@ -292,7 +301,7 @@ mod tests {
             vec![
                 SagaStepCriteria::new(TriggerKind::TaskComplete).with_summary("A"),
                 SagaStepCriteria::new(TriggerKind::TaskComplete).with_summary("B"),
-            ]
+            ],
         );
         detector.register_saga(def);
 
