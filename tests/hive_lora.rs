@@ -526,9 +526,7 @@ async fn test_new_agent_benefits() {
         "Inherited weights should match BaseLoRA rank"
     );
     assert!(
-        inherited
-            .domains_covered
-            .contains("database_design"),
+        inherited.domains_covered.contains("database_design"),
         "New agent should know about existing domains"
     );
     assert!(
