@@ -755,6 +755,12 @@ impl<R: Repository + 'static> HiveHandler<R> {
                 let resp = self.handle_check_safety(req).await?;
                 Ok(serde_json::to_value(resp).unwrap())
             }
+            "distill_trajectories" => {
+                let req: tools::DistillTrajectoriesRequest = serde_json::from_value(arguments)
+                    .map_err(|e| HandlerError::InvalidArgs(e.to_string()))?;
+                let resp = self.handle_distill_trajectories(req).await?;
+                Ok(serde_json::to_value(resp).unwrap())
+            }
 
             _ => Err(HandlerError::UnknownTool(name.to_string())),
         }
@@ -839,6 +845,7 @@ impl<R: Repository + 'static> HiveHandler<R> {
             "dream_simulation",
             "inject_chaos",
             "check_safety",
+            "distill_trajectories",
         ]
     }
 
@@ -7830,6 +7837,36 @@ Follow strict RED/GREEN/REFACTOR with explicit command evidence and worktree iso
             confidence: assessment.confidence,
         })
     }
+
+    async fn handle_distill_trajectories(
+        &self,
+        req: tools::DistillTrajectoriesRequest,
+    ) -> HandlerResult<tools::DistillTrajectoriesResponse> {
+        use harness_sona::experimental::distiller::{ChatFormatDistiller, TrajectoryDistiller};
+
+        let recorder = self.state.trajectory_recorder();
+        let limit = req.limit.unwrap_or(100);
+
+        let events = recorder
+            .query(harness_persistence::TrajectoryQuery::new().with_limit(limit))
+            .await
+            .unwrap_or_default();
+
+        let distiller = ChatFormatDistiller::default();
+        let mut output = Vec::new();
+
+        distiller
+            .distill(&events, &mut output)
+            .map_err(|e| HandlerError::InternalError(format!("Distillation failed: {e}")))?;
+
+        let dataset = String::from_utf8_lossy(&output).into_owned();
+        let distilled_count = dataset.lines().count();
+
+        Ok(tools::DistillTrajectoriesResponse {
+            dataset,
+            distilled_count,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -8184,7 +8221,8 @@ mod tests {
         assert!(names.contains(&"dream_simulation"));
         assert!(names.contains(&"inject_chaos"));
         assert!(names.contains(&"check_safety"));
-        assert_eq!(names.len(), 74);
+        assert!(names.contains(&"distill_trajectories"));
+        assert_eq!(names.len(), 75);
     }
 
     #[tokio::test]

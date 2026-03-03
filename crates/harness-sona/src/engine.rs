@@ -227,7 +227,6 @@ mod tests {
     #[test]
     fn test_extract_gradients_from_trajectory() {
         use harness_persistence::TrajectoryStep;
-        use serde_json::json;
 
         let config = EwcConfig {
             lambda: 0.5,

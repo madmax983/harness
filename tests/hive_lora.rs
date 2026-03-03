@@ -136,7 +136,7 @@ async fn test_base_lora_aggregates_learning() {
     assert_eq!(stats.total_contributors, 3, "Should track 3 contributors");
     assert_eq!(stats.total_deltas, 3, "Should have 3 deltas");
     assert_eq!(stats.domains.len(), 1, "Should have 1 domain");
-    assert!(stats.domains.contains(&"authentication".to_string()));
+    assert!(stats.domains.contains("authentication"));
 }
 
 /// BaseLoRA should support multiple aggregation strategies.
@@ -526,9 +526,7 @@ async fn test_new_agent_benefits() {
         "Inherited weights should match BaseLoRA rank"
     );
     assert!(
-        inherited
-            .domains_covered
-            .contains(&"database_design".to_string()),
+        inherited.domains_covered.contains("database_design"),
         "New agent should know about existing domains"
     );
     assert!(
@@ -798,8 +796,8 @@ async fn test_domain_specific_aggregation() {
     // List known domains
     let domains = base_lora.known_domains().await;
     assert_eq!(domains.len(), 2);
-    assert!(domains.contains(&"authentication".to_string()));
-    assert!(domains.contains(&"database".to_string()));
+    assert!(domains.contains("authentication"));
+    assert!(domains.contains("database"));
 }
 
 /// Contribution weights should reflect agent reliability and experience.

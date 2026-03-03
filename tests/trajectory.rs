@@ -567,7 +567,7 @@ async fn test_trajectory_step_payloads() {
         payload.get("task_id").unwrap().as_str().unwrap(),
         task_id.as_uuid().to_string()
     );
-    assert_eq!(payload.get("success").unwrap().as_bool().unwrap(), true);
+    assert!(payload.get("success").unwrap().as_bool().unwrap());
     assert!(
         payload
             .get("summary")
@@ -706,14 +706,13 @@ async fn test_failure_trajectory() {
         .find(|s| s.kind() == "task_outcome")
         .expect("Failed task should still have task_outcome step");
 
-    assert_eq!(
-        task_step
+    assert!(
+        !task_step
             .payload()
             .get("success")
             .unwrap()
             .as_bool()
-            .unwrap(),
-        false
+            .unwrap()
     );
 
     // Query only failed events

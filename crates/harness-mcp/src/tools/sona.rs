@@ -114,6 +114,25 @@ pub struct CrossAgentPattern {
     pub confidence: f32,
 }
 
+/// Request payload for distilling trajectories.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistillTrajectoriesRequest {
+    /// Optional limit on the number of trajectory events to consider.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Optional agent ID.
+    pub _agent_id: Option<String>,
+}
+
+/// Response payload for distilling trajectories.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistillTrajectoriesResponse {
+    /// The distilled dataset as a string (JSONL format).
+    pub dataset: String,
+    /// How many events were successfully distilled.
+    pub distilled_count: usize,
+}
+
 /// Response from trigger_learning_cycle.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TriggerLearningCycleResponse {

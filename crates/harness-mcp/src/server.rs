@@ -2207,6 +2207,20 @@ pub fn tool_definitions() -> Vec<Tool> {
                 ),
             ])),
         ),
+        // --- Distiller ---
+        make_tool(
+            "distill_trajectories",
+            "Export hive mind trajectories into a JSONL format suitable for local LLM fine-tuning.",
+            vec![],
+            with_agent_id(HashMap::from([(
+                "limit".into(),
+                prop_with_default(
+                    "integer",
+                    "Optional limit on the number of trajectory events to process (default: 100)",
+                    serde_json::Value::Number(100.into()),
+                ),
+            )])),
+        ),
     ]
 }
 
@@ -2219,7 +2233,7 @@ mod tests {
     #[test]
     fn test_tool_definitions_returns_expected_count() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 84);
+        assert_eq!(tools.len(), 85);
     }
 
     #[test]

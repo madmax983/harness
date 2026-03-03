@@ -303,7 +303,6 @@ impl BaseLoRA {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     /// Helper to create a config with a specific strategy.
     fn test_config(strategy: AggregationStrategy) -> BaseLoRAConfig {
