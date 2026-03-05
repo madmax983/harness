@@ -1,5 +1,6 @@
 pub mod decay;
 pub mod dream_team;
+pub mod mentorship;
 pub mod momentum;
 pub mod oracle;
 pub mod safety_net;
