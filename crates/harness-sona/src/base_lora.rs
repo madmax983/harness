@@ -303,6 +303,7 @@ impl BaseLoRA {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
     use std::time::Duration;
 
     /// Helper to create a config with a specific strategy.
