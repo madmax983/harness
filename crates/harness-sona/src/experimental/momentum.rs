@@ -46,6 +46,11 @@ impl MomentumTracker {
     pub fn is_on_fire(&self, agent_id: AgentId) -> bool {
         self.agent_momentum(agent_id) >= 2.0
     }
+
+    /// Retrieve an iterator over all agents that have a momentum score.
+    pub fn agents(&self) -> impl Iterator<Item = AgentId> + '_ {
+        self.scores.keys().copied()
+    }
 }
 
 #[cfg(test)]
