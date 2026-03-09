@@ -42,6 +42,11 @@ impl MomentumTracker {
         self.scores.get(&agent_id).copied().unwrap_or(0.0)
     }
 
+    /// Retrieve an iterator over all tracked agents.
+    pub fn agents(&self) -> impl Iterator<Item = AgentId> + '_ {
+        self.scores.keys().copied()
+    }
+
     /// Check if an agent is currently "On Fire" (momentum above a threshold).
     pub fn is_on_fire(&self, agent_id: AgentId) -> bool {
         self.agent_momentum(agent_id) >= 2.0
