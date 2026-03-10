@@ -1,3 +1,4 @@
+pub mod archetypes;
 pub mod decay;
 pub mod dream_team;
 pub mod momentum;
